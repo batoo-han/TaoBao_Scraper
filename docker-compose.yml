@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  taobao-bot:
+    build: .
+    container_name: taobao-scraper-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Монтируем result.txt для режима отладки (опционально)
+      - ./result.txt:/app/result.txt:ro
+    environment:
+      - TZ=Europe/Moscow
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
