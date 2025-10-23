@@ -1,13 +1,42 @@
+import asyncio
+import random
 from aiogram import Router, F
 from aiogram.types import Message, InputMediaPhoto
 from aiogram.filters import CommandStart
+from aiogram.enums import ChatAction
 
 from scraper import Scraper
+from error_handler import error_handler
 
 # Инициализация роутера для обработки сообщений
 router = Router()
 # Инициализация скрапера для получения информации о товарах
 scraper = Scraper() 
+
+
+async def send_typing_action(message: Message, stop_event: asyncio.Event):
+    """
+    Периодически отправляет индикатор "печатает" пока обрабатывается запрос.
+    
+    Args:
+        message: Сообщение пользователя
+        stop_event: Event для остановки отправки индикатора
+    """
+    while not stop_event.is_set():
+        try:
+            await message.bot.send_chat_action(
+                chat_id=message.chat.id,
+                action=ChatAction.TYPING
+            )
+            # Случайная задержка 3-5 секунд (typing action живёт 5 секунд)
+            delay = random.uniform(3, 5)
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            # Игнорируем ошибки отправки typing action
+            pass
+
 
 @router.message(CommandStart())
 async def command_start_handler(message: Message) -> None:
@@ -23,7 +52,15 @@ async def handle_product_link(message: Message) -> None:
     Обработчик сообщений, содержащих ссылки на товары Taobao/Tmall.
     Извлекает информацию о товаре, генерирует пост и отправляет его пользователю.
     """
+    # Отправляем начальное сообщение
     await message.answer("Обрабатываю вашу ссылку, пожалуйста, подождите...")
+    
+    # Создаём событие для остановки typing action
+    stop_typing = asyncio.Event()
+    
+    # Запускаем фоновую задачу для индикатора "печатает"
+    typing_task = asyncio.create_task(send_typing_action(message, stop_typing))
+    
     try:
         product_url = message.text
         # Скрапинг информации о товаре и генерация текста поста
@@ -60,10 +97,30 @@ async def handle_product_link(message: Message) -> None:
             await message.answer(post_text, parse_mode="HTML")
 
     except Exception as e:
-        # Обработка ошибок и отправка сообщения об ошибке пользователю
-        error_message = f"Произошла ошибка при обработке ссылки: {str(e)}"
-        print(f"[ERROR] {error_message}")
-        await message.answer(error_message)
+        # Профессиональная обработка ошибок
+        if error_handler:
+            # Определяем тип ошибки и контекст
+            error_type = error_handler.classify_error(e, context=f"scraping {product_url}")
+            await error_handler.handle_error(
+                error=e,
+                user_message=message,
+                context=f"Product URL: {product_url}",
+                error_type=error_type
+            )
+        else:
+            # Fallback на случай если error_handler не инициализирован
+            await message.answer(
+                "😔 Извините, произошла ошибка при обработке вашего запроса. "
+                "Пожалуйста, попробуйте повторить через несколько минут."
+            )
+    finally:
+        # Останавливаем индикатор "печатает"
+        stop_typing.set()
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
 
 @router.message()
 async def echo_message(message: Message):

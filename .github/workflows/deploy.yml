@@ -1,0 +1,112 @@
+name: Deploy - Auto Deploy to Server
+
+on:
+  workflow_run:
+    workflows: ["Docker - Build and Push"]
+    types:
+      - completed
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+jobs:
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    environment: 
+      name: ${{ github.event.inputs.environment || 'production' }}
+      url: https://t.me/your_bot_username
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Deploy to production server via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      env:
+        REGISTRY: ghcr.io
+        IMAGE_NAME: ${{ github.repository_owner }}/taobao-scraper
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: ${{ secrets.SERVER_PORT || 22 }}
+        envs: REGISTRY,IMAGE_NAME
+        script: |
+          echo "🚀 Starting deployment..."
+          
+          # Переход в директорию проекта
+          cd ${{ secrets.DEPLOY_PATH || '/opt/taobao-scraper' }}
+          
+          # Создаем резервную копию .env если существует
+          if [ -f .env ]; then
+            cp .env .env.backup
+            echo "✅ Backup .env created"
+          fi
+          
+          # Обновляем код (опционально, если нужно обновить docker-compose.yml)
+          git pull origin main || echo "⚠️ Git pull skipped"
+          
+          # Логин в GitHub Container Registry
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          
+          # Останавливаем текущий контейнер
+          docker-compose down || docker compose down
+          
+          # Получаем последний образ
+          docker pull ${REGISTRY}/${IMAGE_NAME}:latest
+          
+          # Запускаем новый контейнер
+          docker-compose up -d || docker compose up -d
+          
+          # Проверяем статус
+          sleep 5
+          docker-compose ps || docker compose ps
+          
+          # Показываем последние логи
+          docker-compose logs --tail=50 taobao-bot || docker compose logs --tail=50 taobao-bot
+          
+          # Очистка старых образов
+          docker system prune -f
+          
+          echo "✅ Deployment completed successfully!"
+    
+    - name: Verify deployment
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: ${{ secrets.SERVER_PORT || 22 }}
+        script: |
+          cd ${{ secrets.DEPLOY_PATH || '/opt/taobao-scraper' }}
+          
+          # Проверяем что контейнер запущен
+          if docker ps | grep -q taobao-scraper-bot; then
+            echo "✅ Container is running"
+            exit 0
+          else
+            echo "❌ Container is not running!"
+            docker-compose logs --tail=100 taobao-bot || docker compose logs --tail=100 taobao-bot
+            exit 1
+          fi
+    
+    - name: Notification on success
+      if: success()
+      run: |
+        echo "✅ Deployment successful to ${{ github.event.inputs.environment || 'production' }}"
+    
+    - name: Notification on failure
+      if: failure()
+      run: |
+        echo "❌ Deployment failed to ${{ github.event.inputs.environment || 'production' }}"
+

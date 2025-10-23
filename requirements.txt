@@ -1,4 +1,18 @@
-aiogram
-httpx
-pydantic-settings
-certifi
+# ==============================================================================
+# TAOBAO SCRAPER BOT - DEPENDENCIES
+# ==============================================================================
+
+# Telegram Bot Framework
+aiogram>=3.0.0  # Асинхронный фреймворк для Telegram бота
+
+# HTTP Client
+httpx>=0.24.0  # Асинхронный HTTP клиент для API запросов
+
+# Configuration Management
+pydantic-settings>=2.0.0  # Управление настройками через .env файл
+
+# SSL Certificates
+certifi  # Надёжные SSL сертификаты
+
+# Image Processing
+imagesize>=1.4.0  # Определение размеров изображений без полной загрузки

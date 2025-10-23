@@ -1,26 +1,44 @@
-# Используем официальный образ Python в качестве базового образа
+# ==============================================================================
+# TAOBAO SCRAPER BOT - DOCKERFILE
+# ==============================================================================
+# Легковесный Docker образ на базе Python 3.11
+# ==============================================================================
+
 FROM python:3.11-slim
 
-# Устанавливаем рабочую директорию внутри контейнера
+# Метаданные образа
+LABEL maintainer="your_email@example.com"
+LABEL description="Taobao/Tmall Product Scraper Telegram Bot"
+LABEL version="1.0.0"
+
+# Устанавливаем рабочую директорию
 WORKDIR /app
 
 # Устанавливаем системные зависимости
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Копируем файл зависимостей и устанавливаем их
+# Копируем requirements и устанавливаем Python зависимости
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Копируем исходный код проекта
+# Копируем исходный код
 COPY *.py ./
-COPY result.txt ./
+COPY prompt/ ./prompt/
 
-# Создаем non-root пользователя для безопасности
-RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
+# Создаём non-root пользователя для безопасности
+RUN useradd -m -u 1000 botuser && \
+    chown -R botuser:botuser /app
+
+# Переключаемся на non-root пользователя
 USER botuser
 
-# Указываем команду для запуска приложения
+# Healthcheck (опционально)
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+#   CMD python -c "import sys; sys.exit(0)"
+
+# Запускаем бота
 CMD ["python", "-u", "autoparse.py"]

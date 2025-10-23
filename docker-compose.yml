@@ -1,21 +1,49 @@
+# ==============================================================================
+# TAOBAO SCRAPER BOT - DOCKER COMPOSE
+# ==============================================================================
+# Production-ready конфигурация для Docker Compose
+# ==============================================================================
+
 version: '3.8'
 
 services:
   taobao-bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
     container_name: taobao-scraper-bot
+    
+    # Автоматический перезапуск при падении
     restart: unless-stopped
+    
+    # Загружаем переменные окружения из .env
     env_file:
       - .env
+    
+    # Монтируем volumes для персистентности данных
     volumes:
-      # Монтируем result.txt для режима отладки (опционально)
-      - ./result.txt:/app/result.txt:ro
+      # Логи ошибок (сохраняются между перезапусками)
+      - ./bot_errors.log:/app/bot_errors.log
+      - ./bot_errors.log.1:/app/bot_errors.log.1
+      - ./bot_errors.log.2:/app/bot_errors.log.2
+    
+    # Переменные окружения
     environment:
       - TZ=Europe/Moscow
-    # Логирование
+      - PYTHONUNBUFFERED=1
+    
+    # Логирование Docker контейнера
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-
+    
+    # Healthcheck (опционально)
+    # healthcheck:
+    #   test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 5s

@@ -1,0 +1,61 @@
+name: CI - Code Quality Check
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint-and-validate:
+    name: Lint and Validate Code
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install flake8 pylint black isort
+    
+    - name: Check code formatting with Black
+      run: |
+        black --check . || echo "::warning::Code formatting issues found. Run 'black .' to fix."
+      continue-on-error: true
+    
+    - name: Check imports with isort
+      run: |
+        isort --check-only . || echo "::warning::Import sorting issues found. Run 'isort .' to fix."
+      continue-on-error: true
+    
+    - name: Lint with flake8
+      run: |
+        # Критические ошибки
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Предупреждения
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Validate Python syntax
+      run: |
+        python -m py_compile autoparse.py
+        python -m py_compile bot_handler.py
+        python -m py_compile scraper.py
+        python -m py_compile tmapi.py
+        python -m py_compile yandex_gpt.py
+        python -m py_compile exchange_rate.py
+        python -m py_compile config.py
+    
+    - name: Check Docker files
+      run: |
+        docker --version
+        docker compose config
+
