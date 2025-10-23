@@ -7,7 +7,7 @@
 FROM python:3.11-slim
 
 # Метаданные образа
-LABEL maintainer="your_email@example.com"
+LABEL maintainer="batoo@ya.ru"
 LABEL description="Taobao/Tmall Product Scraper Telegram Bot"
 LABEL version="1.0.0"
 

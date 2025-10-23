@@ -21,13 +21,6 @@ services:
     env_file:
       - .env
     
-    # Монтируем volumes для персистентности данных
-    volumes:
-      # Логи ошибок (сохраняются между перезапусками)
-      - ./bot_errors.log:/app/bot_errors.log
-      - ./bot_errors.log.1:/app/bot_errors.log.1
-      - ./bot_errors.log.2:/app/bot_errors.log.2
-    
     # Переменные окружения
     environment:
       - TZ=Europe/Moscow
