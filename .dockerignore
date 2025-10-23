@@ -1,40 +1,62 @@
+# ==============================================================================
+# DOCKERIGNORE - Исключаем ненужные файлы из Docker build context
+# ==============================================================================
+
+# Git
+.git
+.gitignore
+.github
+
 # Python
-__pycache__/
-*.py[cod]
-*$py.class
+__pycache__
 *.pyc
 *.pyo
 *.pyd
-
-# Virtual environment
-.venv/
-venv/
-ENV/
-env/
-
-# Git
-.git/
-.gitignore
-.gitattributes
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.venv
+venv
+env
 
 # IDE
-.vscode/
-.idea/
+.vscode
+.idea
 *.swp
 *.swo
+*~
 
-# Documentation (not needed in container)
+# Документация (не нужна в контейнере)
 docs/
 *.md
 !README.md
+LICENSE
+CONTRIBUTING.md
 
-# Other files
-other/
+# Примеры и промпты (не нужны в production)
 prompt/
+example_post.md
+expected_llm_response.json
 
-# Tests
-test_*.py
-test_*.txt
+# Логи и временные файлы
+*.log
+*.log.*
+bot_errors.log*
+*.tmp
+*.cache
+
+# Конфигурация (передаётся через .env)
+.env
+.env.*
+!.env.example
+
+# Docker файлы
+Dockerfile
+docker-compose.yml
+.dockerignore
 
 # CI/CD
 .github/
@@ -42,6 +64,3 @@ test_*.txt
 # OS
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log

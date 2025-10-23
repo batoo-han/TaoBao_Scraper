@@ -27,7 +27,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Копируем исходный код
 COPY *.py ./
-COPY prompt/ ./prompt/
 
 # Создаём non-root пользователя для безопасности
 RUN useradd -m -u 1000 botuser && \
