@@ -740,9 +740,9 @@ class Scraper:
         # Начинаем формировать пост
         post_parts = []
         
-        # Заголовок с эмодзи (жирным шрифтом)
+        # Заголовок с эмодзи (жирным курсивом)
         title_line = f"{emoji} " if emoji else ""
-        title_line += f"<b>{title}</b>"
+        title_line += f"<i><b>{title}</b></i>"
         post_parts.append(title_line)
         post_parts.append("")
         
