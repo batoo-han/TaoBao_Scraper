@@ -217,6 +217,8 @@ CONVERT_CURRENCY=False
 
 ## 🐳 Docker
 
+> 📘 **Подробное руководство:** [UPDATE_WORKFLOW.md](docs/UPDATE_WORKFLOW.md) | **Шпаргалка:** [QUICK_COMMANDS.md](docs/QUICK_COMMANDS.md)
+
 ### Команды Docker Compose
 
 ```bash
@@ -237,7 +239,17 @@ docker-compose build --no-cache
 docker-compose up -d
 ```
 
-### Обновление кода
+### Обновление кода (быстрый способ)
+
+```bash
+cd ~/TaoBao_Scraper && \
+git pull && \
+sudo docker-compose up -d --build && \
+sudo docker-compose logs -f --tail=50
+```
+
+<details>
+<summary>📋 Пошаговое обновление</summary>
 
 ```bash
 # Остановите контейнер
@@ -247,9 +259,12 @@ docker-compose down
 git pull
 
 # Пересоберите и запустите
-docker-compose build
-docker-compose up -d
+docker-compose up -d --build
+
+# Проверьте логи
+docker-compose logs -f --tail=50
 ```
+</details>
 
 ---
 
@@ -283,6 +298,8 @@ docker-compose up -d
 
 ### 🚀 Deployment
 - [**DEPLOYMENT.md**](docs/DEPLOYMENT.md) — Развёртывание в production
+- [**UPDATE_WORKFLOW.md**](docs/UPDATE_WORKFLOW.md) — 📘 Процесс обновления на сервере (NEW!)
+- [**QUICK_COMMANDS.md**](docs/QUICK_COMMANDS.md) — ⚡ Шпаргалка по командам (NEW!)
 - [**CI_CD_SETUP.md**](docs/CI_CD_SETUP.md) — Настройка CI/CD
 - [**GITHUB_SETUP.md**](docs/GITHUB_SETUP.md) — Настройка GitHub
 
