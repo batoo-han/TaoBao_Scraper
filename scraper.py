@@ -60,7 +60,7 @@ class Scraper:
             exchange_rate=exchange_rate
         )
         
-        # Получаем уникальные изображения из sku_props (только доступные варианты)
+        # Получаем уникальные изображения из sku_props (ВСЕ варианты, независимо от stock)
         sku_images = self._get_unique_images_from_sku_props(product_data)
         
         # Получаем дополнительные изображения из item_desc
@@ -129,7 +129,7 @@ class Scraper:
     def _get_unique_images_from_sku_props(self, product_data: dict) -> list:
         """
         Извлекает уникальные URL изображений из sku_props.
-        Берет только изображения вариантов товара (цвета, модели).
+        Берет изображения ВСЕХ вариантов товара (цвета, модели) независимо от наличия на складе (stock).
         
         Args:
             product_data: Данные товара от TMAPI
