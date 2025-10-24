@@ -396,7 +396,7 @@ class Scraper:
             print(f"[Scraper] >>> Начинаем обработку: {url[:80]}...")
         
         import httpx
-        import imagesize
+        from PIL import Image
         from io import BytesIO
         
         try:
@@ -413,7 +413,7 @@ class Scraper:
             
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=browser_headers) as client:
                 # Попытка 1: Range запрос (экономия трафика)
-                headers = {'Range': 'bytes=0-4095'}
+                headers = {'Range': 'bytes=0-16383'}  # 16KB достаточно для определения размеров
                 
                 try:
                     response = await client.get(url, headers=headers)
@@ -423,71 +423,77 @@ class Scraper:
                         print(f"[Scraper] 🔍 Range запрос: HTTP {response.status_code}, размер: {len(response.content)} байт, Content-Range: {content_range}")
                     
                     if response.status_code in (200, 206):  # 200 = полный файл, 206 = часть
-                        data = BytesIO(response.content)
-                        width, height = imagesize.get(data)
-                        
-                        if width > 0 and height > 0:
-                            # Для Range запроса file_size берём из Content-Range (формат: "bytes 0-4095/150000")
-                            file_size = 0
-                            content_range = response.headers.get('Content-Range', '')
-                            if content_range:
-                                # Парсим "bytes 0-4095/150000" -> берём 150000
-                                parts = content_range.split('/')
-                                if len(parts) == 2:
-                                    try:
-                                        file_size = int(parts[1])
-                                    except ValueError:
-                                        pass
+                        try:
+                            # Используем PIL для определения размеров
+                            img = Image.open(BytesIO(response.content))
+                            width, height = img.size
                             
+                            if width > 0 and height > 0:
+                                # Для Range запроса file_size берём из Content-Range (формат: "bytes 0-16383/150000")
+                                file_size = 0
+                                content_range = response.headers.get('Content-Range', '')
+                                if content_range:
+                                    # Парсим "bytes 0-16383/150000" -> берём 150000
+                                    parts = content_range.split('/')
+                                    if len(parts) == 2:
+                                        try:
+                                            file_size = int(parts[1])
+                                        except ValueError:
+                                            pass
+                                
+                                if settings.DEBUG_MODE:
+                                    if file_size > 0:
+                                        print(f"[Scraper] ✅ Range запрос успешен: {width}x{height}, полный размер: {file_size/1024:.1f}KB")
+                                    else:
+                                        print(f"[Scraper] ✅ Range запрос успешен: {width}x{height} (размер файла неизвестен)")
+                                return {
+                                    'url': url,
+                                    'width': width,
+                                    'height': height,
+                                    'file_size': file_size
+                                }
+                        except Exception as pil_error:
                             if settings.DEBUG_MODE:
-                                if file_size > 0:
-                                    print(f"[Scraper] ✅ Range запрос успешен: {width}x{height}, полный размер: {file_size/1024:.1f}KB")
-                                else:
-                                    print(f"[Scraper] ✅ Range запрос успешен: {width}x{height} (размер файла неизвестен)")
-                            return {
-                                'url': url,
-                                'width': width,
-                                'height': height,
-                                'file_size': file_size
-                            }
-                        else:
-                            if settings.DEBUG_MODE:
-                                print(f"[Scraper] ⚠️ Range запрос: imagesize вернул {width}x{height}")
+                                print(f"[Scraper] ⚠️ Range запрос: PIL не смог открыть изображение: {type(pil_error).__name__}")
                     
                 except Exception as range_error:
                     if settings.DEBUG_MODE:
                         print(f"[Scraper] ⚠️ Range запрос не сработал: {type(range_error).__name__}: {range_error}")
                 
-                # Попытка 2: Полная загрузка (с лимитом 200KB для безопасности)
+                # Попытка 2: Полная загрузка (с лимитом 500KB для безопасности)
                 if settings.DEBUG_MODE:
                     print(f"[Scraper] 🔄 Пробуем полную загрузку...")
                 
                 response = await client.get(url)
                 
-                # Ограничение: не более 200KB
-                if len(response.content) > 200 * 1024:
+                # Ограничение: не более 500KB
+                if len(response.content) > 500 * 1024:
                     if settings.DEBUG_MODE:
-                        print(f"[Scraper] ⚠️ Изображение слишком большое: {len(response.content)} байт")
-                    # Но всё равно пробуем определить размер из первых байтов
-                    data = BytesIO(response.content[:4096])
-                else:
-                    data = BytesIO(response.content)
+                        print(f"[Scraper] ⚠️ Изображение слишком большое: {len(response.content)/1024:.1f}KB")
+                    return None
                 
-                width, height = imagesize.get(data)
-                
-                if width > 0 and height > 0:
-                    file_size = len(response.content)
+                try:
+                    # Используем PIL для определения размеров
+                    img = Image.open(BytesIO(response.content))
+                    width, height = img.size
+                    
+                    if width > 0 and height > 0:
+                        file_size = len(response.content)
+                        if settings.DEBUG_MODE:
+                            print(f"[Scraper] ✅ Полная загрузка успешна: {width}x{height}, размер: {file_size/1024:.1f}KB")
+                        return {
+                            'url': url,
+                            'width': width,
+                            'height': height,
+                            'file_size': file_size
+                        }
+                    else:
+                        if settings.DEBUG_MODE:
+                            print(f"[Scraper] ❌ PIL вернул {width}x{height}")
+                        return None
+                except Exception as pil_error:
                     if settings.DEBUG_MODE:
-                        print(f"[Scraper] ✅ Полная загрузка успешна: {width}x{height}, размер: {file_size/1024:.1f}KB")
-                    return {
-                        'url': url,
-                        'width': width,
-                        'height': height,
-                        'file_size': file_size
-                    }
-                else:
-                    if settings.DEBUG_MODE:
-                        print(f"[Scraper] ❌ imagesize вернул {width}x{height}")
+                        print(f"[Scraper] ❌ PIL не смог открыть изображение: {type(pil_error).__name__}: {pil_error}")
                     return None
                     
         except Exception as e:
