@@ -60,7 +60,7 @@ class Scraper:
             exchange_rate=exchange_rate
         )
         
-        # Получаем уникальные изображения из sku_props (ВСЕ варианты, независимо от stock)
+        # Получаем изображения из лучшего источника (сравниваем main_imgs и sku_props, берём где больше)
         sku_images = self._get_unique_images_from_sku_props(product_data)
         
         # Получаем дополнительные изображения из item_desc
@@ -128,32 +128,34 @@ class Scraper:
     
     def _get_unique_images_from_sku_props(self, product_data: dict) -> list:
         """
-        Извлекает уникальные URL изображений из sku_props.
-        Берет изображения ВСЕХ вариантов товара (цвета, модели) независимо от наличия на складе (stock).
+        Извлекает уникальные URL изображений, выбирая лучший источник.
+        Сравнивает количество изображений в main_imgs и sku_props.
+        Берет откуда больше. Если равно - берет из main_imgs.
         
         Args:
             product_data: Данные товара от TMAPI
             
         Returns:
-            list: Список уникальных URL изображений
+            list: Список уникальных URL изображений из лучшего источника
         """
-        unique_images = []
-        seen_urls = set()
+        # Получаем изображения из main_imgs
+        main_imgs = product_data.get('main_imgs', [])
+        main_imgs_count = len(main_imgs) if main_imgs else 0
         
+        # Получаем sku_props
         sku_props = product_data.get('sku_props', [])
         
         if not sku_props:
-            # Fallback на main_imgs если нет sku_props
+            # Если нет sku_props, используем main_imgs
             if settings.DEBUG_MODE:
-                print(f"[Scraper] sku_props отсутствует, используем main_imgs")
-            return product_data.get('main_imgs', [])
+                print(f"[Scraper] sku_props отсутствует, используем main_imgs ({main_imgs_count} изображений)")
+            return main_imgs
         
-        # Проходим по всем свойствам SKU
+        # Собираем уникальные изображения из sku_props
+        sku_unique_images = []
+        seen_urls = set()
+        
         for prop in sku_props:
-            prop_name = prop.get('prop_name', '')
-            
-            # Берем изображения из вариантов (обычно цвета имеют картинки)
-            # Можно взять из любого prop, но обычно цвета самые информативные
             values = prop.get('values', [])
             
             for value in values:
@@ -162,18 +164,26 @@ class Scraper:
                 # Добавляем только уникальные и непустые URL
                 if image_url and image_url not in seen_urls:
                     seen_urls.add(image_url)
-                    unique_images.append(image_url)
+                    sku_unique_images.append(image_url)
         
-        # Если не нашли изображения в sku_props, берем из main_imgs
-        if not unique_images:
+        sku_props_count = len(sku_unique_images)
+        
+        # Сравниваем количество и выбираем лучший источник
+        if sku_props_count > main_imgs_count:
+            # В sku_props больше изображений
             if settings.DEBUG_MODE:
-                print(f"[Scraper] Изображения в sku_props не найдены, используем main_imgs")
-            return product_data.get('main_imgs', [])
-        
-        if settings.DEBUG_MODE:
-            print(f"[Scraper] Извлечено {len(unique_images)} уникальных изображений из sku_props")
-        
-        return unique_images
+                print(f"[Scraper] sku_props: {sku_props_count} изображений > main_imgs: {main_imgs_count} → используем sku_props")
+            return sku_unique_images
+        elif main_imgs_count > sku_props_count:
+            # В main_imgs больше изображений
+            if settings.DEBUG_MODE:
+                print(f"[Scraper] main_imgs: {main_imgs_count} изображений > sku_props: {sku_props_count} → используем main_imgs")
+            return main_imgs
+        else:
+            # Равное количество - приоритет main_imgs
+            if settings.DEBUG_MODE:
+                print(f"[Scraper] main_imgs: {main_imgs_count} = sku_props: {sku_props_count} → используем main_imgs (приоритет)")
+            return main_imgs if main_imgs else sku_unique_images
     
     async def _get_filtered_detail_images(self, item_id: int) -> list:
         """
