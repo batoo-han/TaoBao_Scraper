@@ -823,20 +823,20 @@ class Scraper:
                 
                 if isinstance(value, list):
                     # Если значение - список (например, цвета)
-                    post_parts.append(f"<b>{key}:</b>")
+                    post_parts.append(f"<i><b>{key}:</b></i>")
                     for item in value:
-                        post_parts.append(f"  • {item}")
+                        post_parts.append(f"<i>  • {item}</i>")
                     post_parts.append("")
                 else:
                     # Если значение - строка
-                    post_parts.append(f"<b>{key}:</b> {value}")
+                    post_parts.append(f"<i><b>{key}:</b> {value}</i>")
         
         # Дополнительная информация (только если есть)
         if additional_info:
             for key, value in additional_info.items():
                 # Пропускаем пустые значения
                 if value and str(value).strip():
-                    post_parts.append(f"<b>{key}:</b> {value}")
+                    post_parts.append(f"<i><b>{key}:</b> {value}</i>")
             
             # Добавляем пустую строку только если были доп. данные
             if any(v and str(v).strip() for v in additional_info.values()):
@@ -847,26 +847,26 @@ class Scraper:
             if not post_parts[-1] == "":
                 post_parts.append("")
         
-        # Цена с эмодзи (жирным)
-        price_text = f"💰 <b>Цена:</b> {price} юаней"
+        # Цена с эмодзи (курсивом)
+        price_text = f"<i>💰 <b>Цена:</b> {price} юаней"
         if exchange_rate and settings.CONVERT_CURRENCY:
             try:
                 rub_price = float(price) * exchange_rate
                 price_text += f" (~{rub_price:.2f} ₽)"
             except (ValueError, TypeError):
                 pass
-        price_text += " + доставка"
+        price_text += " + доставка</i>"
         post_parts.append(price_text)
         post_parts.append("")
         
-        # Призыв к действию
-        post_parts.append("📝 Для заказа пишите @annabbox или в комментариях 🛍️")
+        # Призыв к действию (курсивом)
+        post_parts.append("<i>📝 Для заказа пишите @annabbox или в комментариях 🛍️</i>")
         post_parts.append("")
         
-        # Хэштеги
+        # Хэштеги (курсивом)
         if hashtags:
             hashtag_text = " ".join([f"#{tag}" for tag in hashtags])
-            post_parts.append(hashtag_text)
+            post_parts.append(f"<i>{hashtag_text}</i>")
             post_parts.append("")
         
         # Ссылка на товар
