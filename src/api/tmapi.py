@@ -3,8 +3,8 @@ import json
 import logging
 import asyncio
 import time
-from config import settings
-from url_parser import URLParser, Platform
+from src.core.config import settings
+from src.utils.url_parser import URLParser, Platform
 import certifi
 import ssl
 

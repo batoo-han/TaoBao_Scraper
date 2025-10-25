@@ -1,6 +1,6 @@
 import httpx
 import json
-from config import settings
+from src.core.config import settings
 
 class YandexGPTClient:
     """

@@ -11,7 +11,7 @@ from logging.handlers import RotatingFileHandler
 from aiogram import Bot
 from aiogram.types import Message
 
-from config import settings
+from src.core.config import settings
 
 # Настройка логирования с ротацией
 # Максимум 100 МБ на файл, храним 3 файла (итого ~300 МБ / ~3 месяца)

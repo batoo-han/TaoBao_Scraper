@@ -1,5 +1,5 @@
 import httpx
-from config import settings
+from src.core.config import settings
 import datetime
 
 class ExchangeRateClient:

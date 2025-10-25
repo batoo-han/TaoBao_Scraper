@@ -1,8 +1,8 @@
-from tmapi import TmapiClient
-from yandex_gpt import YandexGPTClient
-from exchange_rate import ExchangeRateClient
-from yandex_translate import YandexTranslateClient
-from config import settings
+from src.api.tmapi import TmapiClient
+from src.api.yandex_gpt import YandexGPTClient
+from src.api.exchange_rate import ExchangeRateClient
+from src.api.yandex_translate import YandexTranslateClient
+from src.core.config import settings
 
 class Scraper:
     """

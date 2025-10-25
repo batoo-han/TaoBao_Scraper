@@ -5,8 +5,8 @@ from aiogram.types import Message, InputMediaPhoto
 from aiogram.filters import CommandStart
 from aiogram.enums import ChatAction
 
-from scraper import Scraper
-from error_handler import error_handler
+from src.core.scraper import Scraper
+from src.bot.error_handler import error_handler
 
 # Инициализация роутера для обработки сообщений
 router = Router()

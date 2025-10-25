@@ -14,8 +14,9 @@ License: MIT
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
-from config import settings
-from error_handler import init_error_handler
+from src.core.config import settings
+from src.bot.error_handler import init_error_handler
+from src.bot.handlers import router
 
 # Конфигурация базового логирования (детальное логирование в error_handler.py)
 logging.basicConfig(level=logging.INFO)
@@ -46,9 +47,8 @@ async def main():
     init_error_handler(bot, admin_chat_id)
     logging.info(f"Error handler initialized. Admin notifications: {'enabled' if admin_chat_id else 'disabled'}")
     
-    # Импорт и включение роутера обработчиков сообщений
-    from bot_handler import router as bot_router
-    dp.include_router(bot_router)
+    # Включение роутера обработчиков сообщений
+    dp.include_router(router)
 
     # Удаление вебхуков (если были) и запуск поллинга для получения обновлений
     await bot.delete_webhook(drop_pending_updates=True)
