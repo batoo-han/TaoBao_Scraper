@@ -1,7 +1,10 @@
 import httpx
 import json
 import logging
+import asyncio
+import time
 from config import settings
+from url_parser import URLParser, Platform
 import certifi
 import ssl
 
@@ -10,16 +13,32 @@ logger = logging.getLogger(__name__)
 class TmapiClient:
     """
     Клиент для взаимодействия с API tmapi.top.
-    Отвечает за получение информации о товарах по URL.
+    Поддерживает Taobao, Tmall и Pinduoduo.
+    Автоматически определяет платформу по URL.
+    Реализует rate limiting для контроля частоты запросов.
     В MOCK режиме читает данные из файлов вместо реальных API запросов.
     В DEBUG режиме выводит подробные логи.
     """
     def __init__(self):
-        self.api_url = "http://api.tmapi.top/taobao/item_detail_by_url"  # URL API для получения данных о товаре
-        self.item_desc_api_url = "http://api.tmapi.top/taobao/item_desc"  # URL API для получения описания товара
-        self.api_token = settings.TMAPI_TOKEN  # API токен, загружаемый из настроек
-        self.mock_mode = settings.MOCK_MODE  # Mock режим - использовать файлы вместо API
-        self.debug_mode = settings.DEBUG_MODE  # Debug режим - показывать подробные логи
+        # URL API для Taobao/Tmall
+        self.api_url = "http://api.tmapi.top/taobao/item_detail_by_url"
+        self.item_desc_api_url = "http://api.tmapi.top/taobao/item_desc"
+        
+        # URL API для Pinduoduo
+        self.pinduoduo_api_url = "http://api.tmapi.top/pdd/item_detail"
+        
+        # API токены
+        self.api_token = settings.TMAPI_TOKEN  # Токен для Taobao/Tmall
+        self.pinduoduo_token = settings.TMAPI_PINDUODUO_TOKEN  # Токен для Pinduoduo
+        
+        # Настройки режимов
+        self.mock_mode = settings.MOCK_MODE
+        self.debug_mode = settings.DEBUG_MODE
+        
+        # Rate limiting (количество запросов в секунду)
+        self.rate_limit = settings.TMAPI_RATE_LIMIT
+        self.last_request_time = 0
+        self.request_lock = asyncio.Lock()  # Для синхронизации запросов
 
     async def get_product_info(self, url: str):
         """
@@ -140,3 +159,145 @@ class TmapiClient:
                         print(f"[TMAPI] Ключи в data: {data_keys}")
                 
                 return result
+    
+    async def _apply_rate_limit(self):
+        """
+        Применяет ограничение частоты запросов (rate limiting).
+        Гарантирует, что запросы не превышают установленный лимит.
+        """
+        async with self.request_lock:
+            current_time = time.time()
+            time_since_last_request = current_time - self.last_request_time
+            
+            # Минимальный интервал между запросами (в секундах)
+            min_interval = 1.0 / self.rate_limit
+            
+            # Если прошло меньше минимального интервала - ждём
+            if time_since_last_request < min_interval:
+                sleep_time = min_interval - time_since_last_request
+                if self.debug_mode:
+                    print(f"[TMAPI] ⏱️  Rate limiting: ждём {sleep_time:.3f} сек")
+                await asyncio.sleep(sleep_time)
+            
+            # Обновляем время последнего запроса
+            self.last_request_time = time.time()
+    
+    async def get_pinduoduo_product(self, url: str):
+        """
+        Получает информацию о товаре с Pinduoduo через TMAPI.
+        Автоматически извлекает item_id из URL.
+        
+        Args:
+            url (str): URL товара с Pinduoduo
+            
+        Returns:
+            dict: Словарь с информацией о товаре
+            
+        Raises:
+            ValueError: Если не удалось извлечь item_id из URL
+            httpx.HTTPStatusError: Если запрос завершился с ошибкой
+        """
+        # Извлекаем item_id из URL
+        platform, item_id = URLParser.parse_url(url)
+        
+        if not item_id:
+            error_msg = f"Не удалось извлечь item_id из URL Pinduoduo: {url}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        if self.mock_mode:
+            # Mock режим: возвращаем тестовые данные (можно добавить отдельный файл)
+            logger.info(f"[MOCK MODE] Reading Pinduoduo product info for item_id: {item_id}")
+            if self.debug_mode:
+                print(f"[TMAPI] 📁 MOCK MODE - Pinduoduo item_id={item_id}")
+            # Пока возвращаем заглушку (можно добавить result_pdd.txt)
+            return {
+                "code": 200,
+                "msg": "success",
+                "data": {
+                    "item_id": int(item_id),
+                    "title": "[MOCK] Pinduoduo товар",
+                    "price": 100.0
+                }
+            }
+        else:
+            logger.info(f"Fetching Pinduoduo product from TMAPI for item_id: {item_id}")
+            
+            # Параметры запроса
+            querystring = {
+                "apiToken": self.pinduoduo_token,
+                "item_id": item_id
+            }
+            
+            if self.debug_mode:
+                print(f"[TMAPI] GET {self.pinduoduo_api_url}")
+                print(f"[TMAPI] Параметры: item_id={item_id}")
+            
+            # Настраиваем SSL проверку
+            if settings.DISABLE_SSL_VERIFY:
+                logger.warning("SSL verification is DISABLED. This is not recommended for production!")
+                verify_ssl = False
+            else:
+                verify_ssl = ssl.create_default_context(cafile=certifi.where())
+            
+            async with httpx.AsyncClient(verify=verify_ssl) as client:
+                # GET запрос для получения данных Pinduoduo
+                response = await client.get(self.pinduoduo_api_url, params=querystring)
+                
+                if self.debug_mode:
+                    print(f"[TMAPI] Статус ответа: {response.status_code}")
+                    print(f"[TMAPI] Первые 500 символов ответа: {response.text[:500]}")
+                
+                response.raise_for_status()
+                logger.debug(f"TMAPI Pinduoduo response status: {response.status_code}")
+                
+                result = response.json()
+                
+                if self.debug_mode:
+                    print(f"[TMAPI] JSON ответ: code={result.get('code')}, msg={result.get('msg')}")
+                    if result.get('data'):
+                        data_keys = list(result.get('data', {}).keys())
+                        print(f"[TMAPI] Ключи в data: {data_keys}")
+                
+                return result
+    
+    async def get_product_info_auto(self, url: str):
+        """
+        Универсальный метод для получения информации о товаре.
+        Автоматически определяет платформу (Taobao/Tmall/Pinduoduo) и вызывает нужный API.
+        
+        Args:
+            url (str): URL товара с любой поддерживаемой платформы
+            
+        Returns:
+            dict: Словарь с информацией о товаре и платформой
+            
+        Raises:
+            ValueError: Если платформа не поддерживается
+        """
+        # Определяем платформу
+        platform, item_id = URLParser.parse_url(url)
+        
+        if self.debug_mode:
+            print(f"[TMAPI] 🔍 Определена платформа: {platform}")
+            if item_id:
+                print(f"[TMAPI] 🆔 Извлечён item_id: {item_id}")
+        
+        # Применяем rate limiting для всех запросов
+        await self._apply_rate_limit()
+        
+        # Выбираем нужный метод API
+        if platform == Platform.PINDUODUO:
+            result = await self.get_pinduoduo_product(url)
+            result['_platform'] = Platform.PINDUODUO  # Добавляем метку платформы
+            return result
+        
+        elif platform in [Platform.TAOBAO, Platform.TMALL]:
+            result = await self.get_product_info(url)
+            result['_platform'] = platform  # Добавляем метку платформы
+            return result
+        
+        else:
+            error_msg = f"Неподдерживаемая платформа: {url}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)

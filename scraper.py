@@ -25,8 +25,11 @@ class Scraper:
         Returns:
             tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
         """
-        # Получаем данные о товаре через tmapi.top
-        api_response = await self.tmapi_client.get_product_info(url)
+        # Получаем данные о товаре через tmapi.top (автоопределение платформы)
+        api_response = await self.tmapi_client.get_product_info_auto(url)
+        
+        # Извлекаем платформу (добавлено методом get_product_info_auto)
+        platform = api_response.get('_platform', 'unknown')
         
         # TMAPI возвращает структуру: {"code": 200, "msg": "success", "data": {...}}
         # Извлекаем данные о товаре из поля "data"
@@ -35,7 +38,11 @@ class Scraper:
         else:
             product_data = api_response
         
+        # Сохраняем платформу в product_data для дальнейшего использования
+        product_data['_platform'] = platform
+        
         if settings.DEBUG_MODE:
+            print(f"[Scraper] Платформа: {platform}")
             print(f"[Scraper] Данные товара получены: {product_data.get('title', 'N/A')[:50]}...")
         
         exchange_rate = None
@@ -60,23 +67,34 @@ class Scraper:
             exchange_rate=exchange_rate
         )
         
-        # Получаем изображения из лучшего источника (сравниваем main_imgs и sku_props, берём где больше)
-        sku_images = self._get_unique_images_from_sku_props(product_data)
-        
-        # Получаем дополнительные изображения из item_desc
-        item_id = product_data.get('item_id')
-        detail_images = []
-        
-        if settings.DEBUG_MODE:
-            print(f"[Scraper] Извлечен item_id: {item_id}")
-        
-        if item_id:
-            detail_images = await self._get_filtered_detail_images(item_id)
+        # Получаем изображения в зависимости от платформы
+        if platform == 'pinduoduo':
+            # Для Pinduoduo: main_imgs + detail_imgs (нет sku_props)
+            sku_images = product_data.get('main_imgs', [])
+            
+            # У Pinduoduo detail_imgs уже есть в основном ответе
+            detail_images = product_data.get('detail_imgs', [])
+            
             if settings.DEBUG_MODE:
-                print(f"[Scraper] Получено detail изображений: {len(detail_images)}")
+                print(f"[Scraper] Pinduoduo: main_imgs={len(sku_images)}, detail_imgs={len(detail_images)}")
         else:
+            # Для Taobao/Tmall: сравниваем main_imgs и sku_props
+            sku_images = self._get_unique_images_from_sku_props(product_data)
+            
+            # Получаем дополнительные изображения из item_desc
+            item_id = product_data.get('item_id')
+            detail_images = []
+            
             if settings.DEBUG_MODE:
-                print(f"[Scraper] ⚠️ item_id отсутствует! Пропускаем получение detail изображений.")
+                print(f"[Scraper] Извлечен item_id: {item_id}")
+            
+            if item_id:
+                detail_images = await self._get_filtered_detail_images(item_id)
+                if settings.DEBUG_MODE:
+                    print(f"[Scraper] Получено detail изображений: {len(detail_images)}")
+            else:
+                if settings.DEBUG_MODE:
+                    print(f"[Scraper] ⚠️ item_id отсутствует! Пропускаем получение detail изображений.")
         
         # Объединяем изображения: сначала из sku_props, потом из detail_html
         image_urls = sku_images + detail_images
@@ -90,6 +108,7 @@ class Scraper:
         """
         Подготавливает компактные данные для отправки в LLM.
         Убирает огромный массив skus и другие лишние данные.
+        Поддерживает как Taobao/Tmall, так и Pinduoduo.
         
         Args:
             product_data: Полные данные от TMAPI
@@ -97,28 +116,56 @@ class Scraper:
         Returns:
             dict: Компактные данные только с нужной информацией
         """
+        platform = product_data.get('_platform', 'unknown')
+        
         compact = {
             'title': product_data.get('title', ''),
             'product_props': product_data.get('product_props', [])
         }
         
-        # Добавляем уникальные значения цветов и размеров из sku_props (НЕ из skus!)
-        sku_props = product_data.get('sku_props', [])
-        if sku_props:
-            for prop in sku_props:
-                prop_name = prop.get('prop_name', '')
-                
-                # Извлекаем цвета
-                if 'цвет' in prop_name.lower() or 'color' in prop_name.lower():
-                    colors = [v.get('name', '') for v in prop.get('values', [])]
-                    if colors:
-                        compact['available_colors'] = colors[:20]  # Максимум 20 цветов
-                
-                # Извлекаем размеры
-                if 'размер' in prop_name.lower() or 'size' in prop_name.lower() or '尺码' in prop_name:
-                    sizes = [v.get('name', '') for v in prop.get('values', [])]
-                    if sizes:
-                        compact['available_sizes'] = sizes[:30]  # Максимум 30 размеров
+        # Обработка в зависимости от платформы
+        if platform == 'pinduoduo':
+            # Для Pinduoduo: извлекаем варианты из skus (props_names)
+            skus = product_data.get('skus', [])
+            colors = set()
+            sizes = set()
+            
+            for sku in skus[:50]:  # Ограничиваем 50 SKU
+                props_names = sku.get('props_names', '')
+                # Формат: "型号:经济款;套餐:礼包一"
+                if props_names:
+                    props_parts = props_names.split(';')
+                    for part in props_parts:
+                        if ':' in part:
+                            key, value = part.split(':', 1)
+                            # Определяем цвет или размер по ключу
+                            if '颜色' in key or 'color' in key.lower() or '色' in key:
+                                colors.add(value)
+                            elif '尺码' in key or 'size' in key.lower() or '型号' in key:
+                                sizes.add(value)
+            
+            if colors:
+                compact['available_colors'] = list(colors)[:20]
+            if sizes:
+                compact['available_sizes'] = list(sizes)[:30]
+        else:
+            # Для Taobao/Tmall: используем sku_props
+            sku_props = product_data.get('sku_props', [])
+            if sku_props:
+                for prop in sku_props:
+                    prop_name = prop.get('prop_name', '')
+                    
+                    # Извлекаем цвета
+                    if 'цвет' in prop_name.lower() or 'color' in prop_name.lower():
+                        colors = [v.get('name', '') for v in prop.get('values', [])]
+                        if colors:
+                            compact['available_colors'] = colors[:20]
+                    
+                    # Извлекаем размеры
+                    if 'размер' in prop_name.lower() or 'size' in prop_name.lower() or '尺码' in prop_name:
+                        sizes = [v.get('name', '') for v in prop.get('values', [])]
+                        if sizes:
+                            compact['available_sizes'] = sizes[:30]
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] Компактные данные для LLM подготовлены. Размер: ~{len(str(compact))} символов")

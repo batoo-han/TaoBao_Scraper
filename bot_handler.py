@@ -44,13 +44,14 @@ async def command_start_handler(message: Message) -> None:
     Обработчик команды /start.
     Отправляет приветственное сообщение пользователю.
     """
-    await message.answer(f"Привет, {message.from_user.full_name}! Отправь мне ссылку на товар с Taobao или Tmall.")
+    await message.answer(f"Привет, {message.from_user.full_name}! Отправь мне ссылку на товар с Taobao, Tmall или Pinduoduo.")
 
-@router.message(F.text.regexp(r"(https?://)?(www\.)?(m\.)?(e\.)?(detail\.tmall\.com|item\.taobao\.com|a\.m\.taobao\.com|market\.m\.taobao\.com|h5\.m\.taobao\.com|s\.click\.taobao\.com|uland\.taobao\.com|tb\.cn)/.*"))
+@router.message(F.text.regexp(r"(https?://)?(www\.)?(m\.)?(e\.)?(detail\.tmall\.com|item\.taobao\.com|a\.m\.taobao\.com|market\.m\.taobao\.com|h5\.m\.taobao\.com|s\.click\.taobao\.com|uland\.taobao\.com|tb\.cn|mobile\.yangkeduo\.com|yangkeduo\.com|pinduoduo\.com|pdd\.com)/.*"))
 async def handle_product_link(message: Message) -> None:
     """
-    Обработчик сообщений, содержащих ссылки на товары Taobao/Tmall.
-    Извлекает информацию о товаре, генерирует пост и отправляет его пользователю.
+    Обработчик сообщений, содержащих ссылки на товары Taobao/Tmall/Pinduoduo.
+    Автоматически определяет платформу, извлекает информацию о товаре,
+    генерирует пост и отправляет его пользователю.
     """
     # Отправляем начальное сообщение
     await message.answer("Обрабатываю вашу ссылку, пожалуйста, подождите...")

@@ -23,7 +23,9 @@ class Settings(BaseSettings):
     
     Attributes:
         BOT_TOKEN (str): Токен Telegram бота от @BotFather
-        TMAPI_TOKEN (str): API ключ для TMAPI (tmapi.top)
+        TMAPI_TOKEN (str): API ключ для TMAPI Taobao/Tmall (tmapi.top)
+        TMAPI_PINDUODUO_TOKEN (str): API ключ для TMAPI Pinduoduo (tmapi.top)
+        TMAPI_RATE_LIMIT (int): Максимальное количество запросов к TMAPI в секунду
         YANDEX_GPT_API_KEY (str): API ключ YandexGPT
         YANDEX_FOLDER_ID (str): ID каталога Yandex Cloud
         EXCHANGE_RATE_API_KEY (str): API ключ для конвертации валют
@@ -36,13 +38,15 @@ class Settings(BaseSettings):
         DISABLE_SSL_VERIFY (bool): Отключить проверку SSL (не рекомендуется)
     """
     BOT_TOKEN: str  # Токен Telegram бота
-    TMAPI_TOKEN: str  # API ключ для tmapi.top
+    TMAPI_TOKEN: str  # API ключ для tmapi.top (Taobao/Tmall)
+    TMAPI_PINDUODUO_TOKEN: str  # API ключ для tmapi.top (Pinduoduo)
     YANDEX_GPT_API_KEY: str  # API ключ для YandexGPT
     EXCHANGE_RATE_API_KEY: str  # API ключ для ExchangeRate-API
     YANDEX_FOLDER_ID: str # ID каталога в Yandex.Cloud
     GOOGLE_CLOUD_PROJECT: str = ""  # ID проекта Google Cloud (не используется, оставлено для совместимости)
     ADMIN_CHAT_ID: str = ""  # ID чата администратора для уведомлений об ошибках (необязательно)
     YANDEX_GPT_MODEL: str = "yandexgpt-lite"  # Модель YandexGPT для использования
+    TMAPI_RATE_LIMIT: int = 5  # Максимальное количество запросов к TMAPI в секунду (по умолчанию 5)
     CONVERT_CURRENCY: bool = False  # Флаг для включения/отключения конвертации валют
     DEBUG_MODE: bool = False  # Режим отладки - показывать подробные логи в консоли
     MOCK_MODE: bool = False  # Mock режим - использовать данные из result.txt вместо реальных API-запросов к TMAPI
