@@ -53,8 +53,35 @@ async def main():
     # Удаление вебхуков (если были) и запуск поллинга для получения обновлений
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Bot started successfully! 🚀")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logging.info("Остановка бота по запросу пользователя…")
+    finally:
+        # Пытаемся закрыть storage если он есть
+        try:
+            if hasattr(dp, 'storage') and dp.storage:
+                await dp.storage.close()
+        except Exception:
+            pass
+        # Закрываем сессию бота
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+        # Отменяем все оставшиеся задачи, чтобы убрать CancelledError в stdout
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            try:
+                await asyncio.gather(*pending, return_exceptions=True)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     # Запуск основной функции
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Работа завершена по прерыванию.")

@@ -52,6 +52,23 @@ class Settings(BaseSettings):
     MOCK_MODE: bool = False  # Mock режим - использовать данные из result.txt вместо реальных API-запросов к TMAPI
     DISABLE_SSL_VERIFY: bool = False  # Отключить проверку SSL (только если есть проблемы с сертификатами)
 
+    # Pinduoduo Web Scraping настройки
+    PDD_USE_COOKIES: bool = True  # Использовать заранее выданные браузером куки вместо логина
+    PDD_COOKIE_HEADER: str = ""  # Полная строка Cookie из браузера (как в DevTools)
+    PDD_USER_AGENT: str = ""  # User-Agent из вашего браузера
+    PDD_COUNTRY_CODE: str = ""  # Код страны (например, +86)
+    PDD_PHONE_NUMBER: str = ""  # Номер телефона без пробелов
+    PDD_LOGIN_MAX_ATTEMPTS: int = 5  # Максимум повторных отправок кода
+    PDD_LOGIN_CODE_TIMEOUT_SEC: int = 120  # Секунд до повторной отправки кода
+    PDD_COOKIES_FILE: str = "config/pdd_cookies.json"  # Путь к JSON с куки/UA
+    # Playwright
+    PLAYWRIGHT_PROXY: str = ""  # Формат: http://127.0.0.1:10809 или socks5://127.0.0.1:10808
+    PLAYWRIGHT_SLOWMO_MS: int = 100  # Замедление действий при DEBUG для наглядности
+    PLAYWRIGHT_USE_MOBILE: bool = False  # Эмулировать мобильное устройство
+    PLAYWRIGHT_MOBILE_DEVICE: str = "iPhone 12"  # Название пресета устройства из playwright.devices
+    PLAYWRIGHT_LOCALE: str = "zh-CN"  # Локаль для мобильного профиля
+    PLAYWRIGHT_TIMEZONE: str = "Asia/Shanghai"  # Таймзона для мобильного профиля
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

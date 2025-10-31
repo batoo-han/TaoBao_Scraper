@@ -3,6 +3,8 @@ from src.api.yandex_gpt import YandexGPTClient
 from src.api.exchange_rate import ExchangeRateClient
 from src.api.yandex_translate import YandexTranslateClient
 from src.core.config import settings
+from src.utils.url_parser import URLParser, Platform
+from src.scrapers.pinduoduo_web import PinduoduoWebScraper
 
 class Scraper:
     """
@@ -25,8 +27,15 @@ class Scraper:
         Returns:
             tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
         """
-        # Получаем данные о товаре через tmapi.top (автоопределение платформы)
-        api_response = await self.tmapi_client.get_product_info_auto(url)
+        # Определяем платформу заранее, чтобы Pinduoduo обрабатывать веб-скрапингом
+        platform, _ = URLParser.parse_url(url)
+        if platform == Platform.PINDUODUO:
+            pdd = PinduoduoWebScraper()
+            api_response = await pdd.fetch_product(url)
+            api_response['_platform'] = Platform.PINDUODUO
+        else:
+            # Получаем данные о товаре через tmapi.top (автоопределение платформы)
+            api_response = await self.tmapi_client.get_product_info_auto(url)
         
         # Извлекаем платформу (добавлено методом get_product_info_auto)
         platform = api_response.get('_platform', 'unknown')
@@ -44,6 +53,21 @@ class Scraper:
         if settings.DEBUG_MODE:
             print(f"[Scraper] Платформа: {platform}")
             print(f"[Scraper] Данные товара получены: {product_data.get('title', 'N/A')[:50]}...")
+        
+        # Ранняя проверка: если Pinduoduo и совсем пусто — прерываем цепочку до LLM
+        if platform == 'pinduoduo':
+            no_images = not product_data.get('main_imgs') and not product_data.get('detail_imgs')
+            no_text = not (product_data.get('details') or product_data.get('title'))
+            if no_images and no_text:
+                if settings.DEBUG_MODE:
+                    print("[Scraper][Pinduoduo] Пустой результат: нет фото и описания. Прерываем цепочку.")
+                    print(f"[Scraper][Pinduoduo] product_data keys: {list(product_data.keys())}")
+                user_msg = (
+                    "Не удалось получить данные товара с Pinduoduo.\n\n"
+                    "Возможно, устарели cookies / User-Agent, страница требует капчу/логин или доступ ограничен.\n"
+                    "Проверьте настройки авторизации и обновите cookies."
+                )
+                return user_msg, []
         
         exchange_rate = None
         # Если включена конвертация валют, получаем курс

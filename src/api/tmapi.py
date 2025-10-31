@@ -7,6 +7,7 @@ from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
 import certifi
 import ssl
+# Интеграция RapidAPI для Pinduoduo удалена
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class TmapiClient:
         self.rate_limit = settings.TMAPI_RATE_LIMIT
         self.last_request_time = 0
         self.request_lock = asyncio.Lock()  # Для синхронизации запросов
+        # Для Pinduoduo используем веб-скрапинг (см. core.scraper)
 
     async def get_product_info(self, url: str):
         """
@@ -184,82 +186,12 @@ class TmapiClient:
     
     async def get_pinduoduo_product(self, url: str):
         """
-        Получает информацию о товаре с Pinduoduo через TMAPI.
-        Автоматически извлекает item_id из URL.
-        
-        Args:
-            url (str): URL товара с Pinduoduo
-            
-        Returns:
-            dict: Словарь с информацией о товаре
-            
-        Raises:
-            ValueError: Если не удалось извлечь item_id из URL
-            httpx.HTTPStatusError: Если запрос завершился с ошибкой
+        Pinduoduo через API отключён. Используйте веб-скрапинг (см. core.scraper).
         """
-        # Извлекаем item_id из URL
-        platform, item_id = URLParser.parse_url(url)
-        
-        if not item_id:
-            error_msg = f"Не удалось извлечь item_id из URL Pinduoduo: {url}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        if self.mock_mode:
-            # Mock режим: возвращаем тестовые данные (можно добавить отдельный файл)
-            logger.info(f"[MOCK MODE] Reading Pinduoduo product info for item_id: {item_id}")
-            if self.debug_mode:
-                print(f"[TMAPI] 📁 MOCK MODE - Pinduoduo item_id={item_id}")
-            # Пока возвращаем заглушку (можно добавить result_pdd.txt)
-            return {
-                "code": 200,
-                "msg": "success",
-                "data": {
-                    "item_id": int(item_id),
-                    "title": "[MOCK] Pinduoduo товар",
-                    "price": 100.0
-                }
-            }
-        else:
-            logger.info(f"Fetching Pinduoduo product from TMAPI for item_id: {item_id}")
-            
-            # Параметры запроса
-            querystring = {
-                "apiToken": self.pinduoduo_token,
-                "item_id": item_id
-            }
-            
-            if self.debug_mode:
-                print(f"[TMAPI] GET {self.pinduoduo_api_url}")
-                print(f"[TMAPI] Параметры: item_id={item_id}")
-            
-            # Настраиваем SSL проверку
-            if settings.DISABLE_SSL_VERIFY:
-                logger.warning("SSL verification is DISABLED. This is not recommended for production!")
-                verify_ssl = False
-            else:
-                verify_ssl = ssl.create_default_context(cafile=certifi.where())
-            
-            async with httpx.AsyncClient(verify=verify_ssl) as client:
-                # GET запрос для получения данных Pinduoduo
-                response = await client.get(self.pinduoduo_api_url, params=querystring)
-                
-                if self.debug_mode:
-                    print(f"[TMAPI] Статус ответа: {response.status_code}")
-                    print(f"[TMAPI] Первые 500 символов ответа: {response.text[:500]}")
-                
-                response.raise_for_status()
-                logger.debug(f"TMAPI Pinduoduo response status: {response.status_code}")
-                
-                result = response.json()
-                
-                if self.debug_mode:
-                    print(f"[TMAPI] JSON ответ: code={result.get('code')}, msg={result.get('msg')}")
-                    if result.get('data'):
-                        data_keys = list(result.get('data', {}).keys())
-                        print(f"[TMAPI] Ключи в data: {data_keys}")
-                
-                return result
+        raise NotImplementedError("Pinduoduo API отключён. Используйте веб-скрапинг.")
+
+    async def _resolve_pdd_goods_id_from_url(self, url: str) -> None:
+        return None
     
     async def get_product_info_auto(self, url: str):
         """
