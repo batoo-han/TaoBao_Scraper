@@ -58,4 +58,4 @@ test_*.txt
 # Other folder (keep local, don't push)
 other/
 prompts/
-
+test*.py
