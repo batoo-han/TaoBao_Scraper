@@ -4,6 +4,7 @@ import logging
 from config import settings
 import certifi
 import ssl
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,8 @@ class TmapiClient:
         self.api_token = settings.TMAPI_TOKEN  # API токен, загружаемый из настроек
         self.mock_mode = settings.MOCK_MODE  # Mock режим - использовать файлы вместо API
         self.debug_mode = settings.DEBUG_MODE  # Debug режим - показывать подробные логи
+        # Увеличенные таймауты для медленного API
+        self.timeout = httpx.Timeout(120.0, connect=20.0)  # 120 сек на запрос, 20 сек на соединение
 
     async def get_product_info(self, url: str):
         """
@@ -68,13 +71,30 @@ class TmapiClient:
                 # Используем certifi для корректной работы сертификатов
                 verify_ssl = ssl.create_default_context(cafile=certifi.where())
             
-            async with httpx.AsyncClient(verify=verify_ssl) as client:
-                # POST запрос с JSON телом
-                response = await client.post(self.api_url, json=payload, params=querystring)
-                response.raise_for_status()  # Вызывает исключение для ошибок HTTP статуса
-                logger.debug(f"TMAPI response status: {response.status_code}")
-                logger.debug(f"TMAPI raw response: {response.text[:500]}...")  # Показываем первые 500 символов
-                return response.json()  # Возвращает JSON ответ
+            # Retry логика для таймаутов
+            max_retries = 2
+            for attempt in range(1, max_retries + 1):
+                try:
+                    async with httpx.AsyncClient(verify=verify_ssl, timeout=self.timeout) as client:
+                        # POST запрос с JSON телом
+                        response = await client.post(self.api_url, json=payload, params=querystring)
+                        response.raise_for_status()  # Вызывает исключение для ошибок HTTP статуса
+                        logger.debug(f"TMAPI response status: {response.status_code}")
+                        logger.debug(f"TMAPI raw response: {response.text[:500]}...")  # Показываем первые 500 символов
+                        return response.json()  # Возвращает JSON ответ
+                except httpx.ReadTimeout as e:
+                    if attempt < max_retries:
+                        wait_time = attempt * 2  # 2, 4 секунды
+                        logger.warning(f"[TMAPI] Таймаут при запросе (попытка {attempt}/{max_retries}). Ждём {wait_time} сек перед повтором...")
+                        if self.debug_mode:
+                            print(f"[TMAPI] ⏱️ Таймаут запроса, повтор через {wait_time} сек...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"[TMAPI] Таймаут после {max_retries} попыток. API tmapi.top не отвечает достаточно быстро.")
+                        raise httpx.ReadTimeout(f"Таймаут при запросе к TMAPI после {max_retries} попыток. Возможно, API перегружен или недоступен.") from e
+                except httpx.ConnectTimeout as e:
+                    logger.error(f"[TMAPI] Таймаут соединения с API tmapi.top.")
+                    raise httpx.ConnectTimeout(f"Не удалось подключиться к TMAPI. Проверьте интернет-соединение.") from e
 
     async def get_item_description(self, item_id: int):
         """
@@ -120,23 +140,38 @@ class TmapiClient:
             else:
                 verify_ssl = ssl.create_default_context(cafile=certifi.where())
             
-            async with httpx.AsyncClient(verify=verify_ssl) as client:
-                # GET запрос для получения описания
-                response = await client.get(self.item_desc_api_url, params=querystring)
-                
-                if settings.DEBUG_MODE:
-                    print(f"[TMAPI] Статус ответа: {response.status_code}")
-                    print(f"[TMAPI] Первые 500 символов ответа: {response.text[:500]}")
-                
-                response.raise_for_status()
-                logger.debug(f"TMAPI item_desc response status: {response.status_code}")
-                
-                result = response.json()
-                
-                if settings.DEBUG_MODE:
-                    print(f"[TMAPI] JSON ответ: code={result.get('code')}, msg={result.get('msg')}")
-                    if result.get('data'):
-                        data_keys = list(result.get('data', {}).keys())
-                        print(f"[TMAPI] Ключи в data: {data_keys}")
-                
-                return result
+            # Retry логика для таймаутов
+            max_retries = 2
+            for attempt in range(1, max_retries + 1):
+                try:
+                    async with httpx.AsyncClient(verify=verify_ssl, timeout=self.timeout) as client:
+                        # GET запрос для получения описания
+                        response = await client.get(self.item_desc_api_url, params=querystring)
+                        
+                        if settings.DEBUG_MODE:
+                            print(f"[TMAPI] Статус ответа: {response.status_code}")
+                            print(f"[TMAPI] Первые 500 символов ответа: {response.text[:500]}")
+                        
+                        response.raise_for_status()
+                        logger.debug(f"TMAPI item_desc response status: {response.status_code}")
+                        
+                        result = response.json()
+                        
+                        if settings.DEBUG_MODE:
+                            print(f"[TMAPI] JSON ответ: code={result.get('code')}, msg={result.get('msg')}")
+                            if result.get('data'):
+                                data_keys = list(result.get('data', {}).keys())
+                                print(f"[TMAPI] Ключи в data: {data_keys}")
+                        
+                        return result
+                except httpx.ReadTimeout as e:
+                    if attempt < max_retries:
+                        wait_time = attempt * 2
+                        logger.warning(f"[TMAPI] Таймаут при запросе item_desc (попытка {attempt}/{max_retries}). Ждём {wait_time} сек...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"[TMAPI] Таймаут item_desc после {max_retries} попыток.")
+                        raise httpx.ReadTimeout(f"Таймаут при запросе описания товара после {max_retries} попыток.") from e
+                except httpx.ConnectTimeout as e:
+                    logger.error(f"[TMAPI] Таймаут соединения при запросе item_desc.")
+                    raise httpx.ConnectTimeout(f"Не удалось подключиться к TMAPI для получения описания.") from e

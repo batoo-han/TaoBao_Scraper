@@ -96,7 +96,15 @@ class ErrorHandler:
             admin_chat_id: ID чата администратора для уведомлений об ошибках
         """
         self.bot = bot
-        self.admin_chat_id = admin_chat_id
+        # Преобразуем admin_chat_id в int если это строка с числом
+        if admin_chat_id:
+            try:
+                self.admin_chat_id = int(admin_chat_id) if isinstance(admin_chat_id, str) else admin_chat_id
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid ADMIN_CHAT_ID format: {admin_chat_id}. Expected numeric string or int.")
+                self.admin_chat_id = None
+        else:
+            self.admin_chat_id = None
         
     async def handle_error(
         self,
@@ -194,8 +202,22 @@ class ErrorHandler:
                 text=f"<b>Traceback:</b>\n<pre>{traceback_preview}</pre>",
                 parse_mode="HTML"
             )
+            logger.info(f"Admin notification sent successfully to chat_id: {self.admin_chat_id}")
         except Exception as e:
-            logger.error(f"Failed to send admin notification: {e}")
+            error_msg = str(e)
+            # Более понятные сообщения об ошибках
+            if "chat not found" in error_msg.lower() or "chat_id" in error_msg.lower():
+                logger.error(
+                    f"Failed to send admin notification: chat not found. "
+                    f"Chat ID: {self.admin_chat_id}. "
+                    f"Возможные причины:\n"
+                    f"1. Бот не был добавлен в чат/не запущен с этим пользователем\n"
+                    f"2. ADMIN_CHAT_ID указан неправильно (должен быть числом)\n"
+                    f"3. Используется user_id вместо chat_id (для личных чатов они совпадают)\n"
+                    f"4. Бот заблокирован пользователем"
+                )
+            else:
+                logger.error(f"Failed to send admin notification: {e}")
     
     @staticmethod
     def classify_error(error: Exception, context: str = "") -> str:
@@ -240,6 +262,36 @@ class ErrorHandler:
 error_handler: Optional[ErrorHandler] = None
 
 
+async def _test_admin_chat(bot: Bot, chat_id: int) -> bool:
+    """
+    Проверяет доступность чата администратора, отправляя тестовое сообщение.
+    
+    Args:
+        bot: Экземпляр aiogram Bot
+        chat_id: ID чата для проверки
+        
+    Returns:
+        True если чат доступен, False иначе
+    """
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="✅ Обработчик ошибок инициализирован. Уведомления включены.",
+            parse_mode="HTML"
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            f"Не удалось отправить тестовое сообщение в ADMIN_CHAT_ID={chat_id}: {e}. "
+            f"Уведомления об ошибках могут не работать. "
+            f"Убедитесь, что:\n"
+            f"1. Бот запущен и добавлен в чат/написан вам\n"
+            f"2. ADMIN_CHAT_ID указан правильно (число)\n"
+            f"3. Для личного чата используйте ваш user_id (можно узнать у @userinfobot)"
+        )
+        return False
+
+
 def init_error_handler(bot: Bot, admin_chat_id: Optional[str] = None) -> ErrorHandler:
     """
     Инициализирует глобальный обработчик ошибок.
@@ -253,5 +305,11 @@ def init_error_handler(bot: Bot, admin_chat_id: Optional[str] = None) -> ErrorHa
     """
     global error_handler
     error_handler = ErrorHandler(bot, admin_chat_id)
+    
+    # Проверяем доступность чата админа (если задан)
+    if error_handler.admin_chat_id:
+        # Используем asyncio.run_coroutine_threadsafe или просто логируем, что проверка будет при первой ошибке
+        logger.info(f"Admin chat ID configured: {error_handler.admin_chat_id}. Test notification will be sent on first error.")
+    
     return error_handler
 

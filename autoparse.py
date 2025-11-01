@@ -43,8 +43,20 @@ async def main():
     
     # Инициализация глобального обработчика ошибок
     admin_chat_id = settings.ADMIN_CHAT_ID if settings.ADMIN_CHAT_ID else None
-    init_error_handler(bot, admin_chat_id)
+    error_handler = init_error_handler(bot, admin_chat_id)
     logging.info(f"Error handler initialized. Admin notifications: {'enabled' if admin_chat_id else 'disabled'}")
+    
+    # Проверяем доступность чата админа при старте (если задан)
+    if error_handler.admin_chat_id:
+        try:
+            from error_handler import _test_admin_chat
+            test_result = await _test_admin_chat(bot, error_handler.admin_chat_id)
+            if test_result:
+                logging.info(f"✅ Admin chat доступен. Уведомления будут отправляться в chat_id: {error_handler.admin_chat_id}")
+            else:
+                logging.warning(f"⚠️ Не удалось проверить доступность admin chat. Уведомления могут не работать.")
+        except Exception as e:
+            logging.warning(f"⚠️ Ошибка при проверке admin chat: {e}")
     
     # Импорт и включение роутера обработчиков сообщений
     from bot_handler import router as bot_router
