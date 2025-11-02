@@ -13,12 +13,66 @@ License: MIT
 
 import asyncio
 import logging
+import os
+import sys
+from pathlib import Path
 from aiogram import Bot, Dispatcher
 from config import settings
 from error_handler import init_error_handler
 
 # Конфигурация базового логирования (детальное логирование в error_handler.py)
 logging.basicConfig(level=logging.INFO)
+
+# Файл блокировки для предотвращения множественных запусков
+LOCK_FILE = Path(__file__).parent / ".bot.lock"
+
+
+def check_single_instance():
+    """
+    Проверяет, не запущен ли уже другой экземпляр бота.
+    Если да - завершает работу с ошибкой.
+    """
+    if LOCK_FILE.exists():
+        # Проверяем, не "зависла" ли блокировка (процесс уже не существует)
+        try:
+            with open(LOCK_FILE, 'r') as f:
+                old_pid = int(f.read().strip())
+            
+            # Пытаемся проверить, существует ли процесс (Windows)
+            if sys.platform == 'win32':
+                try:
+                    os.kill(old_pid, 0)  # Проверка существования процесса
+                    # Процесс существует - значит бот уже запущен
+                    logging.error(
+                        f"❌ Бот уже запущен! (PID: {old_pid})\n"
+                        f"Остановите другой экземпляр или удалите файл блокировки: {LOCK_FILE}"
+                    )
+                    sys.exit(1)
+                except (OSError, ProcessLookupError):
+                    # Процесс не существует - удаляем старую блокировку
+                    logging.warning(f"Обнаружена устаревшая блокировка (PID: {old_pid}). Удаляю...")
+                    LOCK_FILE.unlink()
+        except (ValueError, FileNotFoundError):
+            # Не удалось прочитать PID или файл удалился - удаляем блокировку
+            LOCK_FILE.unlink()
+    
+    # Создаём файл блокировки с текущим PID
+    try:
+        with open(LOCK_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+        logging.debug(f"Файл блокировки создан: {LOCK_FILE}")
+    except Exception as e:
+        logging.warning(f"Не удалось создать файл блокировки: {e}")
+
+
+def cleanup_lock_file():
+    """Удаляет файл блокировки при завершении работы"""
+    try:
+        if LOCK_FILE.exists():
+            LOCK_FILE.unlink()
+            logging.debug("Файл блокировки удалён")
+    except Exception as e:
+        logging.warning(f"Не удалось удалить файл блокировки: {e}")
 
 
 async def main():
@@ -36,6 +90,9 @@ async def main():
     Raises:
         Exception: Любые ошибки логируются и приводят к остановке бота
     """
+    # Проверяем, не запущен ли уже другой экземпляр бота
+    check_single_instance()
+    
     # Инициализация бота с токеном из настроек
     bot = Bot(token=settings.BOT_TOKEN)
     # Инициализация диспетчера
@@ -99,6 +156,9 @@ async def main():
             await asyncio.gather(*tasks, return_exceptions=True)
         
         logging.info("✅ Бот корректно завершил работу. Все ресурсы освобождены.")
+        
+        # Удаляем файл блокировки при завершении
+        cleanup_lock_file()
 
 if __name__ == "__main__":
     # Запуск основной функции с обработкой прерывания
@@ -110,3 +170,6 @@ if __name__ == "__main__":
         logging.info("Работа бота завершена.")
     except Exception as e:
         logging.error(f"Критическая ошибка при работе бота: {e}", exc_info=True)
+    finally:
+        # Всегда удаляем файл блокировки при завершении
+        cleanup_lock_file()

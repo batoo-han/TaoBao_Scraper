@@ -9,6 +9,7 @@ aiogram>=3.0.0  # Асинхронный фреймворк для Telegram бо
 httpx>=0.24.0  # Асинхронный HTTP клиент для API запросов
 
 # Configuration Management
+pydantic>=2.0.0  # Валидация данных (требуется для pydantic-settings)
 pydantic-settings>=2.0.0  # Управление настройками через .env файл
 
 # SSL Certificates

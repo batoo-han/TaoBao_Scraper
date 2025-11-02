@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import random
+from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message, InputMediaPhoto
 from aiogram.filters import CommandStart
@@ -7,6 +9,10 @@ from aiogram.enums import ChatAction
 
 from scraper import Scraper
 from error_handler import error_handler
+from tmapi import TMAPISubscriptionError
+from config import settings
+
+logger = logging.getLogger(__name__)
 
 # Инициализация роутера для обработки сообщений
 router = Router()
@@ -96,6 +102,72 @@ async def handle_product_link(message: Message) -> None:
             # Если изображений нет, отправляем только текст
             await message.answer(post_text, parse_mode="HTML")
 
+    except TMAPISubscriptionError as e:
+        # Специальная обработка ошибки 439 (недостаточно средств на счету TMAPI)
+        error_msg_439 = (
+            "😔 Извините, временно недоступно получение информации о товаре.\n\n"
+            "Проблема связана с подпиской на сервис парсинга. "
+            "Пожалуйста, повторите запрос позже или обратитесь к администратору."
+        )
+        
+        # Отправляем сообщение пользователю
+        await message.answer(error_msg_439)
+        
+        # Уведомляем администратора и ответственного за оплату если настройка включена
+        if settings.TMAPI_NOTIFY_439 and error_handler:
+            message_time = datetime.now().isoformat()
+            billing_notification = (
+                "💰 <b>ПРОБЛЕМА С ПОДПИСКОЙ TMAPI</b> 💰\n\n"
+                f"⏰ <b>Время:</b> {message_time}\n"
+                f"👤 <b>Пользователь бота:</b> {message.from_user.id} "
+                f"(@{message.from_user.username or 'unknown'})\n"
+                f"💬 <b>Чат:</b> {message.chat.id}\n"
+                f"📝 <b>Запрошенный URL:</b> <code>{product_url[:100]}</code>\n\n"
+                f"❗ <b>Ошибка:</b> HTTP 439 - Срок действия подписки истёк или на счету недостаточно средств\n\n"
+                f"🔗 <b>Действия:</b>\n"
+                f"1. Проверьте баланс в консоли TMAPI: https://tmapi.top/console\n"
+                f"2. Обновите подписку при необходимости\n"
+                f"3. Пополните баланс если требуется\n\n"
+                f"📄 <b>Детали:</b> {str(e)[:300]}"
+            )
+            
+            # Отправляем уведомление админу (если настроен)
+            if error_handler.admin_chat_id:
+                try:
+                    await error_handler.bot.send_message(
+                        chat_id=error_handler.admin_chat_id,
+                        text=billing_notification,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Admin notification for TMAPI 439 error sent to {error_handler.admin_chat_id}")
+                except Exception as notify_error:
+                    logger.error(f"Failed to send admin notification for 439 error: {notify_error}")
+            
+            # Отправляем уведомление ответственному за оплату (если настроен)
+            if settings.TMAPI_BILLING_CHAT_ID:
+                try:
+                    billing_chat_id = int(settings.TMAPI_BILLING_CHAT_ID) if settings.TMAPI_BILLING_CHAT_ID else None
+                    if billing_chat_id:
+                        await error_handler.bot.send_message(
+                            chat_id=billing_chat_id,
+                            text=billing_notification,
+                            parse_mode="HTML"
+                        )
+                        logger.info(f"Billing notification for TMAPI 439 error sent to {billing_chat_id}")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Invalid TMAPI_BILLING_CHAT_ID format: {settings.TMAPI_BILLING_CHAT_ID}. Error: {e}")
+                except Exception as notify_error:
+                    logger.error(f"Failed to send billing notification for 439 error: {notify_error}")
+        
+        # Логируем ошибку
+        if error_handler:
+            error_type = error_handler.classify_error(e, context=f"scraping {product_url}")
+            await error_handler.handle_error(
+                error=e,
+                user_message=message,
+                context=f"Product URL: {product_url}",
+                error_type=error_type
+            )
     except Exception as e:
         # Профессиональная обработка ошибок
         if error_handler:

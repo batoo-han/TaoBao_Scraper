@@ -54,6 +54,7 @@ logs/
 result.txt
 test_*.py
 test_*.txt
+.bot.lock  # Файл блокировки для предотвращения множественных запусков
 
 # Other folder (keep local, don't push)
 other/
