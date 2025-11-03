@@ -16,3 +16,6 @@ certifi  # Надёжные SSL сертификаты
 
 # Image Processing
 Pillow>=10.0.0  # Определение размеров и обработка изображений
+
+# Browser Automation for Pinduoduo scraping
+playwright>=1.46.0  # Асинхронный Playwright для веб-скрапинга Pinduoduo

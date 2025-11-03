@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     """
     BOT_TOKEN: str  # Токен Telegram бота
     TMAPI_TOKEN: str  # API ключ для tmapi.top (Taobao/Tmall)
-    TMAPI_PINDUODUO_TOKEN: str  # API ключ для tmapi.top (Pinduoduo)
+    TMAPI_PINDUODUO_TOKEN: str = ""  # Не используется (Pinduoduo через веб-скрапинг)
     YANDEX_GPT_API_KEY: str  # API ключ для YandexGPT
     EXCHANGE_RATE_API_KEY: str  # API ключ для ExchangeRate-API
     YANDEX_FOLDER_ID: str # ID каталога в Yandex.Cloud
@@ -54,7 +54,6 @@ class Settings(BaseSettings):
 
     # Pinduoduo Web Scraping настройки
     PDD_USE_COOKIES: bool = True  # Использовать заранее выданные браузером куки вместо логина
-    PDD_COOKIE_HEADER: str = ""  # Полная строка Cookie из браузера (как в DevTools)
     PDD_USER_AGENT: str = ""  # User-Agent из вашего браузера
     PDD_COUNTRY_CODE: str = ""  # Код страны (например, +86)
     PDD_PHONE_NUMBER: str = ""  # Номер телефона без пробелов
@@ -64,12 +63,19 @@ class Settings(BaseSettings):
     # Playwright
     PLAYWRIGHT_PROXY: str = ""  # Формат: http://127.0.0.1:10809 или socks5://127.0.0.1:10808
     PLAYWRIGHT_SLOWMO_MS: int = 100  # Замедление действий при DEBUG для наглядности
+    PLAYWRIGHT_PAGE_TIMEOUT_MS: int = 60000  # Таймаут полной загрузки страницы (по умолчанию 60 сек)
     PLAYWRIGHT_USE_MOBILE: bool = False  # Эмулировать мобильное устройство
     PLAYWRIGHT_MOBILE_DEVICE: str = "iPhone 12"  # Название пресета устройства из playwright.devices
     PLAYWRIGHT_LOCALE: str = "zh-CN"  # Локаль для мобильного профиля
     PLAYWRIGHT_TIMEZONE: str = "Asia/Shanghai"  # Таймзона для мобильного профиля
+    # Debug вспомогательные опции для Playwright
+    PLAYWRIGHT_KEEP_BROWSER_OPEN: bool = False  # Не закрывать браузер в DEBUG_MODE
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra='ignore'  # Игнорировать лишние переменные в .env (на случай устаревших ключей)
+    )
 
 
 settings = Settings()

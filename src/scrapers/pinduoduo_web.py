@@ -24,27 +24,20 @@ MOBILE_UA_POOL = [
 ]
 
 
-def _parse_cookie_header(cookie_header: str) -> List[Dict[str, Any]]:
-    """
-    Преобразует строку Cookie из DevTools в список cookie-объектов Playwright.
-    """
-    cookies = []
+def _cookies_header_to_array(cookie_header: str) -> List[Dict[str, Any]]:
+    """Преобразует cookieHeader в список куки-объектов."""
     if not cookie_header:
-        return cookies
-    # Определяем домены для установки cookies
-    domains = [
-        ".yangkeduo.com",
-        "mobile.yangkeduo.com",
-    ]
+        return []
+    domains = [".yangkeduo.com", "mobile.yangkeduo.com"]
+    out = []
     for part in cookie_header.split(";"):
         if not part.strip() or "=" not in part:
             continue
         name, value = part.strip().split("=", 1)
         name = name.strip()
         value = value.strip()
-        # Устанавливаем cookie на оба домена для надёжности
         for domain in domains:
-            cookies.append({
+            out.append({
                 "name": name,
                 "value": value,
                 "domain": domain,
@@ -52,7 +45,7 @@ def _parse_cookie_header(cookie_header: str) -> List[Dict[str, Any]]:
                 "httpOnly": False,
                 "secure": True,
             })
-    return cookies
+    return out
 
 
 def _build_cookie_header(cookies: List[Dict[str, Any]]) -> str:
@@ -77,11 +70,44 @@ class PinduoduoWebScraper:
     """
 
     def __init__(self):
-        # Изначально берём из .env
+        # Загружаем только из файла JSON (и UA из .env при наличии)
         self.user_agent = settings.PDD_USER_AGENT.strip() if settings.PDD_USER_AGENT else None
-        self.cookie_header = settings.PDD_COOKIE_HEADER.strip() if settings.PDD_COOKIE_HEADER else None
-        # Пытаемся перегрузить из внешнего JSON (если есть)
+        self.cookie_header = None
+        # Пытаемся загрузить из внешнего JSON (если есть)
         self._load_from_json_if_present()
+
+    def _normalize_cookies(self, cookies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Приводит cookies из JSON к формату Playwright: корректные типы и значения.
+        - expires: float в секундах Unix (если строка/пусто — удаляем поле)
+        - path: по умолчанию "/"
+        - secure: True
+        - domain: оставляем как есть
+        """
+        normalized: List[Dict[str, Any]] = []
+        for c in cookies or []:
+            if not c or not c.get("name") or c.get("value") is None:
+                continue
+            n = dict(c)
+            # expires → float или удаляем
+            if "expires" in n:
+                try:
+                    if n["expires"] in ("", None):
+                        n.pop("expires", None)
+                    elif isinstance(n["expires"], str):
+                        n["expires"] = float(n["expires"])  # может бросить ValueError
+                    else:
+                        # пусть будет как есть если это число
+                        float(n["expires"])  # проверка
+                except Exception:
+                    n.pop("expires", None)
+            # path по умолчанию
+            if not n.get("path"):
+                n["path"] = "/"
+            # secure по умолчанию
+            if n.get("secure") is None:
+                n["secure"] = True
+            normalized.append(n)
+        return normalized
 
     def _load_from_json_if_present(self) -> None:
         path = settings.PDD_COOKIES_FILE
@@ -96,6 +122,21 @@ class PinduoduoWebScraper:
                 ua = (data.get("userAgent") or "").strip()
                 if ua:
                     self.user_agent = ua
+                # Сохраним массив cookies если он присутствует (альтернативный формат)
+                cookies = data.get("cookies")
+                if isinstance(cookies, list) and cookies:
+                    # Преобразуем массив cookie-объектов в cookieHeader как fallback
+                    try:
+                        pairs = []
+                        for c in cookies:
+                            name = c.get("name")
+                            value = c.get("value")
+                            if name and value:
+                                pairs.append(f"{name}={value}")
+                        if pairs and not header:
+                            self.cookie_header = "; ".join(pairs)
+                    except Exception:
+                        pass
         except Exception:
             # Тихо игнорируем проблемы файла — останемся на .env
             pass
@@ -256,15 +297,28 @@ class PinduoduoWebScraper:
         Открывает страницу товара и извлекает: описание и список изображений.
         Возвращает данные в формате {code,msg,data} совместимом с остальным пайплайном.
         """
-        from playwright.async_api import async_playwright
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as e:
+            if getattr(settings, 'DEBUG_MODE', False):
+                print("[PDD][INIT] Playwright не установлен. Установите зависимости и браузер:")
+                print("[PDD][INIT] pip install -r requirements.txt && python -m playwright install chromium")
+            raise RuntimeError("Playwright is not installed. Install deps and run 'python -m playwright install chromium'.") from e
 
         # Результат по умолчанию
         result: Dict[str, Any] = {"code": 200, "msg": "success", "data": {}}
 
         debug = getattr(settings, 'DEBUG_MODE', False)
         html_source = None
+        # Нормализуем URL: добавим схему при её отсутствии
+        full_url = url
+        if not (url.startswith("http://") or url.startswith("https://")):
+            full_url = f"https://{url}"
+            if debug:
+                print(f"[DEBUG] Нормализуем URL без схемы → {full_url}")
         async with async_playwright() as p:
-            headless = not bool(getattr(settings, 'DEBUG_MODE', False))
+            # В DEBUG всегда показываем окно браузера
+            headless = False if getattr(settings, 'DEBUG_MODE', False) else True
             slow_mo = int(getattr(settings, 'PLAYWRIGHT_SLOWMO_MS', 0)) if getattr(settings, 'DEBUG_MODE', False) else 0
             launch_kwargs = {"headless": headless}
             if slow_mo:
@@ -308,24 +362,43 @@ class PinduoduoWebScraper:
                 }
                 context = await browser.new_context(**context_args)
 
-            # 1) Пытаемся использовать куки, если они есть (из заголовка/файла)
+            # 1) Пытаемся использовать куки из файла JSON
             have_preset_cookies = False
-            if self.cookie_header:
-                cookies = _parse_cookie_header(self.cookie_header)
-                if cookies:
-                    try:
-                        await context.add_cookies(cookies)
+            try:
+                path = settings.PDD_COOKIES_FILE
+                if path and os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    # приоритет: cookies (массив), затем cookieHeader
+                    file_cookies = data.get("cookies")
+                    if isinstance(file_cookies, list) and file_cookies:
+                        norm = self._normalize_cookies(file_cookies)
+                        await context.add_cookies(norm)
                         have_preset_cookies = True
                         if debug:
-                            print("[DEBUG] Заданы предустановленные cookies из заголовка/файла")
-                    except Exception as e:
+                            print(f"[DEBUG] Загружены cookies из массива cookies в JSON: {len(norm)} шт.")
+                    elif (data.get("cookieHeader") or "").strip():
+                        arr = _cookies_header_to_array((data.get("cookieHeader") or "").strip())
+                        if arr:
+                            await context.add_cookies(arr)
+                            have_preset_cookies = True
+                            if debug:
+                                print(f"[DEBUG] Загружены cookies из cookieHeader в JSON: {len(arr)} шт.")
+                    else:
                         if debug:
-                            print(f"[DEBUG] Ошибка при выставлении cookies: {e}")
+                            print("[DEBUG] Файл JSON найден, но cookies отсутствуют")
+                else:
+                    if debug:
+                        print("[DEBUG] Файл cookies JSON не найден — перейдём к логину")
+            except Exception as e:
+                if debug:
+                    print(f"[DEBUG] Не удалось загрузить cookies из JSON: {e}")
 
             page = await context.new_page()
             try:
-                page.set_default_timeout(45000)
-                page.set_default_navigation_timeout(45000)
+                to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
+                page.set_default_timeout(to)
+                page.set_default_navigation_timeout(to)
             except Exception:
                 pass
 
@@ -340,16 +413,34 @@ class PinduoduoWebScraper:
             # 3) Переходим на страницу товара
             try:
                 if debug:
-                    print(f"[DEBUG] Переход на страницу товара: {url}")
-                await page.goto(url, wait_until="networkidle")
+                    print(f"[DEBUG] Переход на страницу товара: {full_url}")
+                # Сначала минимум DOM готов, затем ждём сетевой простои
+                await page.goto(full_url, wait_until="domcontentloaded")
+                try:
+                    to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
+                    await page.wait_for_load_state("networkidle", timeout=to)
+                except Exception:
+                    pass
+                # Дополнительные стадии загрузки и пауза для SPA
+                try:
+                    to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
+                    await page.wait_for_load_state("domcontentloaded", timeout=to)
+                    await page.wait_for_load_state("networkidle", timeout=to)
+                except Exception:
+                    pass
+                await self._human_pause(0.6, 1.4)
                 html_source = await page.content()
             except Exception as e:
                 if debug:
                     print(f"[DEBUG] Ошибка при загрузке страницы: {e}")
                 result['code'] = 500
                 result['msg'] = f'Ошибка Playwright: {e}'
-                await context.close()
-                await browser.close()
+                # В DEBUG не закрываем браузер; вне DEBUG — по настройке
+                if debug:
+                    pass
+                elif not getattr(settings, 'PLAYWRIGHT_KEEP_BROWSER_OPEN', False):
+                    await context.close()
+                    await browser.close()
                 return result
 
             # 4) Проверяем наличие ключевого контейнера. Если его нет — куки невалидны, пробуем логин и повтор.
@@ -364,7 +455,19 @@ class PinduoduoWebScraper:
                 if debug:
                     print(f"[DEBUG] Результат авто-логина после проверки контейнера: {logged}")
                 try:
-                    await page.goto(url, wait_until="networkidle")
+                    await page.goto(full_url, wait_until="domcontentloaded")
+                    try:
+                        to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
+                        await page.wait_for_load_state("networkidle", timeout=to)
+                    except Exception:
+                        pass
+                    try:
+                        to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
+                        await page.wait_for_load_state("domcontentloaded", timeout=to)
+                        await page.wait_for_load_state("networkidle", timeout=to)
+                    except Exception:
+                        pass
+                    await self._human_pause(0.6, 1.4)
                     html_source = await page.content()
                     container = await page.wait_for_selector("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div", timeout=8000)
                 except Exception as e:
@@ -416,8 +519,12 @@ class PinduoduoWebScraper:
                 if debug:
                     print(f"[DEBUG] Не удалось получить заголовок: {e}")
 
-            await context.close()
-            await browser.close()
+            # Закрытие браузера: оставляем открытым при отладке, если включено
+            if debug:
+                print("[DEBUG] Окно браузера оставлено открытым (DEBUG_MODE=True)")
+            elif not getattr(settings, 'PLAYWRIGHT_KEEP_BROWSER_OPEN', False):
+                await context.close()
+                await browser.close()
             if debug and html_source:
                 print(f"[DEBUG] HTML (начало): {html_source[:600]}")
         result["data"] = {
