@@ -6,6 +6,10 @@ from src.core.config import settings
 import json
 import os
 import random
+from io import BytesIO
+
+import httpx
+from PIL import Image
 
 
 DESKTOP_UA_POOL = [
@@ -66,7 +70,7 @@ class PinduoduoWebScraper:
     """
     Веб-скрапер Pinduoduo (mobile.yangkeduo.com) на базе Playwright.
     Использует заранее выданные куки и User-Agent (если указаны в конфиге),
-    либо пытается открыть страницу и дождаться элементов.
+    затем открывает страницу, ждёт полной загрузки и извлекает данные строго по селекторам из ТЗ.
     """
 
     def __init__(self):
@@ -81,6 +85,7 @@ class PinduoduoWebScraper:
         - expires: float в секундах Unix (если строка/пусто — удаляем поле)
         - path: по умолчанию "/"
         - secure: True
+        - sameSite: удаляем или приводим к допустимым значениям ('Strict'|'Lax'|'None')
         - domain: оставляем как есть
         """
         normalized: List[Dict[str, Any]] = []
@@ -106,6 +111,20 @@ class PinduoduoWebScraper:
             # secure по умолчанию
             if n.get("secure") is None:
                 n["secure"] = True
+            # Нормализуем sameSite → допускаются только Strict|Lax|None
+            if 'sameSite' in n:
+                try:
+                    v = n.get('sameSite')
+                    if isinstance(v, str):
+                        vl = v.strip().lower()
+                        if vl in ('strict', 'lax', 'none'):
+                            n['sameSite'] = vl.capitalize()
+                        else:
+                            n.pop('sameSite', None)
+                    else:
+                        n.pop('sameSite', None)
+                except Exception:
+                    n.pop('sameSite', None)
             normalized.append(n)
         return normalized
 
@@ -152,150 +171,13 @@ class PinduoduoWebScraper:
         if debug:
             print(f"[DEBUG] Выбран случайный User-Agent: {self.user_agent[:120]}")
 
-    async def _save_cookies(self, context) -> None:
-        """Сохраняет текущие куки в JSON (cookieHeader)."""
-        try:
-            cookies = await context.cookies()
-            header = _build_cookie_header(cookies)
-            if not header:
-                return
-            path = settings.PDD_COOKIES_FILE or "src/pdd_cookies.json"
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            data = {"cookieHeader": header}
-            # Сохраним и userAgent если он задан
-            if self.user_agent:
-                data["userAgent"] = self.user_agent
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
     async def _human_pause(self, a: float = 0.2, b: float = 0.8):
         await asyncio.sleep(random.uniform(a, b))
 
-    async def _mouse_wiggle(self, page, steps: int = 10):
-        try:
-            box = await page.evaluate("() => ({w: window.innerWidth, h: window.innerHeight})")
-            x = random.randint(10, max(11, box['w'] - 10))
-            y = random.randint(10, max(11, box['h'] - 10))
-            await page.mouse.move(x, y, steps=random.randint(5, 15))
-            for _ in range(steps):
-                dx = random.randint(-30, 30)
-                dy = random.randint(-20, 20)
-                x = max(1, min(box['w'] - 1, x + dx))
-                y = max(1, min(box['h'] - 1, y + dy))
-                await page.mouse.move(x, y, steps=random.randint(2, 6))
-                await self._human_pause(0.05, 0.2)
-        except Exception:
-            pass
-
-    async def _ensure_logged_in(self, context, page) -> bool:
-        """
-        Если нет cookie_header — пробуем полуавтоматический login по номеру телефона.
-        Возвращает True, если после попыток появился PDDAccessToken в cookies.
-        """
-        debug = getattr(settings, 'DEBUG_MODE', False)
-        # Проверяем конфиг для телефона
-        if not settings.PDD_COUNTRY_CODE or not settings.PDD_PHONE_NUMBER:
-            if debug:
-                print("[PDD][LOGIN] Не указан код страны/телефон — пропускаем авто-логин")
-            return False
-
-        login_url = "https://mobile.yangkeduo.com/login.html"
-        try:
-            await page.goto(login_url, wait_until="networkidle")
-            await self._mouse_wiggle(page)
-            await self._human_pause()
-
-            # Шаг 1. Нажимаем элемент, открывающий форму ввода телефона
-            # /html/body/div[1]/div/div[1]/div[2]/div
-            try:
-                open_form_btn = await page.wait_for_selector("xpath=/html/body/div[1]/div/div[1]/div[2]/div", timeout=8000)
-                if open_form_btn:
-                    await self._mouse_wiggle(page, steps=5)
-                    await open_form_btn.click()
-                    await self._human_pause(0.3, 0.8)
-                    if debug:
-                        print("[PDD][LOGIN] Клик по кнопке перехода к форме ввода телефона выполнен")
-            except Exception as e:
-                if debug:
-                    print(f"[PDD][LOGIN] Не удалось нажать кнопку перехода к форме: {e}")
-
-            # XPaths формы из ТЗ
-            xpath_country = "xpath=/html/body/div[1]/div/div[2]/div/form/div[2]/div/input"
-            xpath_phone = "xpath=/html/body/div[1]/div/div[2]/div/form/div[2]/input"
-            xpath_send = "xpath=/html/body/div[1]/div/div[2]/div/form/div[3]/div"
-
-            # Шаг 2. Ввод кода страны
-            try:
-                el_country = await page.wait_for_selector(xpath_country, timeout=8000)
-                await el_country.click()
-                await self._human_pause()
-                await el_country.fill(str(settings.PDD_COUNTRY_CODE))
-                await self._human_pause()
-            except Exception as e:
-                if debug:
-                    print(f"[PDD][LOGIN] Не удалось ввести код страны: {e}")
-
-            # Шаг 3. Ввод телефона
-            try:
-                el_phone = await page.wait_for_selector(xpath_phone, timeout=8000)
-                await el_phone.click()
-                await self._human_pause()
-                await el_phone.fill(str(settings.PDD_PHONE_NUMBER))
-                await self._human_pause()
-            except Exception as e:
-                if debug:
-                    print(f"[PDD][LOGIN] Не удалось ввести телефон: {e}")
-
-            # Шаг 4. Отправляем код и ждём токен в cookies
-            max_attempts = max(1, int(settings.PDD_LOGIN_MAX_ATTEMPTS))
-            timeout_sec = max(30, int(settings.PDD_LOGIN_CODE_TIMEOUT_SEC))
-
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    btn = await page.wait_for_selector(xpath_send, timeout=6000)
-                    await self._mouse_wiggle(page, steps=6)
-                    await btn.click()
-                    if debug:
-                        print(f"[PDD][LOGIN] Отправка кода, попытка {attempt}/{max_attempts}")
-                except Exception as e:
-                    if debug:
-                        print(f"[PDD][LOGIN] Не удалось нажать отправку кода: {e}")
-
-                ok = await self._wait_for_access_token(context, timeout_sec)
-                if ok:
-                    if debug:
-                        print("[PDD][LOGIN] PDDAccessToken обнаружен в cookies")
-                    await self._save_cookies(context)
-                    return True
-                if debug:
-                    print("[PDD][LOGIN] Токен не появился, пробуем ещё раз…")
-            return False
-        except Exception as e:
-            if debug:
-                print(f"[PDD][LOGIN] Ошибка при входе: {e}")
-            return False
-
-    async def _wait_for_access_token(self, context, timeout_sec: int) -> bool:
-        """
-        Ожидает появления PDDAccessToken в cookies контекста.
-        """
-        end = asyncio.get_event_loop().time() + timeout_sec
-        while asyncio.get_event_loop().time() < end:
-            try:
-                cookies = await context.cookies()
-                if any(c.get('name') == 'PDDAccessToken' for c in cookies):
-                    return True
-            except Exception:
-                pass
-            await asyncio.sleep(1)
-        return False
-
     async def fetch_product(self, url: str) -> Dict[str, Any]:
         """
-        Открывает страницу товара и извлекает: описание и список изображений.
-        Возвращает данные в формате {code,msg,data} совместимом с остальным пайплайном.
+        Открывает страницу товара и извлекает: заголовок, описание, цену, изображения.
+        Возвращает {code,msg,data} для дальнейшей обработки пайплайном.
         """
         try:
             from playwright.async_api import async_playwright
@@ -402,33 +284,29 @@ class PinduoduoWebScraper:
             except Exception:
                 pass
 
-            # 2) Если кук нет — пробуем войти через login.html
+            # 2) Если кук нет — не логинимся. Используем только предустановленные куки.
             if not have_preset_cookies:
                 if debug:
-                    print("[DEBUG] Куки отсутствуют — запускаем процедуру логина")
-                logged = await self._ensure_logged_in(context, page)
-                if debug:
-                    print(f"[DEBUG] Результат авто-логина: {logged}")
+                    print("[DEBUG] Куки отсутствуют — прерываем (только предустановленные куки допускаются)")
+                await context.close()
+                await browser.close()
+                result['code'] = 401
+                result['msg'] = 'PDD cookies missing. Provide cookies in src/pdd_cookies.json.'
+                return result
 
             # 3) Переходим на страницу товара
             try:
                 if debug:
                     print(f"[DEBUG] Переход на страницу товара: {full_url}")
-                # Сначала минимум DOM готов, затем ждём сетевой простои
+                # Сначала минимум DOM, затем полная загрузка и сетевой простои
                 await page.goto(full_url, wait_until="domcontentloaded")
                 try:
                     to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
+                    await page.wait_for_load_state("load", timeout=to)
                     await page.wait_for_load_state("networkidle", timeout=to)
                 except Exception:
                     pass
-                # Дополнительные стадии загрузки и пауза для SPA
-                try:
-                    to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
-                    await page.wait_for_load_state("domcontentloaded", timeout=to)
-                    await page.wait_for_load_state("networkidle", timeout=to)
-                except Exception:
-                    pass
-                await self._human_pause(0.6, 1.4)
+                await self._human_pause(0.8, 1.6)
                 html_source = await page.content()
             except Exception as e:
                 if debug:
@@ -443,81 +321,375 @@ class PinduoduoWebScraper:
                     await browser.close()
                 return result
 
-            # 4) Проверяем наличие ключевого контейнера. Если его нет — куки невалидны, пробуем логин и повтор.
+            # 4) Проверяем наличие ключевого контейнера (не критично, просто для логов)
             try:
                 container = await page.wait_for_selector("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div", timeout=5000)
             except Exception:
                 container = None
-            if not container:
-                if debug:
-                    print("[DEBUG] Ключевой контейнер не найден — пытаемся залогиниться и повторить")
-                logged = await self._ensure_logged_in(context, page)
-                if debug:
-                    print(f"[DEBUG] Результат авто-логина после проверки контейнера: {logged}")
-                try:
-                    await page.goto(full_url, wait_until="domcontentloaded")
-                    try:
-                        to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
-                        await page.wait_for_load_state("networkidle", timeout=to)
-                    except Exception:
-                        pass
-                    try:
-                        to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
-                        await page.wait_for_load_state("domcontentloaded", timeout=to)
-                        await page.wait_for_load_state("networkidle", timeout=to)
-                    except Exception:
-                        pass
-                    await self._human_pause(0.6, 1.4)
-                    html_source = await page.content()
-                    container = await page.wait_for_selector("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div", timeout=8000)
-                except Exception as e:
-                    if debug:
-                        print(f"[DEBUG] Повторная попытка после логина не удалась: {e}")
+            if not container and debug:
+                print("[DEBUG] Ключевой контейнер не найден — продолжаем извлечение по селекторам из ТЗ")
 
-            # Извлекаем описание
-            description = ""
+            # Извлекаем элементы строго по правилам ТЗ
+            # 1) Название товара: span.tLYIg_Ju.enable-select → взять самый длинный текст (>20 символов), обходя вложенные элементы
+            title = ""
             try:
-                await page.wait_for_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span", timeout=5000)
-                desc_el = await page.query_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span")
-                if desc_el:
-                    description = await desc_el.text_content()
-                if description:
-                    description = description.strip()
+                js_get_title = """
+                    () => {
+                      const nodes = Array.from(document.querySelectorAll('span.tLYIg_Ju.enable-select'));
+                      let best = '';
+                      const getText = (el) => {
+                        if (!el) return '';
+                        // Собираем весь видимый текст, включая вложенные узлы
+                        let t = el.innerText || '';
+                        return (t || '').trim();
+                      };
+                      for (const n of nodes) {
+                        const t = getText(n);
+                        if (t && t.length > best.length) best = t;
+                      }
+                      // Фильтр на длину > 20 символов, если есть
+                      if (best.length >= 20) return best;
+                      return best; // вернём лучшее, даже если короче
+                    }
+                """
+                title_candidate = await page.evaluate(js_get_title)
+                if isinstance(title_candidate, str):
+                    title = title_candidate.strip()
                 if debug:
-                    print(f"[DEBUG] Описание: {description}")
+                    print(f"[DEBUG] Title(span.tLYIg_Ju.enable-select): {title}")
             except Exception as e:
                 if debug:
-                    print(f"[DEBUG] Не удалось получить описание: {e}")
-            # Извлекаем изображения из контейнера галереи
+                    print(f"[DEBUG] Ошибка извлечения title по классу: {e}")
+
+            # 2) Дополнительное описание: div.jvsKAdEs → собрать aria-label из внутренних контейнеров
+            extra_desc = ""
+            try:
+                js_get_extra = """
+                    () => {
+                      const root = document.querySelector('div.jvsKAdEs');
+                      if (!root) return '';
+                      const withAria = Array.from(root.querySelectorAll('[aria-label]'));
+                      const parts = withAria
+                        .map(el => (el.getAttribute('aria-label') || '').trim())
+                        .filter(Boolean);
+                      return parts.join(' ').trim();
+                    }
+                """
+                extra_candidate = await page.evaluate(js_get_extra)
+                if isinstance(extra_candidate, str):
+                    extra_desc = extra_candidate.strip()
+                if debug:
+                    print(f"[DEBUG] Extra(desc aria-label in jvsKAdEs): {extra_desc}")
+            except Exception as e:
+                if debug:
+                    print(f"[DEBUG] Ошибка извлечения дополнительного описания: {e}")
+
+            # 3) Цена: span.kxqW0mMz → собрать текст всех потомков по порядку; сверить с div.YocHfP4N
+            price = ""
+            try:
+                # Ждём появления контейнера цены, т.к. он может рендериться позже
+                try:
+                    await page.wait_for_selector('span.kxqW0mMz', timeout=7000)
+                except Exception:
+                    pass
+                js_get_price = """
+                    () => {
+                      const selectors = [
+                        'span.kxqW0mMz',
+                        'div.kxqW0mMz',
+                        'span[class*="kxqW0mMz"]',
+                        'div[class*="kxqW0mMz"]'
+                      ];
+                      const textFromEl = (el) => {
+                        if (!el) return '';
+                        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+                        let buf = '';
+                        let n;
+                        while ((n = walker.nextNode())) {
+                          const t = (n.nodeValue || '').trim();
+                          if (t) buf += t;
+                        }
+                        return buf.trim();
+                      };
+                      const getNumeric = (s) => {
+                        if (!s) return '';
+                        const m = s.replace(/\s+/g,'').match(/\d+(?:\.\d+)?/);
+                        return m ? m[0] : '';
+                      };
+                      for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (!el) continue;
+                        const raw = textFromEl(el);
+                        const num = getNumeric(raw);
+                        if (num) return num;
+                      }
+                      // Как fallback: ищем ближайший элемент к символу '¥' и читаем числа рядом
+                      const y = document.querySelector('div.YocHfP4N, span.YocHfP4N, [class*="YocHfP4N"]');
+                      if (y) {
+                        const t = textFromEl(y);
+                        const m = (t || '').replace(/\s+/g,'').match(/\d+(?:\.\d+)?/);
+                        if (m) return m[0];
+                      }
+                      // Универсальный fallback: сначала ищем родителя с набором вложенных span с font-size (составная цена)
+                      const composedParents = Array.from(document.querySelectorAll('span,div')).filter(el => el.querySelector('span[style*="font-size"], div[style*="font-size"]'));
+                      for (const p of composedParents) {
+                        const txt = textFromEl(p).replace(/\s+/g,'');
+                        if (!txt) continue;
+                        // Ищем число с точкой, например 19.9
+                        const m = txt.match(/\d+\.\d{1,2}/);
+                        if (m) return m[0];
+                      }
+                      // Универсальный fallback: выбираем самый «крупный» видимый элемент-носитель числа
+                      const all = Array.from(document.querySelectorAll('span,div'));
+                      let best = {size: 0, val: ''};
+                      for (const el of all) {
+                        if (!(el instanceof HTMLElement)) continue;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        const txt = textFromEl(el);
+                        if (!txt) continue;
+                        const m = txt.replace(/\s+/g,'').match(/\d+(?:\.\d+)?/);
+                        if (!m) continue;
+                        const fs = parseFloat(getComputedStyle(el).fontSize) || 0;
+                        // Повышаем вес, если рядом есть символ валюты
+                        const around = (el.parentElement ? el.parentElement.innerText || '' : '') + (el.previousElementSibling ? el.previousElementSibling.innerText || '' : '');
+                        const bonus = /¥|￥/.test(around) ? 2 : 0;
+                        const score = fs + bonus;
+                        if (score > best.size) {
+                          best = {size: score, val: m[0]};
+                        }
+                      }
+                      if (best.val) return best.val;
+                      return '';
+                    }
+                """
+                price_candidate = await page.evaluate(js_get_price)
+                if isinstance(price_candidate, str):
+                    price = price_candidate.strip()
+                # сверка с div.YocHfP4N (не критично, просто лог)
+                try:
+                    js_check_div = """
+                        () => {
+                          const d = document.querySelector('div.YocHfP4N');
+                          if (!d) return '';
+                          return (d.innerText || '').trim();
+                        }
+                    """
+                    price2 = await page.evaluate(js_check_div)
+                    if debug:
+                        print(f"[DEBUG] Price(span.kxqW0mMz): {price} | div.YocHfP4N: {price2}")
+                except Exception:
+                    pass
+            except Exception as e:
+                if debug:
+                    print(f"[DEBUG] Ошибка извлечения цены: {e}")
+
+            # 4) Изображения: главное и дополнительные
             main_images: List[str] = []
             try:
-                img_elements = []
-                if container:
-                    img_elements = await page.query_selector_all("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div//img")
-                    if debug:
-                        print(f"[DEBUG] Нашли контейнер, img элементов: {len(img_elements)}")
-                for img in img_elements:
-                    src = await img.get_attribute("src")
-                    if src and src not in main_images:
-                        main_images.append(src)
+                # «Умная» медленная прокрутка: более плавные шаги + прокрутка к целевым узлам
+                try:
+                    async def get_lazy_img_count() -> int:
+                        try:
+                            return await page.evaluate(
+                                '() => document.querySelectorAll(`img.pdd-lazy-image.loaded[role="img"][aria-label="查看图片"]`).length'
+                            )
+                        except Exception:
+                            return 0
+
+                    # Первая медленная прокрутка вниз шагами
+                    last_count = await get_lazy_img_count()
+                    stable_rounds = 0
+                    for _ in range(2):  # два прохода цикла: вниз-вверх-вниз
+                        # вниз малыми шагами (0.5 высоты вьюпорта)
+                        for _ in range(28):
+                            await page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.5))")
+                            await self._human_pause(0.45, 0.95)
+                            new_count = await get_lazy_img_count()
+                            if new_count > last_count:
+                                last_count = new_count
+                                stable_rounds = 0
+                            else:
+                                stable_rounds += 1
+                            # если несколько шагов без прироста — небольшая задержка для догрузки
+                            if stable_rounds >= 3:
+                                await self._human_pause(0.8, 1.4)
+                                stable_rounds = 0
+                        # вверх
+                        await page.evaluate("() => window.scrollTo(0, 0)")
+                        await self._human_pause(0.8, 1.5)
+
+                    # Прокрутка к каждому целевому элементу по координате, чтобы триггерить lazy-load
+                    try:
+                        positions = await page.evaluate(
+                            '() => Array.from(document.querySelectorAll(`img.pdd-lazy-image[role=\'img\'][aria-label=\'查看图片\'], [aria-label=\'商品大图\'] img, [aria-label=\'商品大图\']`)).map(el => (el.getBoundingClientRect().top + window.scrollY))'
+                        )
+                        if isinstance(positions, list) and positions:
+                            positions = sorted(set(int(p) for p in positions if p is not None))
+                            for y in positions:
+                                await page.evaluate(f"(y) => window.scrollTo(0, Math.max(0, y - 120))", y)
+                                await self._human_pause(0.5, 1.1)
+                                # короткая задержка на догрузку сетей
+                                try:
+                                    await page.wait_for_load_state("networkidle", timeout=1500)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    # финальный проход вниз ограниченным числом шагов и по стабильности
+                    stable_rounds = 0
+                    last_count = await get_lazy_img_count()
+                    for _ in range(40):
+                        await page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.5))")
+                        await self._human_pause(0.5, 1.0)
+                        new_count = await get_lazy_img_count()
+                        if new_count > last_count:
+                            last_count = new_count
+                            stable_rounds = 0
+                        else:
+                            stable_rounds += 1
+                        if stable_rounds >= 6:
+                            break
+                except Exception:
+                    pass
+
+                # Главное: aria-label="商品大图" или заданный XPath
+                main_src = None
+                try:
+                    main_src = await page.evaluate("() => { const el = document.querySelector('[aria-label=\"商品大图\"] img, [aria-label=\"商品大图\"]'); return el ? (el.getAttribute('src') || el.getAttribute('data-src') || '') : '' }")
+                except Exception:
+                    main_src = None
+                if not main_src:
+                    try:
+                        el = await page.query_selector('xpath=/html/body/div[4]/div/div[1]/div[1]/div/div[2]/img')
+                        if el:
+                            main_src = await el.get_attribute('src') or await el.get_attribute('data-src')
+                    except Exception:
+                        pass
+                if main_src:
+                    main_src = main_src.strip()
+                    # Сокращаем pddpic ссылки у главного изображения: убираем query-параметры
+                    try:
+                        pu = urlparse(main_src)
+                        host = (pu.hostname or '').lower()
+                        if host.endswith('pddpic.com'):
+                            main_src = f"{pu.scheme}://{pu.netloc}{pu.path}"
+                    except Exception:
+                        pass
+                    if main_src and main_src not in main_images:
+                        main_images.append(main_src)
+                # Дополнительные: img.pdd-lazy-image.loaded[role="img"][aria-label="查看图片"],
+                # где data-src не начинается с https://promotion
+                js_extra_imgs = """
+                    () => {
+                      const arr = Array.from(document.querySelectorAll('img.pdd-lazy-image.loaded[role="img"][aria-label="查看图片"]'));
+                      const urls = [];
+                      for (const img of arr) {
+                        const ds = (img.getAttribute('data-src') || '').trim();
+                        const s = (img.getAttribute('src') || '').trim();
+                        const candidate = ds || s;
+                        if (!candidate) continue;
+                        if (candidate.startsWith('https://promotion')) continue;
+                        urls.push(candidate);
+                      }
+                      return Array.from(new Set(urls));
+                    }
+                """
+                extra_imgs = await page.evaluate(js_extra_imgs)
+                if isinstance(extra_imgs, list):
+                    for u in extra_imgs:
+                        if not isinstance(u, str):
+                            continue
+                        s = u.strip()
+                        if not s:
+                            continue
+                        # Сокращаем pddpic ссылки: убираем query-параметры
+                        try:
+                            pu = urlparse(s)
+                            host = (pu.hostname or '').lower()
+                            if host.endswith('pddpic.com'):
+                                s = f"{pu.scheme}://{pu.netloc}{pu.path}"
+                        except Exception:
+                            pass
+                        if s not in main_images:
+                            main_images.append(s)
+                # Фильтрация изображений только по разрешению (>=500x500)
+                async def _passes_filters(client: httpx.AsyncClient, url: str) -> bool:
+                    try:
+                        pu = urlparse(url)
+                        host = (pu.hostname or '').lower()
+                        # Для доменов pddpic.com допускаем доверительную проверку по параметрам URL
+                        if host.endswith('pddpic.com'):
+                            # Если в пути есть imageView2 и указан w>=500 — считаем подходящим без загрузки
+                            if '/imageView2/2/w/' in url or '/imageMogr2/thumbnail/' in url:
+                                try:
+                                    # Простая эвристика по числу после w/
+                                    import re
+                                    m = re.search(r"/w/(\d+)", url)
+                                    if m and int(m.group(1)) >= 500:
+                                        return True
+                                except Exception:
+                                    pass
+                            # Иначе продолжаем обычную проверку
+                        # Проверка размеров изображения: скачиваем и проверяем геометрию
+                        rr = await client.get(url, timeout=25)
+                        content = rr.content
+                        if not content:
+                            return False
+                        try:
+                            im = Image.open(BytesIO(content))
+                            w, h = im.size
+                            if w < 500 or h < 500:
+                                return False
+                        except Exception:
+                            # Если не смогли распарсить, но домен pddpic.com и известные параметры — примем
+                            if host.endswith('pddpic.com'):
+                                return True
+                            return False
+                        return True
+                    except Exception:
+                        return False
+
+                filtered_images: List[str] = []
+                try:
+                    # Добавим заголовки для успешной отдачи изображений (UA/Referer/Accept)
+                    default_headers = {
+                        "User-Agent": self.user_agent or DESKTOP_UA_POOL[0],
+                        "Referer": full_url,
+                        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+                        "Accept-Language": "zh-CN,zh;q=0.9",
+                    }
+                    async with httpx.AsyncClient(follow_redirects=True, headers=default_headers) as client:
+                        tasks = [
+                            _passes_filters(client, u) for u in main_images
+                        ]
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        for u, ok in zip(main_images, results):
+                            if isinstance(ok, bool) and ok:
+                                filtered_images.append(u)
+                    main_images = filtered_images
+                except Exception:
+                    pass
                 if debug:
-                    print(f"[DEBUG] main_imgs: {main_images}")
+                    print(f"[DEBUG] Собраны изображения после фильтрации: {len(main_images)}")
             except Exception as e:
                 if debug:
                     print(f"[DEBUG] Не удалось получить фотографии: {e}")
-            # Заголовок товара (если получится)
-            title = ""
-            try:
-                title_el = await page.query_selector("xpath=/html/body/div[4]/div/div[2]/div[1]//h1 | //h2 | //strong")
-                if title_el:
-                    t = await title_el.text_content()
-                    if t:
-                        title = t.strip()
-                if debug:
-                    print(f"[DEBUG] Заголовок: {title}")
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] Не удалось получить заголовок: {e}")
+
+            # 5) Дополнительно пробуем старое описание (fallback), если extra пуст
+            description = extra_desc
+            if not description:
+                try:
+                    await page.wait_for_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span", timeout=3000)
+                    desc_el = await page.query_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span")
+                    if desc_el:
+                        fallback = await desc_el.text_content()
+                        if fallback:
+                            description = fallback.strip()
+                except Exception:
+                    pass
+            if debug:
+                print(f"[DEBUG] Итоговое описание: {description}")
 
             # Закрытие браузера: оставляем открытым при отладке, если включено
             if debug:
@@ -527,14 +699,46 @@ class PinduoduoWebScraper:
                 await browser.close()
             if debug and html_source:
                 print(f"[DEBUG] HTML (начало): {html_source[:600]}")
+        # Извлекаем product_id из URL (goods_id=...)
+        product_id = None
+        try:
+            parsed = urlparse(full_url)
+            from urllib.parse import parse_qs
+            q = parse_qs(parsed.query)
+            for key in ["goods_id", "id", "item_id", "goodsId"]:
+                if key in q:
+                    pid = q[key][0]
+                    if pid and pid.isdigit():
+                        product_id = pid
+                        break
+        except Exception:
+            product_id = None
+
+        # Разносим изображения: первая — main_imgs, остальные — detail_imgs
+        split_main_imgs: List[str] = []
+        split_detail_imgs: List[str] = []
+        if main_images:
+            split_main_imgs = [main_images[0]]
+            if len(main_images) > 1:
+                split_detail_imgs = main_images[1:]
+        # Собираем минимальный JSON по ТЗ
+        pdd_minimal = {
+        "url": full_url,
+        "product_id": product_id or "",
+        "description": (title or "") + (" " + description if description else ""),
+        "images": split_main_imgs + split_detail_imgs,
+        "price": price or "",
+        }
+
         result["data"] = {
-            "item_id": None,
+            "url": full_url,
+            "item_id": product_id,
             "title": title or "",
-            "price": "",
-            "price_info": {"price": ""},
+            "price": price or "",
+            "price_info": {"price": price or ""},
             "product_props": [],
-            "main_imgs": main_images,
-            "detail_imgs": [],
+            "main_imgs": split_main_imgs,
+            "detail_imgs": split_detail_imgs,
             "details": description or "",
             "shop_info": {},
             "is_item_onsale": True,
@@ -542,6 +746,8 @@ class PinduoduoWebScraper:
             "skus": [],
             "promotions": None,
             "side_sales_tip": "",
+            # Добавляем минимальный вид для дальнейшей цепочки
+            "pdd_minimal": pdd_minimal,
         }
         if debug:
             print(f"[DEBUG] Финальный словарь result['data']: {result['data']}")

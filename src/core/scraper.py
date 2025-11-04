@@ -49,6 +49,16 @@ class Scraper:
         
         # Сохраняем платформу в product_data для дальнейшего использования
         product_data['_platform'] = platform
+
+        # Нормализуем URL товара для поста: используем короткий URL, если доступен
+        try:
+            if platform == Platform.PINDUODUO:
+                # pinduoduo_web кладёт короткий URL в data.url
+                short_url = product_data.get('url') or product_data.get('pdd_minimal', {}).get('url')
+                if short_url:
+                    product_data['product_url'] = short_url
+        except Exception:
+            pass
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] Платформа: {platform}")
@@ -68,6 +78,23 @@ class Scraper:
                     "Проверьте настройки авторизации и обновите cookies."
                 )
                 return user_msg, []
+            # Переводим описание на русский через Yandex Translate перед LLM
+            try:
+                pdd_min = product_data.get('pdd_minimal', {}) if isinstance(product_data, dict) else {}
+                raw_description = (
+                    (pdd_min.get('description') or '').strip() or
+                    (product_data.get('details') or '').strip() or
+                    (product_data.get('title') or '').strip()
+                )
+                if raw_description:
+                    translated = await self.yandex_translate_client.translate_text(raw_description, target_language="ru")
+                    if translated:
+                        product_data['details'] = translated
+                        if settings.DEBUG_MODE:
+                            print(f"[Scraper][Pinduoduo] Перевод описания выполнен, длина: {len(translated)}")
+            except Exception as e:
+                if settings.DEBUG_MODE:
+                    print(f"[Scraper][Pinduoduo] Ошибка перевода описания: {e}")
         
         exchange_rate = None
         # Если включена конвертация валют, получаем курс
@@ -83,6 +110,46 @@ class Scraper:
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] LLM контент получен: {llm_content.get('title', 'N/A')}")
+        
+        # Санитация ответа LLM: убираем выдуманные «Цвета», добавляем/фиксируем «Состав»
+        try:
+            if isinstance(llm_content, dict):
+                mc = llm_content.get('main_characteristics') or {}
+                if not isinstance(mc, dict):
+                    mc = {}
+                # 1) Удаляем цвета, если LLM выдумал вроде «Чистый цвет»/«Однотонный»
+                colors = mc.get('Цвета')
+                if colors:
+                    bad_markers = {'чистый цвет', 'однотон', 'однотонный', 'plain', 'solid'}
+                    def _is_bad(val: str) -> bool:
+                        s = (val or '').strip().lower()
+                        return any(k in s for k in bad_markers)
+                    if isinstance(colors, list):
+                        filtered = [c for c in colors if isinstance(c, str) and not _is_bad(c)]
+                        if filtered:
+                            mc['Цвета'] = filtered
+                        else:
+                            mc.pop('Цвета', None)
+                    elif isinstance(colors, str) and _is_bad(colors):
+                        mc.pop('Цвета', None)
+                # 2) Гарантируем «Состав», если он явным образом указан в описании
+                platform = product_data.get('_platform')
+                if platform == 'pinduoduo':
+                    import re
+                    desc_text = (product_data.get('details') or '')
+                    comp = None
+                    # Ищем «Ткань/материал», «Содержание волокон», «Состав»
+                    for pat in [r"(?i)Состав[:：]\s*([^\n]+)", r"(?i)Ткань\s*/?\s*материал[:：]\s*([^\n]+)", r"(?i)Содержание волокон[:：]\s*([^\n]+)"]:
+                        m = re.search(pat, desc_text)
+                        if m:
+                            comp = m.group(1).strip()
+                            break
+                    if comp:
+                        if not str(mc.get('Состав') or '').strip():
+                            mc['Состав'] = comp
+                llm_content['main_characteristics'] = mc
+        except Exception:
+            pass
         
         # Формируем финальный пост из структурированных данных
         post_text = self._build_post_text(
@@ -823,9 +890,33 @@ class Scraper:
         hashtags = llm_content.get('hashtags', [])
         emoji = llm_content.get('emoji', '')
         
-        # Извлекаем цену из skus (максимальная sale_price где stock > 0)
+        # Извлекаем цену (первично из skus), далее — надёжные фолбэки
         price = self._get_max_price_from_skus(product_data)
+        if not price:
+            price = str((product_data.get('price_info') or {}).get('price') or '').strip()
+        if not price:
+            price = str(product_data.get('price') or '').strip()
+        if not price:
+            price = str((product_data.get('pdd_minimal') or {}).get('price') or '').strip()
         
+        # Санитация названия/описания от выдуманных фасонов и годов
+        try:
+            src_text = ((product_data.get('details') or '') + ' ' + (product_data.get('title') or '')).lower()
+            def _neutralize_underwear(text: str) -> str:
+                t = text
+                # Если в исходном тексте нет "бокс", но есть "трусы" — заменяем "боксёры" на "трусы"
+                if 'трусы' in src_text and 'бокс' not in src_text:
+                    t = t.replace('трусы-боксёры', 'трусы')
+                    t = t.replace('боксёры', 'трусы')
+                return t
+            def _remove_years(text: str) -> str:
+                import re
+                return re.sub(r"\b(20\d{2})\b", "", text).replace('  ', ' ').strip()
+            title = _remove_years(_neutralize_underwear(title))
+            description = _remove_years(_neutralize_underwear(description))
+        except Exception:
+            pass
+
         if settings.DEBUG_MODE:
             price_info = product_data.get('price_info', {})
             print(f"[Scraper] Итоговая цена: {price}")
@@ -929,6 +1020,32 @@ class Scraper:
                     # Если значение - строка
                     post_parts.append(f"<i><b>{key}:</b> {value}</i>")
         
+        # Для Pinduoduo (и схожих): извлечём важные характеристики из переведённого описания
+        try:
+            platform = product_data.get('_platform')
+            if platform == 'pinduoduo':
+                import re
+                desc_text = (product_data.get('details') or '')
+                if desc_text:
+                    extracted: dict = {}
+                    m = re.search(r"(?i)Материал[:：]\s*([^\n]+)", desc_text)
+                    if m:
+                        extracted.setdefault('Материал', m.group(1).strip())
+                    m = re.search(r"(?i)Подкладка[:：]\s*([^\n]+)", desc_text)
+                    if m:
+                        extracted.setdefault('Подкладка', m.group(1).strip())
+                    m = re.search(r"(?i)(Тип застёжки|Застёжка)[:：]\s*([^\n]+)", desc_text)
+                    if m:
+                        extracted.setdefault('Тип застёжки', m.group(2).strip())
+                    # Сливаем в main_characteristics, не перезаписывая существующие
+                    for k, v in extracted.items():
+                        if not v:
+                            continue
+                        if k not in main_characteristics or not str(main_characteristics.get(k) or '').strip():
+                            main_characteristics[k] = v
+        except Exception:
+            pass
+
         # Дополнительная информация (только если есть)
         if additional_info:
             for key, value in additional_info.items():

@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     PDD_PHONE_NUMBER: str = ""  # Номер телефона без пробелов
     PDD_LOGIN_MAX_ATTEMPTS: int = 5  # Максимум повторных отправок кода
     PDD_LOGIN_CODE_TIMEOUT_SEC: int = 120  # Секунд до повторной отправки кода
-    PDD_COOKIES_FILE: str = "config/pdd_cookies.json"  # Путь к JSON с куки/UA
+    PDD_COOKIES_FILE: str = "src/pdd_cookies.json"  # Путь к JSON с куки/UA
     # Playwright
     PLAYWRIGHT_PROXY: str = ""  # Формат: http://127.0.0.1:10809 или socks5://127.0.0.1:10808
     PLAYWRIGHT_SLOWMO_MS: int = 100  # Замедление действий при DEBUG для наглядности
