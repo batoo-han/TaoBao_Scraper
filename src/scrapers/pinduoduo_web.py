@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import List, Dict, Any
 from urllib.parse import urlparse
 
@@ -10,6 +11,8 @@ from io import BytesIO
 
 import httpx
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 DESKTOP_UA_POOL = [
@@ -179,9 +182,11 @@ class PinduoduoWebScraper:
         Открывает страницу товара и извлекает: заголовок, описание, цену, изображения.
         Возвращает {code,msg,data} для дальнейшей обработки пайплайном.
         """
+        logger.info(f"Начало скрапинга Pinduoduo для URL: {url}")
         try:
             from playwright.async_api import async_playwright
         except ImportError as e:
+            logger.error(f"Playwright не установлен: {e}")
             if getattr(settings, 'DEBUG_MODE', False):
                 print("[PDD][INIT] Playwright не установлен. Установите зависимости и браузер:")
                 print("[PDD][INIT] pip install -r requirements.txt && python -m playwright install chromium")
@@ -189,151 +194,160 @@ class PinduoduoWebScraper:
 
         # Результат по умолчанию
         result: Dict[str, Any] = {"code": 200, "msg": "success", "data": {}}
-
-        debug = getattr(settings, 'DEBUG_MODE', False)
-        html_source = None
-        # Нормализуем URL: добавим схему при её отсутствии
-        full_url = url
-        if not (url.startswith("http://") or url.startswith("https://")):
-            full_url = f"https://{url}"
-            if debug:
-                print(f"[DEBUG] Нормализуем URL без схемы → {full_url}")
-        async with async_playwright() as p:
-            # В DEBUG всегда показываем окно браузера
-            headless = False if getattr(settings, 'DEBUG_MODE', False) else True
-            slow_mo = int(getattr(settings, 'PLAYWRIGHT_SLOWMO_MS', 0)) if getattr(settings, 'DEBUG_MODE', False) else 0
-            launch_kwargs = {"headless": headless}
-            if slow_mo:
-                launch_kwargs["slow_mo"] = slow_mo
-            # Прокси на уровне браузера
-            if getattr(settings, 'PLAYWRIGHT_PROXY', "").strip():
-                launch_kwargs["proxy"] = {"server": settings.PLAYWRIGHT_PROXY.strip()}
+        
+        try:
+            debug = getattr(settings, 'DEBUG_MODE', False)
+            html_source = None
+            # Нормализуем URL: добавим схему при её отсутствии
+            full_url = url
+            if not (url.startswith("http://") or url.startswith("https://")):
+                full_url = f"https://{url}"
                 if debug:
-                    print(f"[DEBUG] Playwright proxy: {settings.PLAYWRIGHT_PROXY.strip()}")
+                    print(f"[DEBUG] Нормализуем URL без схемы → {full_url}")
+            async with async_playwright() as p:
+                # В DEBUG всегда показываем окно браузера
+                headless = False if getattr(settings, 'DEBUG_MODE', False) else True
+                slow_mo = int(getattr(settings, 'PLAYWRIGHT_SLOWMO_MS', 0)) if getattr(settings, 'DEBUG_MODE', False) else 0
+                launch_kwargs = {"headless": headless}
+                if slow_mo:
+                    launch_kwargs["slow_mo"] = slow_mo
+                # Прокси на уровне браузера
+                if getattr(settings, 'PLAYWRIGHT_PROXY', "").strip():
+                    launch_kwargs["proxy"] = {"server": settings.PLAYWRIGHT_PROXY.strip()}
+                    if debug:
+                        print(f"[DEBUG] Playwright proxy: {settings.PLAYWRIGHT_PROXY.strip()}")
 
-            browser = await p.chromium.launch(**launch_kwargs)
-            # Подбор UA под профиль
-            is_mobile = bool(getattr(settings, 'PLAYWRIGHT_USE_MOBILE', False))
-            self._ensure_user_agent(is_mobile, debug)
+                browser = await p.chromium.launch(**launch_kwargs)
+                # Подбор UA под профиль
+                is_mobile = bool(getattr(settings, 'PLAYWRIGHT_USE_MOBILE', False))
+                self._ensure_user_agent(is_mobile, debug)
 
-            context = None
-            # Выбор режима: мобильный или обычный
-            if is_mobile:
-                device_name = getattr(settings, 'PLAYWRIGHT_MOBILE_DEVICE', 'iPhone 12')
+                context = None
+                # Выбор режима: мобильный или обычный
+                if is_mobile:
+                    device_name = getattr(settings, 'PLAYWRIGHT_MOBILE_DEVICE', 'iPhone 12')
+                    try:
+                        device = p.devices.get(device_name) or p.devices['iPhone 12']
+                    except Exception:
+                        device = p.devices['iPhone 12']
+                    device_kwargs = {
+                        **device,
+                        "locale": getattr(settings, 'PLAYWRIGHT_LOCALE', 'zh-CN'),
+                        "timezone_id": getattr(settings, 'PLAYWRIGHT_TIMEZONE', 'Asia/Shanghai'),
+                        "permissions": device.get("permissions", []),
+                        "extra_http_headers": {
+                            "Accept-Language": "zh-CN,zh;q=0.9",
+                        },
+                        "user_agent": self.user_agent,
+                    }
+                    context = await browser.new_context(**device_kwargs)
+                else:
+                    context_args = {
+                        "locale": getattr(settings, 'PLAYWRIGHT_LOCALE', 'zh-CN'),
+                        "timezone_id": getattr(settings, 'PLAYWRIGHT_TIMEZONE', 'Asia/Shanghai'),
+                        "extra_http_headers": {"Accept-Language": "zh-CN,zh;q=0.9"},
+                        "user_agent": self.user_agent,
+                    }
+                    context = await browser.new_context(**context_args)
+
+                # 1) Пытаемся использовать куки из файла JSON
+                have_preset_cookies = False
                 try:
-                    device = p.devices.get(device_name) or p.devices['iPhone 12']
-                except Exception:
-                    device = p.devices['iPhone 12']
-                device_kwargs = {
-                    **device,
-                    "locale": getattr(settings, 'PLAYWRIGHT_LOCALE', 'zh-CN'),
-                    "timezone_id": getattr(settings, 'PLAYWRIGHT_TIMEZONE', 'Asia/Shanghai'),
-                    "permissions": device.get("permissions", []),
-                    "extra_http_headers": {
-                        "Accept-Language": "zh-CN,zh;q=0.9",
-                    },
-                    "user_agent": self.user_agent,
-                }
-                context = await browser.new_context(**device_kwargs)
-            else:
-                context_args = {
-                    "locale": getattr(settings, 'PLAYWRIGHT_LOCALE', 'zh-CN'),
-                    "timezone_id": getattr(settings, 'PLAYWRIGHT_TIMEZONE', 'Asia/Shanghai'),
-                    "extra_http_headers": {"Accept-Language": "zh-CN,zh;q=0.9"},
-                    "user_agent": self.user_agent,
-                }
-                context = await browser.new_context(**context_args)
-
-            # 1) Пытаемся использовать куки из файла JSON
-            have_preset_cookies = False
-            try:
-                path = settings.PDD_COOKIES_FILE
-                if path and os.path.exists(path):
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    # приоритет: cookies (массив), затем cookieHeader
-                    file_cookies = data.get("cookies")
-                    if isinstance(file_cookies, list) and file_cookies:
-                        norm = self._normalize_cookies(file_cookies)
-                        await context.add_cookies(norm)
-                        have_preset_cookies = True
-                        if debug:
-                            print(f"[DEBUG] Загружены cookies из массива cookies в JSON: {len(norm)} шт.")
-                    elif (data.get("cookieHeader") or "").strip():
-                        arr = _cookies_header_to_array((data.get("cookieHeader") or "").strip())
-                        if arr:
-                            await context.add_cookies(arr)
+                    path = settings.PDD_COOKIES_FILE
+                    if path and os.path.exists(path):
+                        with open(path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        # приоритет: cookies (массив), затем cookieHeader
+                        file_cookies = data.get("cookies")
+                        if isinstance(file_cookies, list) and file_cookies:
+                            norm = self._normalize_cookies(file_cookies)
+                            await context.add_cookies(norm)
                             have_preset_cookies = True
                             if debug:
-                                print(f"[DEBUG] Загружены cookies из cookieHeader в JSON: {len(arr)} шт.")
+                                print(f"[DEBUG] Загружены cookies из массива cookies в JSON: {len(norm)} шт.")
+                        elif (data.get("cookieHeader") or "").strip():
+                            arr = _cookies_header_to_array((data.get("cookieHeader") or "").strip())
+                            if arr:
+                                await context.add_cookies(arr)
+                                have_preset_cookies = True
+                                if debug:
+                                    print(f"[DEBUG] Загружены cookies из cookieHeader в JSON: {len(arr)} шт.")
+                        else:
+                            if debug:
+                                print("[DEBUG] Файл JSON найден, но cookies отсутствуют")
                     else:
                         if debug:
-                            print("[DEBUG] Файл JSON найден, но cookies отсутствуют")
-                else:
+                            print("[DEBUG] Файл cookies JSON не найден — перейдём к логину")
+                except Exception as e:
                     if debug:
-                        print("[DEBUG] Файл cookies JSON не найден — перейдём к логину")
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] Не удалось загрузить cookies из JSON: {e}")
+                        print(f"[DEBUG] Не удалось загрузить cookies из JSON: {e}")
 
-            page = await context.new_page()
-            try:
-                to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
-                page.set_default_timeout(to)
-                page.set_default_navigation_timeout(to)
-            except Exception:
-                pass
-
-            # 2) Если кук нет — не логинимся. Используем только предустановленные куки.
-            if not have_preset_cookies:
-                if debug:
-                    print("[DEBUG] Куки отсутствуют — прерываем (только предустановленные куки допускаются)")
-                await context.close()
-                await browser.close()
-                result['code'] = 401
-                result['msg'] = 'PDD cookies missing. Provide cookies in src/pdd_cookies.json.'
-                return result
-
-            # 3) Переходим на страницу товара
-            try:
-                if debug:
-                    print(f"[DEBUG] Переход на страницу товара: {full_url}")
-                # Сначала минимум DOM, затем полная загрузка и сетевой простои
-                await page.goto(full_url, wait_until="domcontentloaded")
+                page = await context.new_page()
                 try:
                     to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
-                    await page.wait_for_load_state("load", timeout=to)
-                    await page.wait_for_load_state("networkidle", timeout=to)
+                    page.set_default_timeout(to)
+                    page.set_default_navigation_timeout(to)
                 except Exception:
                     pass
-                await self._human_pause(0.8, 1.6)
-                html_source = await page.content()
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] Ошибка при загрузке страницы: {e}")
-                result['code'] = 500
-                result['msg'] = f'Ошибка Playwright: {e}'
-                # В DEBUG не закрываем браузер; вне DEBUG — по настройке
-                if debug:
-                    pass
-                elif not getattr(settings, 'PLAYWRIGHT_KEEP_BROWSER_OPEN', False):
+
+                # 2) Если кук нет — не логинимся. Используем только предустановленные куки.
+                if not have_preset_cookies:
+                    logger.warning("Куки отсутствуют — прерываем (только предустановленные куки допускаются)")
+                    if debug:
+                        print("[DEBUG] Куки отсутствуют — прерываем (только предустановленные куки допускаются)")
                     await context.close()
                     await browser.close()
-                return result
+                    result['code'] = 401
+                    result['msg'] = (
+                        'PDD cookies missing. '
+                        'Create src/pdd_cookies.json based on src/pdd_cookies_example.json. '
+                        'The file must contain valid cookies for mobile.yangkeduo.com. '
+                        'See README.md for instructions.'
+                    )
+                    logger.error(f"Ошибка 401: {result['msg']}")
+                    return result
 
-            # 4) Проверяем наличие ключевого контейнера (не критично, просто для логов)
-            try:
-                container = await page.wait_for_selector("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div", timeout=5000)
-            except Exception:
-                container = None
-            if not container and debug:
-                print("[DEBUG] Ключевой контейнер не найден — продолжаем извлечение по селекторам из ТЗ")
+                # 3) Переходим на страницу товара
+                try:
+                    if debug:
+                        print(f"[DEBUG] Переход на страницу товара: {full_url}")
+                    # Сначала минимум DOM, затем полная загрузка и сетевой простои
+                    await page.goto(full_url, wait_until="domcontentloaded")
+                    try:
+                        to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
+                        await page.wait_for_load_state("load", timeout=to)
+                        await page.wait_for_load_state("networkidle", timeout=to)
+                    except Exception:
+                        pass
+                    await self._human_pause(0.8, 1.6)
+                    html_source = await page.content()
+                except Exception as e:
+                    logger.error(f"Ошибка при загрузке страницы {full_url}: {e}", exc_info=True)
+                    if debug:
+                        print(f"[DEBUG] Ошибка при загрузке страницы: {e}")
+                    result['code'] = 500
+                    result['msg'] = f'Ошибка Playwright: {e}'
+                    # В DEBUG не закрываем браузер; вне DEBUG — по настройке
+                    if debug:
+                        pass
+                    elif not getattr(settings, 'PLAYWRIGHT_KEEP_BROWSER_OPEN', False):
+                        await context.close()
+                        await browser.close()
+                    return result
 
-            # Извлекаем элементы строго по правилам ТЗ
-            # 1) Название товара: span.tLYIg_Ju.enable-select → взять самый длинный текст (>20 символов), обходя вложенные элементы
-            title = ""
-            try:
-                js_get_title = """
+                # 4) Проверяем наличие ключевого контейнера (не критично, просто для логов)
+                try:
+                    container = await page.wait_for_selector("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div", timeout=5000)
+                except Exception:
+                    container = None
+                if not container and debug:
+                    print("[DEBUG] Ключевой контейнер не найден — продолжаем извлечение по селекторам из ТЗ")
+
+                # Извлекаем элементы строго по правилам ТЗ
+                # 1) Название товара: span.tLYIg_Ju.enable-select → взять самый длинный текст (>20 символов), обходя вложенные элементы
+                title = ""
+                try:
+                    js_get_title = """
                     () => {
                       const nodes = Array.from(document.querySelectorAll('span.tLYIg_Ju.enable-select'));
                       let best = '';
@@ -352,19 +366,19 @@ class PinduoduoWebScraper:
                       return best; // вернём лучшее, даже если короче
                     }
                 """
-                title_candidate = await page.evaluate(js_get_title)
-                if isinstance(title_candidate, str):
-                    title = title_candidate.strip()
-                if debug:
-                    print(f"[DEBUG] Title(span.tLYIg_Ju.enable-select): {title}")
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] Ошибка извлечения title по классу: {e}")
+                    title_candidate = await page.evaluate(js_get_title)
+                    if isinstance(title_candidate, str):
+                        title = title_candidate.strip()
+                    if debug:
+                        print(f"[DEBUG] Title(span.tLYIg_Ju.enable-select): {title}")
+                except Exception as e:
+                    if debug:
+                        print(f"[DEBUG] Ошибка извлечения title по классу: {e}")
 
-            # 2) Дополнительное описание: div.jvsKAdEs → собрать aria-label из внутренних контейнеров
-            extra_desc = ""
-            try:
-                js_get_extra = """
+                # 2) Дополнительное описание: div.jvsKAdEs → собрать aria-label из внутренних контейнеров
+                extra_desc = ""
+                try:
+                    js_get_extra = """
                     () => {
                       const root = document.querySelector('div.jvsKAdEs');
                       if (!root) return '';
@@ -375,24 +389,24 @@ class PinduoduoWebScraper:
                       return parts.join(' ').trim();
                     }
                 """
-                extra_candidate = await page.evaluate(js_get_extra)
-                if isinstance(extra_candidate, str):
-                    extra_desc = extra_candidate.strip()
-                if debug:
-                    print(f"[DEBUG] Extra(desc aria-label in jvsKAdEs): {extra_desc}")
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] Ошибка извлечения дополнительного описания: {e}")
+                    extra_candidate = await page.evaluate(js_get_extra)
+                    if isinstance(extra_candidate, str):
+                        extra_desc = extra_candidate.strip()
+                    if debug:
+                        print(f"[DEBUG] Extra(desc aria-label in jvsKAdEs): {extra_desc}")
+                except Exception as e:
+                    if debug:
+                        print(f"[DEBUG] Ошибка извлечения дополнительного описания: {e}")
 
-            # 3) Цена: span.kxqW0mMz → собрать текст всех потомков по порядку; сверить с div.YocHfP4N
-            price = ""
-            try:
-                # Ждём появления контейнера цены, т.к. он может рендериться позже
+                # 3) Цена: span.kxqW0mMz → собрать текст всех потомков по порядку; сверить с div.YocHfP4N
+                price = ""
                 try:
-                    await page.wait_for_selector('span.kxqW0mMz', timeout=7000)
-                except Exception:
-                    pass
-                js_get_price = """
+                    # Ждём появления контейнера цены, т.к. он может рендериться позже
+                    try:
+                        await page.wait_for_selector('span.kxqW0mMz', timeout=7000)
+                    except Exception:
+                        pass
+                    js_get_price = """
                     () => {
                       const selectors = [
                         'span.kxqW0mMz',
@@ -463,95 +477,95 @@ class PinduoduoWebScraper:
                       return '';
                     }
                 """
-                price_candidate = await page.evaluate(js_get_price)
-                if isinstance(price_candidate, str):
-                    price = price_candidate.strip()
-                # сверка с div.YocHfP4N (не критично, просто лог)
-                try:
-                    js_check_div = """
-                        () => {
-                          const d = document.querySelector('div.YocHfP4N');
-                          if (!d) return '';
-                          return (d.innerText || '').trim();
-                        }
-                    """
-                    price2 = await page.evaluate(js_check_div)
+                    price_candidate = await page.evaluate(js_get_price)
+                    if isinstance(price_candidate, str):
+                        price = price_candidate.strip()
+                    # сверка с div.YocHfP4N (не критично, просто лог)
+                    try:
+                        js_check_div = """
+                            () => {
+                              const d = document.querySelector('div.YocHfP4N');
+                              if (!d) return '';
+                              return (d.innerText || '').trim();
+                            }
+                        """
+                        price2 = await page.evaluate(js_check_div)
+                        if debug:
+                            print(f"[DEBUG] Price(span.kxqW0mMz): {price} | div.YocHfP4N: {price2}")
+                    except Exception:
+                        pass
+                except Exception as e:
                     if debug:
-                        print(f"[DEBUG] Price(span.kxqW0mMz): {price} | div.YocHfP4N: {price2}")
-                except Exception:
-                    pass
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] Ошибка извлечения цены: {e}")
+                        print(f"[DEBUG] Ошибка извлечения цены: {e}")
 
-            # 4) Изображения: главное и дополнительные
-            main_images: List[str] = []
-            try:
-                # «Умная» медленная прокрутка: более плавные шаги + прокрутка к целевым узлам
+                # 4) Изображения: главное и дополнительные
+                main_images: List[str] = []
                 try:
-                    async def get_lazy_img_count() -> int:
-                        try:
-                            return await page.evaluate(
-                                '() => document.querySelectorAll(`img.pdd-lazy-image.loaded[role="img"][aria-label="查看图片"]`).length'
-                            )
-                        except Exception:
-                            return 0
+                    # «Умная» медленная прокрутка: более плавные шаги + прокрутка к целевым узлам
+                    try:
+                        async def get_lazy_img_count() -> int:
+                            try:
+                                return await page.evaluate(
+                                    '() => document.querySelectorAll(`img.pdd-lazy-image.loaded[role="img"][aria-label="查看图片"]`).length'
+                                )
+                            except Exception:
+                                return 0
 
-                    # Первая медленная прокрутка вниз шагами
-                    last_count = await get_lazy_img_count()
-                    stable_rounds = 0
-                    for _ in range(2):  # два прохода цикла: вниз-вверх-вниз
-                        # вниз малыми шагами (0.5 высоты вьюпорта)
-                        for _ in range(28):
+                        # Первая медленная прокрутка вниз шагами
+                        last_count = await get_lazy_img_count()
+                        stable_rounds = 0
+                        for _ in range(2):  # два прохода цикла: вниз-вверх-вниз
+                            # вниз малыми шагами (0.5 высоты вьюпорта)
+                            for _ in range(28):
+                                await page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.5))")
+                                await self._human_pause(0.45, 0.95)
+                                new_count = await get_lazy_img_count()
+                                if new_count > last_count:
+                                    last_count = new_count
+                                    stable_rounds = 0
+                                else:
+                                    stable_rounds += 1
+                                # если несколько шагов без прироста — небольшая задержка для догрузки
+                                if stable_rounds >= 3:
+                                    await self._human_pause(0.8, 1.4)
+                                    stable_rounds = 0
+                            # вверх
+                            await page.evaluate("() => window.scrollTo(0, 0)")
+                            await self._human_pause(0.8, 1.5)
+
+                        # Прокрутка к каждому целевому элементу по координате, чтобы триггерить lazy-load
+                        try:
+                            positions = await page.evaluate(
+                                '() => Array.from(document.querySelectorAll(`img.pdd-lazy-image[role=\'img\'][aria-label=\'查看图片\'], [aria-label=\'商品大图\'] img, [aria-label=\'商品大图\']`)).map(el => (el.getBoundingClientRect().top + window.scrollY))'
+                            )
+                            if isinstance(positions, list) and positions:
+                                positions = sorted(set(int(p) for p in positions if p is not None))
+                                for y in positions:
+                                    await page.evaluate(f"(y) => window.scrollTo(0, Math.max(0, y - 120))", y)
+                                    await self._human_pause(0.5, 1.1)
+                                    # короткая задержка на догрузку сетей
+                                    try:
+                                        await page.wait_for_load_state("networkidle", timeout=1500)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                        # финальный проход вниз ограниченным числом шагов и по стабильности
+                        stable_rounds = 0
+                        last_count = await get_lazy_img_count()
+                        for _ in range(40):
                             await page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.5))")
-                            await self._human_pause(0.45, 0.95)
+                            await self._human_pause(0.5, 1.0)
                             new_count = await get_lazy_img_count()
                             if new_count > last_count:
                                 last_count = new_count
                                 stable_rounds = 0
                             else:
                                 stable_rounds += 1
-                            # если несколько шагов без прироста — небольшая задержка для догрузки
-                            if stable_rounds >= 3:
-                                await self._human_pause(0.8, 1.4)
-                                stable_rounds = 0
-                        # вверх
-                        await page.evaluate("() => window.scrollTo(0, 0)")
-                        await self._human_pause(0.8, 1.5)
-
-                    # Прокрутка к каждому целевому элементу по координате, чтобы триггерить lazy-load
-                    try:
-                        positions = await page.evaluate(
-                            '() => Array.from(document.querySelectorAll(`img.pdd-lazy-image[role=\'img\'][aria-label=\'查看图片\'], [aria-label=\'商品大图\'] img, [aria-label=\'商品大图\']`)).map(el => (el.getBoundingClientRect().top + window.scrollY))'
-                        )
-                        if isinstance(positions, list) and positions:
-                            positions = sorted(set(int(p) for p in positions if p is not None))
-                            for y in positions:
-                                await page.evaluate(f"(y) => window.scrollTo(0, Math.max(0, y - 120))", y)
-                                await self._human_pause(0.5, 1.1)
-                                # короткая задержка на догрузку сетей
-                                try:
-                                    await page.wait_for_load_state("networkidle", timeout=1500)
-                                except Exception:
-                                    pass
+                            if stable_rounds >= 6:
+                                break
                     except Exception:
                         pass
-                    # финальный проход вниз ограниченным числом шагов и по стабильности
-                    stable_rounds = 0
-                    last_count = await get_lazy_img_count()
-                    for _ in range(40):
-                        await page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.5))")
-                        await self._human_pause(0.5, 1.0)
-                        new_count = await get_lazy_img_count()
-                        if new_count > last_count:
-                            last_count = new_count
-                            stable_rounds = 0
-                        else:
-                            stable_rounds += 1
-                        if stable_rounds >= 6:
-                            break
-                except Exception:
-                    pass
 
                 # Главное: aria-label="商品大图" или заданный XPath
                 main_src = None
@@ -676,81 +690,98 @@ class PinduoduoWebScraper:
                 if debug:
                     print(f"[DEBUG] Не удалось получить фотографии: {e}")
 
-            # 5) Дополнительно пробуем старое описание (fallback), если extra пуст
-            description = extra_desc
-            if not description:
-                try:
-                    await page.wait_for_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span", timeout=3000)
-                    desc_el = await page.query_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span")
-                    if desc_el:
-                        fallback = await desc_el.text_content()
-                        if fallback:
-                            description = fallback.strip()
-                except Exception:
-                    pass
-            if debug:
-                print(f"[DEBUG] Итоговое описание: {description}")
+                # 5) Дополнительно пробуем старое описание (fallback), если extra пуст
+                description = extra_desc
+                if not description:
+                    try:
+                        await page.wait_for_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span", timeout=3000)
+                        desc_el = await page.query_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span")
+                        if desc_el:
+                            fallback = await desc_el.text_content()
+                            if fallback:
+                                description = fallback.strip()
+                    except Exception:
+                        pass
+                if debug:
+                    print(f"[DEBUG] Итоговое описание: {description}")
 
-            # Закрытие браузера: оставляем открытым при отладке, если включено
-            if debug:
-                print("[DEBUG] Окно браузера оставлено открытым (DEBUG_MODE=True)")
-            elif not getattr(settings, 'PLAYWRIGHT_KEEP_BROWSER_OPEN', False):
-                await context.close()
-                await browser.close()
-            if debug and html_source:
-                print(f"[DEBUG] HTML (начало): {html_source[:600]}")
-        # Извлекаем product_id из URL (goods_id=...)
-        product_id = None
-        try:
-            parsed = urlparse(full_url)
-            from urllib.parse import parse_qs
-            q = parse_qs(parsed.query)
-            for key in ["goods_id", "id", "item_id", "goodsId"]:
-                if key in q:
-                    pid = q[key][0]
-                    if pid and pid.isdigit():
-                        product_id = pid
-                        break
-        except Exception:
+                # Закрытие браузера: оставляем открытым при отладке, если включено
+                if debug:
+                    print("[DEBUG] Окно браузера оставлено открытым (DEBUG_MODE=True)")
+                elif not getattr(settings, 'PLAYWRIGHT_KEEP_BROWSER_OPEN', False):
+                    await context.close()
+                    await browser.close()
+                if debug and html_source:
+                    print(f"[DEBUG] HTML (начало): {html_source[:600]}")
+            
+            # Извлекаем product_id из URL (goods_id=...)
             product_id = None
+            try:
+                parsed = urlparse(full_url)
+                from urllib.parse import parse_qs
+                q = parse_qs(parsed.query)
+                for key in ["goods_id", "id", "item_id", "goodsId"]:
+                    if key in q:
+                        pid = q[key][0]
+                        if pid and pid.isdigit():
+                            product_id = pid
+                            break
+            except Exception:
+                product_id = None
 
-        # Разносим изображения: первая — main_imgs, остальные — detail_imgs
-        split_main_imgs: List[str] = []
-        split_detail_imgs: List[str] = []
-        if main_images:
-            split_main_imgs = [main_images[0]]
-            if len(main_images) > 1:
-                split_detail_imgs = main_images[1:]
-        # Собираем минимальный JSON по ТЗ
-        pdd_minimal = {
-        "url": full_url,
-        "product_id": product_id or "",
-        "description": (title or "") + (" " + description if description else ""),
-        "images": split_main_imgs + split_detail_imgs,
-        "price": price or "",
-        }
+            # Разносим изображения: первая — main_imgs, остальные — detail_imgs
+            split_main_imgs: List[str] = []
+            split_detail_imgs: List[str] = []
+            if main_images:
+                split_main_imgs = [main_images[0]]
+                if len(main_images) > 1:
+                    split_detail_imgs = main_images[1:]
+            # Собираем минимальный JSON по ТЗ
+            pdd_minimal = {
+                "url": full_url,
+                "product_id": product_id or "",
+                "description": (title or "") + (" " + description if description else ""),
+                "images": split_main_imgs + split_detail_imgs,
+                "price": price or "",
+            }
 
-        result["data"] = {
-            "url": full_url,
-            "item_id": product_id,
-            "title": title or "",
-            "price": price or "",
-            "price_info": {"price": price or ""},
-            "product_props": [],
-            "main_imgs": split_main_imgs,
-            "detail_imgs": split_detail_imgs,
-            "details": description or "",
-            "shop_info": {},
-            "is_item_onsale": True,
-            "sku_props": [],
-            "skus": [],
-            "promotions": None,
-            "side_sales_tip": "",
-            # Добавляем минимальный вид для дальнейшей цепочки
-            "pdd_minimal": pdd_minimal,
-        }
-        if debug:
-            print(f"[DEBUG] Финальный словарь result['data']: {result['data']}")
-        return result
+            result["data"] = {
+                "url": full_url,
+                "item_id": product_id,
+                "title": title or "",
+                "price": price or "",
+                "price_info": {"price": price or ""},
+                "product_props": [],
+                "main_imgs": split_main_imgs,
+                "detail_imgs": split_detail_imgs,
+                "details": description or "",
+                "shop_info": {},
+                "is_item_onsale": True,
+                "sku_props": [],
+                "skus": [],
+                "promotions": None,
+                "side_sales_tip": "",
+                # Добавляем минимальный вид для дальнейшей цепочки
+                "pdd_minimal": pdd_minimal,
+            }
+            if debug:
+                print(f"[DEBUG] Финальный словарь result['data']: {result['data']}")
+            
+            # Логируем результат
+            logger.info(
+                f"Скрапинг завершён. Code: {result['code']}, "
+                f"Title: {result.get('data', {}).get('title', 'N/A')[:50]}, "
+                f"Images: {len(result.get('data', {}).get('main_imgs', [])) + len(result.get('data', {}).get('detail_imgs', []))}"
+            )
+            
+            return result
+        except Exception as e:
+            # Ловим любые неожиданные ошибки
+            logger.error(f"Неожиданная ошибка при скрапинге Pinduoduo для {url}: {e}", exc_info=True)
+            return {
+                "code": 500,
+                "msg": f"Неожиданная ошибка: {str(e)}",
+                "data": {}
+            }
 
 

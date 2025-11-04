@@ -1,3 +1,5 @@
+import logging
+
 from src.api.tmapi import TmapiClient
 from src.api.yandex_gpt import YandexGPTClient
 from src.api.exchange_rate import ExchangeRateClient
@@ -5,6 +7,8 @@ from src.api.yandex_translate import YandexTranslateClient
 from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
 from src.scrapers.pinduoduo_web import PinduoduoWebScraper
+
+logger = logging.getLogger(__name__)
 
 class Scraper:
     """
@@ -29,12 +33,17 @@ class Scraper:
         """
         # Определяем платформу заранее, чтобы Pinduoduo обрабатывать веб-скрапингом
         platform, _ = URLParser.parse_url(url)
+        logger.info(f"Определена платформа: {platform} для URL: {url}")
+        
         if platform == Platform.PINDUODUO:
+            logger.info("Обработка Pinduoduo через веб-скрапинг")
             pdd = PinduoduoWebScraper()
             api_response = await pdd.fetch_product(url)
+            logger.info(f"Ответ от Pinduoduo скрейпера: code={api_response.get('code')}, msg={api_response.get('msg')}")
             api_response['_platform'] = Platform.PINDUODUO
         else:
             # Получаем данные о товаре через tmapi.top (автоопределение платформы)
+            logger.info("Обработка через TMAPI")
             api_response = await self.tmapi_client.get_product_info_auto(url)
         
         # Извлекаем платформу (добавлено методом get_product_info_auto)
@@ -64,11 +73,28 @@ class Scraper:
             print(f"[Scraper] Платформа: {platform}")
             print(f"[Scraper] Данные товара получены: {product_data.get('title', 'N/A')[:50]}...")
         
-        # Ранняя проверка: если Pinduoduo и совсем пусто — прерываем цепочку до LLM
+        # Ранняя проверка: если Pinduoduo и ошибка авторизации (401) — сообщаем пользователю
         if platform == 'pinduoduo':
+            logger.info(f"Проверка ответа Pinduoduo: code={api_response.get('code') if isinstance(api_response, dict) else 'N/A'}")
+            # Проверяем ошибку авторизации
+            if isinstance(api_response, dict) and api_response.get('code') == 401:
+                logger.warning("Ошибка 401: отсутствуют cookies для Pinduoduo")
+                user_msg = (
+                    "❌ Не удалось получить данные товара с Pinduoduo.\n\n"
+                    "⚠️ Отсутствует файл с cookies для авторизации.\n\n"
+                    "Для работы с Pinduoduo необходимо:\n"
+                    "1. Создать файл `src/pdd_cookies.json` на основе `src/pdd_cookies_example.json`\n"
+                    "2. Заполнить файл реальными cookies из вашего браузера\n"
+                    "3. Перезапустить бота\n\n"
+                    "Подробнее см. в документации проекта."
+                )
+                return user_msg, []
+            # Ранняя проверка: если Pinduoduo и совсем пусто — прерываем цепочку до LLM
             no_images = not product_data.get('main_imgs') and not product_data.get('detail_imgs')
             no_text = not (product_data.get('details') or product_data.get('title'))
+            logger.info(f"Проверка данных Pinduoduo: images={not no_images}, text={not no_text}")
             if no_images and no_text:
+                logger.warning("Пустой результат от Pinduoduo: нет фото и описания")
                 if settings.DEBUG_MODE:
                     print("[Scraper][Pinduoduo] Пустой результат: нет фото и описания. Прерываем цепочку.")
                     print(f"[Scraper][Pinduoduo] product_data keys: {list(product_data.keys())}")

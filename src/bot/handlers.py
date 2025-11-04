@@ -1,5 +1,6 @@
 import asyncio
 import random
+import logging
 from aiogram import Router, F
 from aiogram.types import Message, InputMediaPhoto
 from aiogram.filters import CommandStart
@@ -7,6 +8,8 @@ from aiogram.enums import ChatAction
 
 from src.core.scraper import Scraper
 from src.bot.error_handler import error_handler
+
+logger = logging.getLogger(__name__)
 
 # Инициализация роутера для обработки сообщений
 router = Router()
@@ -62,11 +65,22 @@ async def handle_product_link(message: Message) -> None:
     # Запускаем фоновую задачу для индикатора "печатает"
     typing_task = asyncio.create_task(send_typing_action(message, stop_typing))
     
+    product_url = message.text  # Определяем переменную до try блока
     try:
-        product_url = message.text
+        logger.info(f"Обработка ссылки: {product_url}")
         # Скрапинг информации о товаре и генерация текста поста
         post_text, image_urls = await scraper.scrape_product(product_url)
-
+        logger.info(f"Скрапинг завершён. Длина текста: {len(post_text) if post_text else 0}, изображений: {len(image_urls) if image_urls else 0}")
+        
+        # Проверяем, что результат не пустой
+        if not post_text:
+            logger.warning("Получен пустой текст поста")
+            await message.answer(
+                "❌ Не удалось получить данные о товаре.\n\n"
+                "Возможно, товар недоступен или ссылка неверна."
+            )
+            return
+        
         if image_urls and len(image_urls) > 0:
             # Отправляем первые 4 фото с текстом поста
             media_main = []
@@ -98,6 +112,8 @@ async def handle_product_link(message: Message) -> None:
             await message.answer(post_text, parse_mode="HTML")
 
     except Exception as e:
+        # Логируем ошибку перед обработкой
+        logger.error(f"Ошибка при обработке ссылки {product_url}: {e}", exc_info=True)
         # Профессиональная обработка ошибок
         if error_handler:
             # Определяем тип ошибки и контекст
@@ -110,6 +126,7 @@ async def handle_product_link(message: Message) -> None:
             )
         else:
             # Fallback на случай если error_handler не инициализирован
+            logger.warning("error_handler не инициализирован, используем fallback")
             await message.answer(
                 "😔 Извините, произошла ошибка при обработке вашего запроса. "
                 "Пожалуйста, попробуйте повторить через несколько минут."

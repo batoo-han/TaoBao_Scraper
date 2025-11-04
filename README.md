@@ -225,6 +225,64 @@ CONVERT_CURRENCY=False
 
 > 📘 **Подробное руководство:** [UPDATE_WORKFLOW.md](docs/UPDATE_WORKFLOW.md) | **Шпаргалка:** [QUICK_COMMANDS.md](docs/QUICK_COMMANDS.md)
 
+### ⚠️ Важно: Настройка для Pinduoduo
+
+Для работы с Pinduoduo в Docker необходимо создать файл `src/pdd_cookies.json`:
+
+**Вариант 1: Автоматический экспорт из Chrome (рекомендуется)**
+
+1. **Установите зависимости для скрипта:**
+   ```bash
+   pip install -r scripts/requirements-export.txt
+   ```
+
+2. **Запустите скрипт экспорта cookies:**
+   ```bash
+   python scripts/export_chrome_cookies.py
+   ```
+   
+   Скрипт автоматически:
+   - Откроет Chrome
+   - Перейдёт на `https://mobile.yangkeduo.com/`
+   - Извлечёт все cookies
+   - Сохранит их в `scripts/chrome_cookies.json`
+
+3. **Скопируйте файл cookies:**
+   ```bash
+   cp scripts/chrome_cookies.json src/pdd_cookies.json
+   ```
+
+4. **Пересоберите контейнер:**
+   ```bash
+   docker-compose down
+   docker-compose build --no-cache
+   docker-compose up -d
+   ```
+
+> 📘 **Подробнее:** См. [scripts/README_EXPORT_COOKIES.md](scripts/README_EXPORT_COOKIES.md)
+
+**Вариант 2: Ручной экспорт**
+
+1. **Скопируйте пример файла:**
+   ```bash
+   cp src/pdd_cookies_example.json src/pdd_cookies.json
+   ```
+
+2. **Заполните файл реальными cookies:**
+   - Откройте `mobile.yangkeduo.com` в браузере
+   - Войдите в аккаунт
+   - Скопируйте cookies из DevTools (F12 → Application → Cookies)
+   - Вставьте в `src/pdd_cookies.json` в формате массива `cookies`
+
+3. **Пересоберите контейнер:**
+   ```bash
+   docker-compose down
+   docker-compose build --no-cache
+   docker-compose up -d
+   ```
+
+> ⚠️ **Примечание:** Файл `pdd_cookies.json` не копируется в Git (в `.gitignore`), так как содержит чувствительные данные.
+
 ### Команды Docker Compose
 
 ```bash

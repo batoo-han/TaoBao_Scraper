@@ -60,3 +60,4 @@ other/
 prompts/
 test*.py
 src/pdd_cookies.json
+pdd_cookies.json
