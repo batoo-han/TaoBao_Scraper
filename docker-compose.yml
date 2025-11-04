@@ -4,15 +4,11 @@
 # Production-ready конфигурация для Docker Compose
 # ==============================================================================
 
-version: '3.8'
-
 services:
   taobao-bot:
     build:
       context: .
       dockerfile: Dockerfile
-      # Принудительная пересборка образа
-      pull: true
 
     image: taobao-scraper-bot:latest
     container_name: taobao-scraper-bot
