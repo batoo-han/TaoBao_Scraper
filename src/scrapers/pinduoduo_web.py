@@ -469,84 +469,46 @@ class PinduoduoWebScraper:
                         pass
                     await self._human_pause(0.6, 1.4)
                     html_source = await page.content()
-                    container = await page.wait_for_selector("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div[1]", timeout=8000)
+                    container = await page.wait_for_selector("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div", timeout=8000)
                 except Exception as e:
                     if debug:
                         print(f"[DEBUG] Повторная попытка после логина не удалась: {e}")
 
-            # Дополнительно проверяем div с классом начинающимся на goods-container
-            goods_container = None
-            try:
-                goods_container = await page.wait_for_selector("css=div[class^=goods-container]", timeout=3000)
-            except Exception:
-                goods_container = None
-
-            if not goods_container:
-                if debug:
-                    print("[DEBUG] goods-container не найден — останавливаем цепочку для Pinduoduo")
-                if debug:
-                    print("[DEBUG] Оставляем окно открытым для анализа состояния страницы")
-                # Не закрываем браузер в DEBUG, вернем пусто
-                result["data"] = {"_platform": "pinduoduo"}
-                return result
-
-            # Извлекать описание напрямую не требуем — оставим пустым, будем полагаться на OpenAI
+            # Извлекаем описание
             description = ""
-            # Извлекаем изображения по правилу: первое изображение героя + все img.pdd-lazy-image.loaded
+            try:
+                await page.wait_for_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span", timeout=5000)
+                desc_el = await page.query_selector("xpath=/html/body/div[4]/div/div[2]/div[6]/div/span/span/span")
+                if desc_el:
+                    description = await desc_el.text_content()
+                if description:
+                    description = description.strip()
+                if debug:
+                    print(f"[DEBUG] Описание: {description}")
+            except Exception as e:
+                if debug:
+                    print(f"[DEBUG] Не удалось получить описание: {e}")
+            # Извлекаем изображения из контейнера галереи
             main_images: List[str] = []
             try:
-                seen_srcs = set()
-                # 1) Первое изображение (герой)
-                try:
-                    hero_imgs = await page.query_selector_all("xpath=/html/body/div[4]/div/div[1]//img")
-                    if hero_imgs:
-                        for el in hero_imgs:
-                            src = await el.get_attribute("src") or await el.get_attribute("data-src")
-                            if src:
-                                if src.startswith("//"):
-                                    src = "https:" + src
-                                elif src.startswith("/"):
-                                    src = "https://mobile.yangkeduo.com" + src
-                                if src not in seen_srcs:
-                                    seen_srcs.add(src)
-                                    main_images.append(src)
-                        if debug:
-                            print(f"[DEBUG] Герой-блок: добавлено {len(hero_imgs)} изображений")
-                except Exception:
-                    pass
-
-                # 2) Все нужные изображения по классу pdd-lazy-image loaded
-                lazy_imgs = await page.query_selector_all("css=img.pdd-lazy-image.loaded")
-                added_lazy = 0
-                for el in lazy_imgs or []:
-                    src = await el.get_attribute("src") or await el.get_attribute("data-src")
-                    if not src:
-                        continue
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    elif src.startswith("/"):
-                        src = "https://mobile.yangkeduo.com" + src
-                    # Исключим явные баннеры/логотипы
-                    if any(skip in src.lower() for skip in ["logo", "icon", "banner", "ad", "ddpay", "brand"]):
-                        continue
-                    if src not in seen_srcs:
-                        seen_srcs.add(src)
+                img_elements = []
+                if container:
+                    img_elements = await page.query_selector_all("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div//img")
+                    if debug:
+                        print(f"[DEBUG] Нашли контейнер, img элементов: {len(img_elements)}")
+                for img in img_elements:
+                    src = await img.get_attribute("src")
+                    if src and src not in main_images:
                         main_images.append(src)
-                        added_lazy += 1
                 if debug:
-                    print(f"[DEBUG] pdd-lazy-image.loaded: добавлено {added_lazy} изображений")
-
-                if debug:
-                    print(f"[DEBUG] Итого main_imgs найдено: {len(main_images)}")
-                    if main_images:
-                        print(f"[DEBUG] Первые 3 URL: {main_images[:3]}")
+                    print(f"[DEBUG] main_imgs: {main_images}")
             except Exception as e:
                 if debug:
                     print(f"[DEBUG] Не удалось получить фотографии: {e}")
             # Заголовок товара (если получится)
             title = ""
             try:
-                title_el = await page.query_selector("css=div[class^=goods-container] h1, div[class^=goods-container] h2, div[class^=goods-container] strong")
+                title_el = await page.query_selector("xpath=/html/body/div[4]/div/div[2]/div[1]//h1 | //h2 | //strong")
                 if title_el:
                     t = await title_el.text_content()
                     if t:
@@ -557,82 +519,32 @@ class PinduoduoWebScraper:
                 if debug:
                     print(f"[DEBUG] Не удалось получить заголовок: {e}")
 
-            # Извлекаем цену из DOM согласно правилам
-            try:
-                price_span = await page.query_selector("xpath=/html/body/div[1]/div/div[2]/div[1]/div[1]//span[contains(@class,'kxqW0mMz')]")
-                price_text = ""
-                if price_span:
-                    parts = await price_span.query_selector_all("span")
-                    if parts:
-                        txts = []
-                        for p in parts:
-                            t = await p.text_content()
-                            if t:
-                                txts.append(t.strip())
-                        price_text = "".join(txts)
-                    else:
-                        t = await price_span.text_content()
-                        price_text = t.strip() if t else ""
-                # Проверка дублирования в div.GNrMaxlJ (если есть)
-                try:
-                    verify_el = await page.query_selector("css=div.GNrMaxlJ")
-                    if verify_el and price_text:
-                        verify_text = await verify_el.text_content()
-                        if verify_text and any(ch.isdigit() for ch in price_text):
-                            pass  # минимальная проверка наличия числа
-                except Exception:
-                    pass
-                if price_text and any(ch.isdigit() for ch in price_text):
-                    # нормализуем 14.99
-                    price_text = price_text.replace(" ", "")
-                    if price_text.count(",") == 1 and price_text.count(".") == 0:
-                        price_text = price_text.replace(",", ".")
-                    result_price = price_text
-                else:
-                    result_price = ""
-            except Exception:
-                result_price = ""
-
-            # Сохраним полный HTML для OpenAI пути (без script)
-            try:
-                if not html_source:
-                    raw = await page.content()
-                    # Удаляем теги <script>...
-                    try:
-                        import re
-                        html_source = re.sub(r"<script[\s\S]*?</script>", "", raw, flags=re.IGNORECASE)
-                    except Exception:
-                        html_source = raw
-            except Exception:
-                pass
-
-            if debug and html_source:
-                print(f"[DEBUG] HTML (начало): {html_source[:600]}")
-
-            # Закрытие браузера: в DEBUG оставляем окно
+            # Закрытие браузера: оставляем открытым при отладке, если включено
             if debug:
                 print("[DEBUG] Окно браузера оставлено открытым (DEBUG_MODE=True)")
             elif not getattr(settings, 'PLAYWRIGHT_KEEP_BROWSER_OPEN', False):
                 await context.close()
                 await browser.close()
-
-            result["data"] = {
-                "item_id": None,
-                "title": title or "",
-                "price": result_price,
-                "price_info": {"price": result_price},
-                "product_props": [],
-                "main_imgs": main_images,
-                "detail_imgs": [],
-                "details": description or "",
-                "shop_info": {},
-                "is_item_onsale": True,
-                "sku_props": [],
-                "skus": [],
-                "promotions": None,
-                "side_sales_tip": "",
-                "page_html": html_source or "",
-            }
-            return result
+            if debug and html_source:
+                print(f"[DEBUG] HTML (начало): {html_source[:600]}")
+        result["data"] = {
+            "item_id": None,
+            "title": title or "",
+            "price": "",
+            "price_info": {"price": ""},
+            "product_props": [],
+            "main_imgs": main_images,
+            "detail_imgs": [],
+            "details": description or "",
+            "shop_info": {},
+            "is_item_onsale": True,
+            "sku_props": [],
+            "skus": [],
+            "promotions": None,
+            "side_sales_tip": "",
+        }
+        if debug:
+            print(f"[DEBUG] Финальный словарь result['data']: {result['data']}")
+        return result
 
 

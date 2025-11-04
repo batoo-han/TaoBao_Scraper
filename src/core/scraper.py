@@ -1,6 +1,5 @@
 from src.api.tmapi import TmapiClient
 from src.api.yandex_gpt import YandexGPTClient
-from src.api.proxy_openai import ProxyOpenAIClient
 from src.api.exchange_rate import ExchangeRateClient
 from src.api.yandex_translate import YandexTranslateClient
 from src.core.config import settings
@@ -14,7 +13,6 @@ class Scraper:
     def __init__(self):
         self.tmapi_client = TmapiClient()  # Клиент для tmapi.top
         self.yandex_gpt_client = YandexGPTClient()  # Клиент для YandexGPT
-        self.proxy_openai_client = None
         self.exchange_rate_client = ExchangeRateClient()  # Клиент для ExchangeRate-API
         self.yandex_translate_client = YandexTranslateClient()  # Клиент для Yandex.Translate
 
@@ -58,106 +56,6 @@ class Scraper:
         
         # Ранняя проверка: если Pinduoduo и совсем пусто — прерываем цепочку до LLM
         if platform == 'pinduoduo':
-            # В ветке openai: всегда используем OpenAI-путь для Pinduoduo, без Yandex
-            if settings.PDD_USE_OPENAI:
-                html = product_data.get('page_html', '') or ''
-                gallery = product_data.get('main_imgs', []) or []
-                if not html:
-                    user_msg = (
-                        "Не удалось загрузить страницу товара Pinduoduo или доступ ограничен.\n\n"
-                        "Проверьте cookies/авторизацию и повторите попытку."
-                    )
-                    return user_msg, []
-                try:
-                    if self.proxy_openai_client is None:
-                        self.proxy_openai_client = ProxyOpenAIClient()
-                    openai_result = await self.proxy_openai_client.analyze_pinduoduo_html(
-                        html=html, 
-                        image_urls=gallery,
-                        product_url=url
-                    )
-                except Exception as e:
-                    err_text = str(e)
-                    user_msg = (
-                        "Сервис анализа страницы временно недоступен. \n"
-                        "Пожалуйста, повторите попытку позже."
-                    )
-                    # Специально отмечаем 402 ProxyAPI
-                    if '402' in err_text or 'Payment Required' in err_text:
-                        user_msg = (
-                            "Похоже, закончился баланс ProxyAPI (OpenAI).\n"
-                            "Пожалуйста, пополните счёт и повторите запрос."
-                        )
-                    return user_msg, []
-
-                # Используем данные из OpenAI ответа (новый формат)
-                product_data['title'] = openai_result.get('title', '')
-                product_data['details'] = openai_result.get('description', '')
-                
-                # Обновляем цену из OpenAI ответа
-                openai_price = openai_result.get('price', '')
-                if openai_price:
-                    product_data['price'] = str(openai_price)
-                    product_data['price_info'] = {'price': str(openai_price)}
-                
-                # Обновляем характеристики с новыми полями
-                main_chars = openai_result.get('main_characteristics', {}) or {}
-                
-                # Добавляем color, materials, volume если они есть
-                openai_color = openai_result.get('color', [])
-                if openai_color:
-                    main_chars['Цвета'] = openai_color if isinstance(openai_color, list) else [openai_color]
-                
-                openai_materials = openai_result.get('materials', '')
-                if openai_materials:
-                    # Если это жидкость/косметика с объёмом, считаем это 'Состав'
-                    if 'ml' in str(openai_result.get('volume', '')).lower() or 'мл' in str(openai_result.get('volume', '')).lower():
-                        main_chars['Состав'] = openai_materials
-                        # Убираем возможный ключ 'Материалы' если есть
-                        if 'Материалы' in main_chars:
-                            main_chars.pop('Материалы', None)
-                    else:
-                        main_chars['Материалы'] = openai_materials
-                
-                openai_volume = openai_result.get('volume', '')
-                if openai_volume:
-                    # Нормализуем единицы измерения: ml -> мл
-                    vol = str(openai_volume).replace('ml', 'мл').replace('ML', 'мл').replace('Ml', 'мл')
-                    # Убираем лишние разделители вроде ' / '
-                    vol = vol.replace(' / ', ', ').replace('/', ', ').replace(' ,', ',')
-                    main_chars['Объём'] = vol
-                    # Если был ключ 'Размер' — удалим, когда есть объём
-                    for k in list(main_chars.keys()):
-                        if 'размер' in k.lower():
-                            main_chars.pop(k, None)
-                
-                llm_content = {
-                    'title': product_data['title'],
-                    'description': product_data['details'],
-                    'main_characteristics': main_chars,
-                    'additional_info': openai_result.get('additional_info', {}),
-                    'hashtags': openai_result.get('hashtags', []),
-                    'emoji': openai_result.get('emoji', ''),
-                }
-                
-                exchange_rate = None
-                if settings.CONVERT_CURRENCY:
-                    exchange_rate = await self.exchange_rate_client.get_exchange_rate()
-                post_text = self._build_post_text(
-                    llm_content=llm_content,
-                    product_data=product_data,
-                    exchange_rate=exchange_rate
-                )
-                
-                # Используем ВСЕ изображения, собранные со страницы (без ограничений)
-                image_urls = product_data.get('main_imgs', []) + product_data.get('detail_imgs', [])
-                
-                if settings.DEBUG_MODE:
-                    print(f"[Scraper] Используем {len(image_urls)} изображений, собранных со страницы")
-                
-                return post_text, image_urls
-
-            # Если OpenAI-путь выключен — старое поведение с ранним выходом
             no_images = not product_data.get('main_imgs') and not product_data.get('detail_imgs')
             no_text = not (product_data.get('details') or product_data.get('title'))
             if no_images and no_text:
