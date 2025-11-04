@@ -406,7 +406,7 @@ class PinduoduoWebScraper:
                         await page.wait_for_selector('span.kxqW0mMz', timeout=7000)
                     except Exception:
                         pass
-                    js_get_price = """
+                    js_get_price = r"""
                     () => {
                       const selectors = [
                         'span.kxqW0mMz',
@@ -416,7 +416,7 @@ class PinduoduoWebScraper:
                       ];
                       const textFromEl = (el) => {
                         if (!el) return '';
-                        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+                        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);                                                                     
                         let buf = '';
                         let n;
                         while ((n = walker.nextNode())) {
@@ -566,6 +566,9 @@ class PinduoduoWebScraper:
                                 break
                     except Exception:
                         pass
+                except Exception as e:
+                    if debug:
+                        print(f"[DEBUG] РћС€РёР±РєР° РїСЂРё РїРѕР»СѓС‡РµРЅРёРё С„РѕС‚РѕРіСЂР°С„РёР№: {e}")
 
                 # Главное: aria-label="商品大图" или заданный XPath
                 main_src = None
@@ -686,11 +689,8 @@ class PinduoduoWebScraper:
                     pass
                 if debug:
                     print(f"[DEBUG] Собраны изображения после фильтрации: {len(main_images)}")
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] Не удалось получить фотографии: {e}")
 
-                # 5) Дополнительно пробуем старое описание (fallback), если extra пуст
+            # 5) Дополнительно пробуем старое описание (fallback), если extra пуст
                 description = extra_desc
                 if not description:
                     try:
