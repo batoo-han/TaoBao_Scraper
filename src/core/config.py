@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # Debug вспомогательные опции для Playwright
     PLAYWRIGHT_KEEP_BROWSER_OPEN: bool = False  # Не закрывать браузер в DEBUG_MODE
 
+    # ProxyAPI / OpenAI (для Pinduoduo в ветке openai)
+    PDD_USE_OPENAI: bool = False  # Использовать OpenAI через ProxyAPI для анализа HTML Pinduoduo
+    PROXYAPI_OPENAI_API_KEY: str = ""  # Ключ ProxyAPI (OpenAI совместимый)
+    PROXYAPI_OPENAI_BASE_URL: str = "https://api.proxyapi.ru/openai/v1"  # База ProxyAPI OpenAI
+    PROXYAPI_OPENAI_MODEL: str = "gpt-4o"  # Модель (например gpt-4o или gpt-5, если доступна)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

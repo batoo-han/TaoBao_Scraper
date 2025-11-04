@@ -38,7 +38,7 @@
       "expires": "2026-12-03T13:58:20.164Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "api_uid",
@@ -48,7 +48,7 @@
       "expires": "2026-12-05T12:38:52.232Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "api_uid",
@@ -58,7 +58,7 @@
       "expires": "2026-12-03T13:58:18.749Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "api_uid",
@@ -68,7 +68,7 @@
       "expires": "2026-12-08T13:30:01.533Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "dilx",
@@ -78,7 +78,7 @@
       "expires": "2026-10-31T12:44:39.713Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "dilx",
@@ -88,7 +88,7 @@
       "expires": "2026-11-03T13:45:27.778Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "jrpl",
@@ -98,7 +98,7 @@
       "expires": "2026-11-03T13:45:27.778Z",
       "httpOnly": true,
       "secure": true,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "jrpl",
@@ -108,7 +108,7 @@
       "expires": "2026-10-31T12:44:39.712Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "njrpl",
@@ -128,7 +128,7 @@
       "expires": "2026-11-03T13:45:27.778Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "pdd_user_id",
@@ -138,7 +138,7 @@
       "expires": "2026-02-11T11:56:43.251Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "pdd_user_uin",
@@ -148,7 +148,7 @@
       "expires": "2026-02-11T11:56:43.252Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "pdd_vds",
@@ -158,7 +158,7 @@
       "expires": "2025-11-10T13:34:34.385Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "PDDAccessToken",
@@ -168,7 +168,7 @@
       "expires": "2026-02-11T11:56:43.248Z",
       "httpOnly": true,
       "secure": true,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "rckk",
@@ -178,7 +178,7 @@
       "expires": "2026-10-31T13:13:28.212Z",
       "httpOnly": true,
       "secure": true,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "ru1k",
@@ -188,7 +188,7 @@
       "expires": "2026-10-31T13:13:28.212Z",
       "httpOnly": true,
       "secure": true,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "ru2k",
@@ -198,7 +198,7 @@
       "expires": "2026-10-31T13:13:28.212Z",
       "httpOnly": true,
       "secure": true,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "webp",
@@ -208,7 +208,7 @@
       "expires": "2025-12-03T13:21:17.382Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     }
   ],
   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",

@@ -19,3 +19,6 @@ Pillow>=10.0.0  # Определение размеров и обработка 
 
 # Browser Automation for Pinduoduo scraping
 playwright>=1.46.0  # Асинхронный Playwright для веб-скрапинга Pinduoduo
+
+# OpenAI-compatible client for ProxyAPI
+openai>=1.51.0
