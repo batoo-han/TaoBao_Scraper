@@ -11,28 +11,31 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    
+      # Принудительная пересборка образа
+      pull: true
+
+    image: taobao-scraper-bot:latest
     container_name: taobao-scraper-bot
-    
-    # Автоматический перезапуск при падении
+
+    # Автоматический перезапуск при падении   
     restart: unless-stopped
-    
-    # Загружаем переменные окружения из .env
+
+    # Загружаем переменные окружения из .env      
     env_file:
       - .env
-    
+
     # Переменные окружения
     environment:
       - TZ=Europe/Moscow
       - PYTHONUNBUFFERED=1
-    
+
     # Логирование Docker контейнера
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    
+
     # Healthcheck (опционально)
     # healthcheck:
     #   test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
