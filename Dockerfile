@@ -48,27 +48,35 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Устанавливаем браузер Chromium для Playwright
-RUN playwright install chromium --with-deps || \
-    (playwright install chromium && playwright install-deps chromium)
+# Создаём non-root пользователя для безопасности
+RUN useradd -m -u 1000 botuser
 
 # Копируем исходный код (новая структура)
 COPY main.py ./
 COPY src/ ./src/
 
-# Примечание: pdd_cookies.json должен быть создан вручную на основе pdd_cookies_example.json
-# Этот файл не копируется автоматически (в .gitignore), так как содержит чувствительные данные
-
-# Создаём non-root пользователя для безопасности
-RUN useradd -m -u 1000 botuser && \
-    chown -R botuser:botuser /app
+# Меняем владельца файлов на botuser
+RUN chown -R botuser:botuser /app
 
 # Переключаемся на non-root пользователя
 USER botuser
 
+# Устанавливаем браузер Chromium для Playwright ОТ ПОЛЬЗОВАТЕЛЯ botuser
+# Это важно, т.к. браузер устанавливается в домашнюю директорию пользователя
+RUN playwright install chromium || \
+    (playwright install chromium --with-deps || \
+     (playwright install chromium && playwright install-deps chromium))
+
+# Проверяем, что Chromium установлен
+RUN test -f /home/botuser/.cache/ms-playwright/chromium-*/chrome-linux/chrome || \
+    (echo "ERROR: Chromium not found after installation" && exit 1)
+
 # Healthcheck (опционально)
 # HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 #   CMD python -c "import sys; sys.exit(0)"
+
+# Примечание: pdd_cookies.json должен быть создан вручную на основе pdd_cookies_example.json
+# Этот файл не копируется автоматически (в .gitignore), так как содержит чувствительные данные
 
 # Запускаем бота (обновлённое название файла)
 CMD ["python", "-u", "main.py"]
