@@ -25,7 +25,13 @@ ssh-copy-id -i ~/.ssh/github_actions.pub user@your-server.com
 
 ## Шаг 2: Добавьте GitHub Secrets (2 минуты)
 
-Перейдите: **GitHub → Settings → Secrets and variables → Actions → New secret**
+**Как добавить секреты в GitHub:**
+
+1. Откройте ваш репозиторий на GitHub
+2. Нажмите на вкладку **Settings** (вверху страницы репозитория)
+3. В левом меню найдите **Secrets and variables**
+4. Выберите **Actions**
+5. Нажмите **New repository secret**
 
 Добавьте 3 обязательных секрета:
 

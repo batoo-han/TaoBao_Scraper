@@ -1,0 +1,208 @@
+{
+  "cookies": [
+    {
+      "name": "_a42",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-10-31T13:13:28.212Z",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_bee",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-10-31T13:13:28.212Z",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_f77",
+      "value": "your_cookie_value_here",
+      "domain": ".szwego.com",
+      "path": "/",
+      "expires": "2026-10-31T13:13:28.212Z",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_nano_fp",
+      "value": "your_cookie_value_here",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2026-12-03T13:58:20.164Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "api_uid",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-12-05T12:38:52.232Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "api_uid",
+      "value": "your_cookie_value_here",
+      "domain": ".yangkeduo.com",
+      "path": "/",
+      "expires": "2026-12-03T13:58:18.749Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "dilx",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-10-31T12:44:39.713Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "dilx",
+      "value": "your_cookie_value_here",
+      "domain": ".mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2026-11-03T13:45:27.778Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "jrpl",
+      "value": "your_cookie_value_here",
+      "domain": ".mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2026-11-03T13:45:27.778Z",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": ""
+    },
+    {
+      "name": "jrpl",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-10-31T12:44:39.712Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "njrpl",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-10-31T12:44:39.712Z",
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "njrpl",
+      "value": "your_cookie_value_here",
+      "domain": ".mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2026-11-03T13:45:27.778Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "pdd_user_id",
+      "value": "your_user_id_here",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2026-02-11T11:56:43.251Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "pdd_user_uin",
+      "value": "your_user_uin_here",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2026-02-11T11:56:43.252Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "pdd_vds",
+      "value": "your_cookie_value_here",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2025-11-10T13:34:34.385Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    },
+    {
+      "name": "PDDAccessToken",
+      "value": "your_access_token_here",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2026-02-11T11:56:43.248Z",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": ""
+    },
+    {
+      "name": "rckk",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-10-31T13:13:28.212Z",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": ""
+    },
+    {
+      "name": "ru1k",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-10-31T13:13:28.212Z",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": ""
+    },
+    {
+      "name": "ru2k",
+      "value": "your_cookie_value_here",
+      "domain": ".pinduoduo.com",
+      "path": "/",
+      "expires": "2026-10-31T13:13:28.212Z",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": ""
+    },
+    {
+      "name": "webp",
+      "value": "1",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "2025-12-03T13:21:17.382Z",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": ""
+    }
+  ],
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+  "saved_at": "2025-11-03 18:31:44",
+  "url": "https://mobile.yangkeduo.com"
+}
+

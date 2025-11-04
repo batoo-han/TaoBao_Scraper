@@ -59,4 +59,4 @@ test_*.txt
 other/
 prompts/
 test*.py
-
+src/pdd_cookies.json
