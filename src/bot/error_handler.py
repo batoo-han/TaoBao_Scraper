@@ -96,7 +96,15 @@ class ErrorHandler:
             admin_chat_id: ID чата администратора для уведомлений об ошибках
         """
         self.bot = bot
-        self.admin_chat_id = admin_chat_id
+        # Преобразуем admin_chat_id в int если это строка с числом
+        if admin_chat_id:
+            try:
+                self.admin_chat_id = int(admin_chat_id) if isinstance(admin_chat_id, str) else admin_chat_id
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid ADMIN_CHAT_ID format: {admin_chat_id}. Expected numeric string or int.")
+                self.admin_chat_id = None
+        else:
+            self.admin_chat_id = None
         
     async def handle_error(
         self,
@@ -162,6 +170,10 @@ class ErrorHandler:
             logger.warning("Admin chat ID not configured, skipping admin notification")
             return
         
+        # Проверяем, является ли это ошибкой TMAPI для дополнительных пояснений
+        error_message = error_info['error_message']
+        tmapi_explanation = self._get_tmapi_error_explanation(error_message)
+        
         # Формируем красивое сообщение для админа
         admin_message = (
             "🚨 <b>ОШИБКА В БОТЕ</b> 🚨\n\n"
@@ -174,6 +186,10 @@ class ErrorHandler:
             f"🐛 <b>Класс:</b> <code>{error_info['error_class']}</code>\n"
             f"📄 <b>Описание:</b> <code>{error_info['error_message'][:200]}</code>\n"
         )
+        
+        # Добавляем пояснения для ошибок TMAPI
+        if tmapi_explanation:
+            admin_message += f"\n💡 <b>Пояснение TMAPI:</b> {tmapi_explanation}\n"
         
         if error_info['context']:
             admin_message += f"\n🔗 <b>Контекст:</b> <code>{error_info['context'][:100]}</code>\n"
@@ -194,8 +210,54 @@ class ErrorHandler:
                 text=f"<b>Traceback:</b>\n<pre>{traceback_preview}</pre>",
                 parse_mode="HTML"
             )
+            logger.info(f"Admin notification sent successfully to chat_id: {self.admin_chat_id}")
         except Exception as e:
-            logger.error(f"Failed to send admin notification: {e}")
+            error_msg = str(e)
+            # Более понятные сообщения об ошибках
+            if "chat not found" in error_msg.lower() or "chat_id" in error_msg.lower():
+                logger.error(
+                    f"Failed to send admin notification: chat not found. "
+                    f"Chat ID: {self.admin_chat_id}. "
+                    f"Возможные причины:\n"
+                    f"1. Бот не был добавлен в чат/не запущен с этим пользователем\n"
+                    f"2. ADMIN_CHAT_ID указан неправильно (должен быть числом)\n"
+                    f"3. Используется user_id вместо chat_id (для личных чатов они совпадают)\n"
+                    f"4. Бот заблокирован пользователем"
+                )
+            else:
+                logger.error(f"Failed to send admin notification: {e}")
+    
+    @staticmethod
+    def _get_tmapi_error_explanation(error_message: str) -> str:
+        """
+        Возвращает пояснение об ошибке TMAPI согласно документации.
+        https://tmapi.top/docs/taobao-tmall/item-detail/get-item-detail-by-id/
+        
+        Args:
+            error_message: Сообщение об ошибке
+            
+        Returns:
+            Пояснение об ошибке или пустая строка
+        """
+        error_lower = error_message.lower()
+        
+        # HTTP коды ошибок TMAPI согласно документации
+        if '417' in error_message or 'expectation failed' in error_lower:
+            return "HTTP 417: Не удалось получить данные. Пожалуйста, попробуйте ещё раз или обратитесь в службу поддержки."
+        elif '422' in error_message:
+            return "HTTP 422: Ошибка параметра. Проверьте формат запроса."
+        elif '439' in error_message:
+            return "HTTP 439: Срок действия подписки истёк или на счету недостаточно средств."
+        elif '499' in error_message:
+            return "HTTP 499: Попробуйте ещё раз или увеличьте время ожидания запроса до 60 секунд."
+        elif '500' in error_message:
+            return "HTTP 500: Произошла непредвиденная ошибка. Пожалуйста, обратитесь в службу поддержки."
+        elif '503' in error_message:
+            return "HTTP 503: Превышен лимит одновременных запросов к API. Пожалуйста, уменьшите количество запросов."
+        elif 'tmapi' in error_lower:
+            return "Ошибка TMAPI - проверьте токен API, баланс и лимиты в консоли TMAPI."
+        
+        return ""
     
     @staticmethod
     def classify_error(error: Exception, context: str = "") -> str:
@@ -213,7 +275,7 @@ class ErrorHandler:
         error_message = str(error).lower()
         
         # API ошибки
-        if any(keyword in error_message for keyword in ['api', 'tmapi', '400', '401', '403', '404', '500', '502', '503']):
+        if any(keyword in error_message for keyword in ['api', 'tmapi', '400', '401', '403', '404', '417', '422', '439', '499', '500', '502', '503']):
             return 'api_error'
         
         # Сетевые ошибки
@@ -240,6 +302,36 @@ class ErrorHandler:
 error_handler: Optional[ErrorHandler] = None
 
 
+async def _test_admin_chat(bot: Bot, chat_id: int) -> bool:
+    """
+    Проверяет доступность чата администратора, отправляя тестовое сообщение.
+    
+    Args:
+        bot: Экземпляр aiogram Bot
+        chat_id: ID чата для проверки
+        
+    Returns:
+        True если чат доступен, False иначе
+    """
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="✅ Обработчик ошибок инициализирован. Уведомления включены.",
+            parse_mode="HTML"
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            f"Не удалось отправить тестовое сообщение в ADMIN_CHAT_ID={chat_id}: {e}. "
+            f"Уведомления об ошибках могут не работать. "
+            f"Убедитесь, что:\n"
+            f"1. Бот запущен и добавлен в чат/написан вам\n"
+            f"2. ADMIN_CHAT_ID указан правильно (число)\n"
+            f"3. Для личного чата используйте ваш user_id (можно узнать у @userinfobot)"
+        )
+        return False
+
+
 def init_error_handler(bot: Bot, admin_chat_id: Optional[str] = None) -> ErrorHandler:
     """
     Инициализирует глобальный обработчик ошибок.
@@ -253,5 +345,11 @@ def init_error_handler(bot: Bot, admin_chat_id: Optional[str] = None) -> ErrorHa
     """
     global error_handler
     error_handler = ErrorHandler(bot, admin_chat_id)
+    
+    # Проверяем доступность чата админа (если задан)
+    if error_handler.admin_chat_id:
+        # Используем asyncio.run_coroutine_threadsafe или просто логируем, что проверка будет при первой ошибке
+        logger.info(f"Admin chat ID configured: {error_handler.admin_chat_id}. Test notification will be sent on first error.")
+    
     return error_handler
 

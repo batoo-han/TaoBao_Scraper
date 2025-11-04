@@ -104,7 +104,7 @@ docker-compose logs -f
 
 ```bash
 # Клонируйте репозиторий
-git clone https://github.com/yourusername/taobao-scraper-bot.git
+git clone https://github.com/batoo-han/taobao-scraper-bot.git
 cd taobao-scraper-bot
 
 # Создайте виртуальное окружение
@@ -157,9 +157,13 @@ EXCHANGE_RATE_API_KEY=your_exchange_rate_key
 # ID админа для уведомлений об ошибках
 ADMIN_CHAT_ID=123456789
 
+# ID ответственного за оплату TMAPI для уведомлений об ошибке 439
+TMAPI_BILLING_CHAT_ID=123456789
+
 # Режимы работы
 DEBUG_MODE=False      # Подробные логи
 MOCK_MODE=False       # Использовать mock данные
+TMAPI_NOTIFY_439=False  # Уведомлять об ошибке 439 (недостаточно средств)
 
 # Конвертация валют
 CONVERT_CURRENCY=False

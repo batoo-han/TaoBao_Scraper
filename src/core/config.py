@@ -45,12 +45,14 @@ class Settings(BaseSettings):
     YANDEX_FOLDER_ID: str # ID каталога в Yandex.Cloud
     GOOGLE_CLOUD_PROJECT: str = ""  # ID проекта Google Cloud (не используется, оставлено для совместимости)
     ADMIN_CHAT_ID: str = ""  # ID чата администратора для уведомлений об ошибках (необязательно)
+    TMAPI_BILLING_CHAT_ID: str = ""  # ID чата ответственного за оплату TMAPI для уведомлений об ошибке 439 (необязательно)
     YANDEX_GPT_MODEL: str = "yandexgpt-lite"  # Модель YandexGPT для использования
     TMAPI_RATE_LIMIT: int = 5  # Максимальное количество запросов к TMAPI в секунду (по умолчанию 5)
     CONVERT_CURRENCY: bool = False  # Флаг для включения/отключения конвертации валют
     DEBUG_MODE: bool = False  # Режим отладки - показывать подробные логи в консоли
     MOCK_MODE: bool = False  # Mock режим - использовать данные из result.txt вместо реальных API-запросов к TMAPI
     DISABLE_SSL_VERIFY: bool = False  # Отключить проверку SSL (только если есть проблемы с сертификатами)
+    TMAPI_NOTIFY_439: bool = False  # Уведомлять пользователя и админа об ошибке 439 (недостаточно средств на счету TMAPI)
 
     # Pinduoduo Web Scraping настройки
     PDD_USE_COOKIES: bool = True  # Использовать заранее выданные браузером куки вместо логина
