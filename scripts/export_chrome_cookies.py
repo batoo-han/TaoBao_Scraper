@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ==============================================================================
-EXPORT CHROME COOKIES FOR Pinduoduo
+ЭКСПОРТ COOKIES CHROME ДЛЯ Pinduoduo
 ==============================================================================
 Скрипт для быстрого копирования всех cookies для mobile.yangkeduo.com
 из Chrome и сохранения их в формате pdd_cookies.json.

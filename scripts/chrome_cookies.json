@@ -1,0 +1,77 @@
+{
+  "cookies": [
+    {
+      "name": "dilx",
+      "value": "u7M01hXyhLwsvqKdhEGrC",
+      "domain": ".mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "njrpl",
+      "value": "bpIYW3ZTNZcia2wBAIouTpOPGtmMwXFX",
+      "domain": ".mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "webp",
+      "value": "1",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_nano_fp",
+      "value": "XpmjX5TxXpCqX5TqX9_5uDPhIB6HXDBEeXevTzxk",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "jrpl",
+      "value": "bpIYW3ZTNZcia2wBAIouTpOPGtmMwXFX",
+      "domain": ".mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "",
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "api_uid",
+      "value": "Cipbt2kMbErCvgBVzTAvAg==",
+      "domain": ".yangkeduo.com",
+      "path": "/",
+      "expires": "",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "pdd_vds",
+      "value": "gaLFNqOWIkGMLZOknZtrEcavQkPZyMiXNCapmYIqnYaviCIzQHLZoWIWyYOv",
+      "domain": "mobile.yangkeduo.com",
+      "path": "/",
+      "expires": "",
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+  "saved_at": "2025-11-06 12:37:17",
+  "url": "https://mobile.yangkeduo.com/"
+}

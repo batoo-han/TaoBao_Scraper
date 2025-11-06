@@ -205,10 +205,22 @@ class PinduoduoWebScraper:
                 if debug:
                     print(f"[DEBUG] Нормализуем URL без схемы → {full_url}")
             async with async_playwright() as p:
-                # В DEBUG всегда показываем окно браузера
-                headless = False if getattr(settings, 'DEBUG_MODE', False) else True
-                slow_mo = int(getattr(settings, 'PLAYWRIGHT_SLOWMO_MS', 0)) if getattr(settings, 'DEBUG_MODE', False) else 0
-                launch_kwargs = {"headless": headless}
+                # Headless по умолчанию; если нет X11 ($DISPLAY), принудительно headless даже при DEBUG
+                debug_mode = bool(getattr(settings, 'DEBUG_MODE', False))
+                no_display = not os.environ.get("DISPLAY")
+                headless = True if no_display else (False if debug_mode else True)
+                slow_mo = int(getattr(settings, 'PLAYWRIGHT_SLOWMO_MS', 0)) if debug_mode else 0
+                # Безопасные флаги для контейнеров/CI
+                chromium_args = [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--no-zygote",
+                    "--single-process",
+                ]
+                launch_kwargs = {"headless": headless, "args": chromium_args, "chromium_sandbox": False}
                 if slow_mo:
                     launch_kwargs["slow_mo"] = slow_mo
                 # Прокси на уровне браузера
@@ -237,6 +249,8 @@ class PinduoduoWebScraper:
                         "permissions": device.get("permissions", []),
                         "extra_http_headers": {
                             "Accept-Language": "zh-CN,zh;q=0.9",
+                            "Referer": "https://mobile.yangkeduo.com/",
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                         },
                         "user_agent": self.user_agent,
                     }
@@ -245,8 +259,13 @@ class PinduoduoWebScraper:
                     context_args = {
                         "locale": getattr(settings, 'PLAYWRIGHT_LOCALE', 'zh-CN'),
                         "timezone_id": getattr(settings, 'PLAYWRIGHT_TIMEZONE', 'Asia/Shanghai'),
-                        "extra_http_headers": {"Accept-Language": "zh-CN,zh;q=0.9"},
+                        "extra_http_headers": {
+                            "Accept-Language": "zh-CN,zh;q=0.9",
+                            "Referer": "https://mobile.yangkeduo.com/",
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        },
                         "user_agent": self.user_agent,
+                        "viewport": {"width": 390, "height": 844},
                     }
                     context = await browser.new_context(**context_args)
 
@@ -317,6 +336,11 @@ class PinduoduoWebScraper:
                         to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
                         await page.wait_for_load_state("load", timeout=to)
                         await page.wait_for_load_state("networkidle", timeout=to)
+                    except Exception:
+                        pass
+                    # Синтетические события, чтобы триггерить lazy-load в headless
+                    try:
+                        await page.evaluate("() => { window.dispatchEvent(new Event('resize')); window.dispatchEvent(new Event('scroll')); }")
                     except Exception:
                         pass
                     await self._human_pause(0.8, 1.6)
@@ -511,6 +535,14 @@ class PinduoduoWebScraper:
                             except Exception:
                                 return 0
 
+                        # Дополнительно принудительно проставим src из data-src для ленивых изображений
+                        try:
+                            await page.evaluate(
+                                "() => { const imgs = Array.from(document.querySelectorAll('img')); for (const img of imgs) { const ds = img.getAttribute('data-src') || img.getAttribute('data-lazy') || img.getAttribute('data-original'); if (ds && !img.getAttribute('src')) { img.setAttribute('src', ds); } } }"
+                            )
+                        except Exception:
+                            pass
+
                         # Первая медленная прокрутка вниз шагами
                         last_count = await get_lazy_img_count()
                         stable_rounds = 0
@@ -553,7 +585,7 @@ class PinduoduoWebScraper:
                         # финальный проход вниз ограниченным числом шагов и по стабильности
                         stable_rounds = 0
                         last_count = await get_lazy_img_count()
-                        for _ in range(40):
+                        for _ in range(60):
                             await page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.5))")
                             await self._human_pause(0.5, 1.0)
                             new_count = await get_lazy_img_count()
@@ -562,7 +594,7 @@ class PinduoduoWebScraper:
                                 stable_rounds = 0
                             else:
                                 stable_rounds += 1
-                            if stable_rounds >= 6:
+                            if stable_rounds >= 8:
                                 break
                     except Exception:
                         pass

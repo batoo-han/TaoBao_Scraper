@@ -107,3 +107,36 @@ PDD_COOKIES_FILE=scripts/chrome_cookies.json
 }
 ```
 
+## 🧰 Портативное приложение (Windows/macOS)
+
+Для удобного запуска без интерпретатора Python добавлен CLI-лоунчер `scripts/cookie_exporter_app.py`.
+
+При запуске приложение:
+- предупреждает, что именно сделает,
+- спрашивает подтверждение,
+- извлекает и фильтрует cookies,
+- сохраняет файл JSON на Рабочий стол (Desktop).
+
+### Как запустить напрямую (из исходников)
+
+```bash
+python scripts/cookie_exporter_app.py
+```
+
+### Как собрать один исполняемый файл
+
+Требуется PyInstaller:
+
+```bash
+# Windows
+py -m pip install -r scripts/requirements-export.txt pyinstaller
+py -m PyInstaller --onefile --name CookieExporter scripts/cookie_exporter_app.py
+
+# macOS
+python3 -m pip install -r scripts/requirements-export.txt pyinstaller
+python3 -m PyInstaller --onefile --name CookieExporter scripts/cookie_exporter_app.py
+```
+
+Готовый файл будет находиться в папке `dist/` под именем `CookieExporter` (или `CookieExporter.exe` на Windows).
+
+
