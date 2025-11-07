@@ -149,6 +149,9 @@ TMAPI_TOKEN=your_tmapi_token
 
 # Exchange Rate API (опционально)
 EXCHANGE_RATE_API_KEY=your_exchange_rate_key
+
+# Файлы cookies для Pinduoduo (обязательно, если работаете с PDD)
+PDD_COOKIES_FILE=src/pdd_cookies.json
 ```
 
 ### Опциональные переменные
@@ -167,6 +170,13 @@ TMAPI_NOTIFY_439=False  # Уведомлять об ошибке 439 (недос
 
 # Конвертация валют
 CONVERT_CURRENCY=False
+
+# Playwright для Pinduoduo (рекомендуется для сервера)
+PLAYWRIGHT_USE_MOBILE=True
+PLAYWRIGHT_MOBILE_DEVICE=iPhone 12
+PLAYWRIGHT_LOCALE=zh-CN
+PLAYWRIGHT_TIMEZONE=Asia/Shanghai
+PLAYWRIGHT_PAGE_TIMEOUT_MS=90000
 ```
 
 ### Получение API ключей
@@ -186,6 +196,8 @@ CONVERT_CURRENCY=False
 
 - `/start` — Запустить бота и получить приветствие
 - Отправьте **ссылку на товар** — Получить полное описание
+
+> ℹ️ Бот отправляет до четырёх основных фотографий в первом сообщении. Остальные изображения приходят дополнительно, если они есть.
 
 ### Поддерживаемые ссылки
 
@@ -236,23 +248,41 @@ CONVERT_CURRENCY=False
    pip install -r scripts/requirements-export.txt
    ```
 
-2. **Запустите скрипт экспорта cookies:**
-   ```bash
-   python scripts/export_chrome_cookies.py
-   ```
+2. **Экспортируйте cookies (выберите удобный вариант):**
+   - Интерактивное CLI-приложение (рекомендуется):
+     ```bash
+     python scripts/cookie_exporter_app.py
+     ```
+     Приложение покажет план действий, спросит подтверждение и предложит папку/имя файла (по умолчанию — Рабочий стол и сгенерированное имя).
+
+   - Классический скрипт Selenium:
+     ```bash
+     python scripts/export_chrome_cookies.py
+     ```
    
    Скрипт автоматически:
    - Откроет Chrome
    - Перейдёт на `https://mobile.yangkeduo.com/`
    - Извлечёт все cookies
-   - Сохранит их в `scripts/chrome_cookies.json`
+   - Сохранит их в `scripts/chrome_cookies.json` (или в выбранную папку, если использовали CLI)
 
 3. **Скопируйте файл cookies:**
    ```bash
-   cp scripts/chrome_cookies.json src/pdd_cookies.json
+   cp <путь_к_вашему_файлу>/chrome_cookies*.json src/pdd_cookies.json
    ```
 
-4. **Пересоберите контейнер:**
+4. **Обновите `.env`:**
+   ```env
+   PDD_COOKIES_FILE=src/pdd_cookies.json
+   PLAYWRIGHT_USE_MOBILE=True
+   PLAYWRIGHT_MOBILE_DEVICE=iPhone 12
+   PLAYWRIGHT_LOCALE=zh-CN
+   PLAYWRIGHT_TIMEZONE=Asia/Shanghai
+   PLAYWRIGHT_PAGE_TIMEOUT_MS=90000
+   ```
+   (при необходимости добавьте `PDD_USER_AGENT` и другие переменные — см. раздел «Конфигурация» выше).
+
+5. **Пересоберите контейнер:**
    ```bash
    docker-compose down
    docker-compose build --no-cache
@@ -260,6 +290,19 @@ CONVERT_CURRENCY=False
    ```
 
 > 📘 **Подробнее:** См. [scripts/README_EXPORT_COOKIES.md](scripts/README_EXPORT_COOKIES.md)
+
+### Playwright в Docker (Ubuntu 24.04)
+
+Чтобы скрапинг Pinduoduo работал в headless-режиме на сервере:
+
+```bash
+pip install playwright
+python -m playwright install --with-deps chromium
+```
+
+Добавьте эти команды в Dockerfile или выполните внутри контейнера. Playwright скачает Chromium и системные зависимости.
+
+Если нужно оставить браузер открытым для отладки — ставьте `DEBUG_MODE=True` и запускайте локально с X-server. На сервере (без X11) браузер запускается headless автоматически.
 
 **Вариант 2: Ручной экспорт**
 

@@ -63,3 +63,4 @@ test*.py
 # Sensitive local data (не коммитить на сервер)
 src/pdd_cookies.json
 pdd_cookies.json
+scripts/*.json

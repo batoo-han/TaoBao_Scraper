@@ -112,10 +112,12 @@ PDD_COOKIES_FILE=scripts/chrome_cookies.json
 Для удобного запуска без интерпретатора Python добавлен CLI-лоунчер `scripts/cookie_exporter_app.py`.
 
 При запуске приложение:
-- предупреждает, что именно сделает,
+- показывает предупреждение, что именно выполнит,
 - спрашивает подтверждение,
 - извлекает и фильтрует cookies,
-- сохраняет файл JSON на Рабочий стол (Desktop).
+- предлагает папку и имя файла (по умолчанию — Рабочий стол и `chrome_cookies_YYYYMMDD_HHMMSS.json`),
+- создаёт папку при необходимости и спрашивает перед перезаписью,
+- сохраняет готовый JSON.
 
 ### Как запустить напрямую (из исходников)
 
@@ -123,20 +125,24 @@ PDD_COOKIES_FILE=scripts/chrome_cookies.json
 python scripts/cookie_exporter_app.py
 ```
 
+Можно просто нажимать Enter, чтобы принять значения по умолчанию (Рабочий стол и сгенерированное имя).
+
 ### Как собрать один исполняемый файл
 
 Требуется PyInstaller:
 
 ```bash
-# Windows
+# Windows (собирайте на Windows)
 py -m pip install -r scripts/requirements-export.txt pyinstaller
 py -m PyInstaller --onefile --name CookieExporter scripts/cookie_exporter_app.py
 
-# macOS
+# macOS (собирайте на macOS)
 python3 -m pip install -r scripts/requirements-export.txt pyinstaller
 python3 -m PyInstaller --onefile --name CookieExporter scripts/cookie_exporter_app.py
 ```
 
-Готовый файл будет находиться в папке `dist/` под именем `CookieExporter` (или `CookieExporter.exe` на Windows).
+> ⚠️ Исполняемый файл нужно собирать на той же платформе, где планируется запуск.
+
+Готовый файл лежит в `dist/` и запускается из терминала. На macOS при первом запуске может потребоваться снять quarantine: `xattr -dr com.apple.quarantine dist/CookieExporter`.
 
 
