@@ -2,7 +2,7 @@
   "cookies": [
     {
       "name": "dilx",
-      "value": "u7M01hXyhLwsvqKdhEGrC",
+      "value": "XU8FhGY3TngZ_BSm5JlnQ",
       "domain": ".mobile.yangkeduo.com",
       "path": "/",
       "expires": "",
@@ -12,7 +12,7 @@
     },
     {
       "name": "njrpl",
-      "value": "bpIYW3ZTNZcia2wBAIouTpOPGtmMwXFX",
+      "value": "UO5eDRQ8jBe6BanN6LQ6iMio4UVLaBBs",
       "domain": ".mobile.yangkeduo.com",
       "path": "/",
       "expires": "",
@@ -32,7 +32,7 @@
     },
     {
       "name": "_nano_fp",
-      "value": "XpmjX5TxXpCqX5TqX9_5uDPhIB6HXDBEeXevTzxk",
+      "value": "XpmjX5TYX0gqXqdxX9_5ZVHeKGbJcv5RwXTrspnd",
       "domain": "mobile.yangkeduo.com",
       "path": "/",
       "expires": "",
@@ -42,7 +42,7 @@
     },
     {
       "name": "jrpl",
-      "value": "bpIYW3ZTNZcia2wBAIouTpOPGtmMwXFX",
+      "value": "UO5eDRQ8jBe6BanN6LQ6iMio4UVLaBBs",
       "domain": ".mobile.yangkeduo.com",
       "path": "/",
       "expires": "",
@@ -52,7 +52,7 @@
     },
     {
       "name": "api_uid",
-      "value": "Cipbt2kMbErCvgBVzTAvAg==",
+      "value": "CikdqGkMs8SSUACUEeK0Ag==",
       "domain": ".yangkeduo.com",
       "path": "/",
       "expires": "",
@@ -62,7 +62,7 @@
     },
     {
       "name": "pdd_vds",
-      "value": "gaLFNqOWIkGMLZOknZtrEcavQkPZyMiXNCapmYIqnYaviCIzQHLZoWIWyYOv",
+      "value": "galrsenDnYaTGxllacoDOCITlrLdmcmTOuywEulYosOcLrEltCtYasEBouNB",
       "domain": "mobile.yangkeduo.com",
       "path": "/",
       "expires": "",
@@ -72,6 +72,6 @@
     }
   ],
   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
-  "saved_at": "2025-11-06 12:37:17",
+  "saved_at": "2025-11-06 17:42:18",
   "url": "https://mobile.yangkeduo.com/"
 }

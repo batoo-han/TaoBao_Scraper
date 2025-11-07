@@ -3,6 +3,9 @@ import random
 import logging
 from aiogram import Router, F
 from aiogram.types import Message, InputMediaPhoto
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import FSInputFile, BufferedInputFile
+import httpx
 from aiogram.filters import CommandStart
 from aiogram.enums import ChatAction
 
@@ -82,31 +85,88 @@ async def handle_product_link(message: Message) -> None:
             return
         
         if image_urls and len(image_urls) > 0:
-            # Отправляем первые 4 фото с текстом поста
-            media_main = []
-            main_images = image_urls[:4]  # Первые 4 фото для основного сообщения
-            
-            for i, url in enumerate(main_images):
-                if i == 0:
-                    # Первое изображение с подписью (текстом поста)
-                    media_main.append(InputMediaPhoto(media=url, caption=post_text, parse_mode="HTML"))
-                else:
-                    # Остальные изображения без подписи
-                    media_main.append(InputMediaPhoto(media=url))
-            
-            await message.answer_media_group(media=media_main)
-            
-            # Если фото больше 4, отправляем оставшиеся отдельным сообщением
-            if len(image_urls) > 4:
-                remaining_images = image_urls[4:]  # Все фото после 4-го
-                media_additional = []
-                
-                # Telegram позволяет до 10 фото в медиагруппе
-                # Отправляем оставшиеся фото группами по 10
-                for i in range(0, len(remaining_images), 10):
-                    batch = remaining_images[i:i+10]
-                    media_batch = [InputMediaPhoto(media=url) for url in batch]
-                    await message.answer_media_group(media=media_batch)
+            # Готовим первые изображения для первого сообщения
+            # Основной пост ограничиваем 4 фото (Taobao/Tmall/PDD)
+            main_images = image_urls[:4]
+
+            # Если только одно изображение — отправляем как одиночное фото (альбом требует ≥2)
+            if len(main_images) == 1:
+                try:
+                    await message.answer_photo(main_images[0], caption=post_text, parse_mode="HTML")
+                except TelegramBadRequest:
+                    # Фолбэк: скачать и отправить как файл
+                    try:
+                        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+                            r = await client.get(main_images[0])
+                            if r.status_code == 200 and r.content:
+                                fname = "photo.jpg"
+                                await message.answer_photo(BufferedInputFile(r.content, filename=fname), caption=post_text, parse_mode="HTML")
+                            else:
+                                await message.answer(post_text, parse_mode="HTML")
+                    except Exception:
+                        await message.answer(post_text, parse_mode="HTML")
+            else:
+                # Собираем медиагруппу (первая с подписью)
+                media_main = []
+                for i, url in enumerate(main_images):
+                    if i == 0:
+                        media_main.append(InputMediaPhoto(media=url, caption=post_text, parse_mode="HTML"))
+                    else:
+                        media_main.append(InputMediaPhoto(media=url))
+
+                try:
+                    await message.answer_media_group(media=media_main)
+                except TelegramBadRequest:
+                    # Фолбэк: предварительно скачиваем и отправляем как файлы (альбом)
+                    try:
+                        files: list[InputMediaPhoto] = []
+                        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+                            for i, url in enumerate(main_images):
+                                try:
+                                    r = await client.get(url)
+                                    if r.status_code != 200 or not r.content:
+                                        continue
+                                    fname = f"photo_{i+1}.jpg"
+                                    buf = BufferedInputFile(r.content, filename=fname)
+                                    if i == 0:
+                                        files.append(InputMediaPhoto(media=buf, caption=post_text, parse_mode="HTML"))
+                                    else:
+                                        files.append(InputMediaPhoto(media=buf))
+                                except Exception:
+                                    continue
+                        if files:
+                            await message.answer_media_group(media=files)
+                        else:
+                            await message.answer(post_text, parse_mode="HTML")
+                    except Exception:
+                        await message.answer(post_text, parse_mode="HTML")
+
+                # Дополнительные фото после первых 10 (если есть)
+                if len(image_urls) > len(main_images):
+                    remaining_images = image_urls[len(main_images):]
+                    for i in range(0, len(remaining_images), 10):
+                        batch = remaining_images[i:i+10]
+                        media_batch = [InputMediaPhoto(media=url) for url in batch]
+                        try:
+                            await message.answer_media_group(media=media_batch)
+                        except TelegramBadRequest:
+                            # Фолбэк: скачиваем и отправляем файлы
+                            try:
+                                files: list[InputMediaPhoto] = []
+                                async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+                                    for j, url in enumerate(batch):
+                                        try:
+                                            r = await client.get(url)
+                                            if r.status_code != 200 or not r.content:
+                                                continue
+                                            fname = f"photo_more_{i+j+1}.jpg"
+                                            files.append(InputMediaPhoto(media=BufferedInputFile(r.content, filename=fname)))
+                                        except Exception:
+                                            continue
+                                if files:
+                                    await message.answer_media_group(media=files)
+                            except Exception:
+                                pass
         else:
             # Если изображений нет, отправляем только текст
             await message.answer(post_text, parse_mode="HTML")

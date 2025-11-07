@@ -8,7 +8,7 @@
       "expires": "2026-02-14T12:58:52.344Z",
       "httpOnly": true,
       "secure": true,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "_nano_fp",
@@ -18,7 +18,7 @@
       "expires": "2026-12-11T12:56:53.399Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "api_uid",
@@ -28,7 +28,7 @@
       "expires": "2026-12-11T12:56:51.320Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "dilx",
@@ -38,7 +38,7 @@
       "expires": "2026-11-06T13:01:15.179Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "jrpl",
@@ -48,7 +48,7 @@
       "expires": "2026-11-06T13:01:15.179Z",
       "httpOnly": true,
       "secure": true,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "njrpl",
@@ -58,7 +58,7 @@
       "expires": "2026-11-06T13:01:15.179Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "pdd_user_id",
@@ -68,7 +68,7 @@
       "expires": "2026-02-14T12:58:52.349Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "pdd_user_uin",
@@ -78,7 +78,7 @@
       "expires": "2026-02-14T12:58:52.351Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "pdd_vds",
@@ -88,7 +88,7 @@
       "expires": "2025-11-13T12:59:00.389Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     },
     {
       "name": "webp",
@@ -98,7 +98,7 @@
       "expires": "2025-12-06T12:58:53.489Z",
       "httpOnly": false,
       "secure": false,
-      "sameSite": ""
+      "sameSite": "Lax"
     }
   ],
   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
