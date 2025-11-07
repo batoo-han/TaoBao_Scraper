@@ -124,7 +124,7 @@ cp .env.example .env
 # Отредактируйте .env
 
 # Запустите бота
-python autoparse.py
+python main.py
 ```
 
 ---

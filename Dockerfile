@@ -9,7 +9,7 @@ FROM python:3.11-slim
 # Метаданные образа
 LABEL maintainer="batoo@ya.ru"
 LABEL description="Taobao/Tmall Product Scraper Telegram Bot"
-LABEL version="1.0.0"
+LABEL version="2.0.0"
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
