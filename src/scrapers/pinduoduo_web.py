@@ -7,6 +7,7 @@ from src.core.config import settings
 import json
 import os
 import random
+import sys
 from io import BytesIO
 
 import httpx
@@ -207,7 +208,8 @@ class PinduoduoWebScraper:
             async with async_playwright() as p:
                 # Headless по умолчанию; если нет X11 ($DISPLAY), принудительно headless даже при DEBUG
                 debug_mode = bool(getattr(settings, 'DEBUG_MODE', False))
-                no_display = not os.environ.get("DISPLAY")
+                # На Linux без $DISPLAY принудительно headless, на Windows/macOS оставляем headed в DEBUG
+                no_display = sys.platform.startswith("linux") and not os.environ.get("DISPLAY")
                 headless = True if no_display else (False if debug_mode else True)
                 slow_mo = int(getattr(settings, 'PLAYWRIGHT_SLOWMO_MS', 0)) if debug_mode else 0
                 # Безопасные флаги для контейнеров/CI
