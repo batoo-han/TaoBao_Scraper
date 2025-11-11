@@ -9,6 +9,8 @@ import os
 import random
 import sys
 from io import BytesIO
+from datetime import datetime
+import tempfile
 
 import httpx
 from PIL import Image
@@ -83,6 +85,8 @@ class PinduoduoWebScraper:
         self.cookie_header = None
         # Пытаемся загрузить из внешнего JSON (если есть)
         self._load_from_json_if_present()
+        # Префикс страницы авторизации PDD
+        self.login_url_prefix = "https://mobile.yangkeduo.com/login.html"
 
     def _normalize_cookies(self, cookies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Приводит cookies из JSON к формату Playwright: корректные типы и значения.
@@ -131,6 +135,60 @@ class PinduoduoWebScraper:
                     n.pop('sameSite', None)
             normalized.append(n)
         return normalized
+
+    async def _save_cookies_json(self, context, url: str) -> None:
+        """Сохраняет текущие cookies и UA в JSON-файл, указанный в PDD_COOKIES_FILE."""
+        try:
+            cookies = await context.cookies()
+            # Нормализуем типы значений и поля
+            out = []
+            for c in cookies:
+                try:
+                    name = c.get("name")
+                    value = c.get("value")
+                    if not name or value is None:
+                        continue
+                    domain = c.get("domain", "")
+                    path = c.get("path", "/") or "/"
+                    # expires в playwright уже float секунд (или отсутствует)
+                    expires = c.get("expires")
+                    expires_str = ""
+                    if isinstance(expires, (int, float)) and expires > 0:
+                        try:
+                            expires_str = datetime.fromtimestamp(expires).isoformat() + "Z"
+                        except Exception:
+                            expires_str = ""
+                    same_site = c.get("sameSite")
+                    if isinstance(same_site, str):
+                        sl = same_site.strip().lower()
+                        same_site = "None" if sl == "none" else ("Lax" if sl == "lax" else ("Strict" if sl == "strict" else ""))
+                    else:
+                        same_site = ""
+                    out.append({
+                        "name": name,
+                        "value": value,
+                        "domain": domain,
+                        "path": path,
+                        "expires": expires_str,
+                        "httpOnly": bool(c.get("httpOnly", False)),
+                        "secure": bool(c.get("secure", True)),
+                        "sameSite": same_site,
+                    })
+                except Exception:
+                    continue
+            payload = {
+                "cookies": out,
+                "user_agent": self.user_agent or "",
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "url": url,
+            }
+            path = settings.PDD_COOKIES_FILE
+            if path:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2, ensure_ascii=False)
+                logger.info(f"[PDD][COOKIES] Cookies сохранены в {path} ({len(out)} шт.)")
+        except Exception as e:
+            logger.warning(f"[PDD][COOKIES] Не удалось сохранить cookies: {e}")
 
     def _load_from_json_if_present(self) -> None:
         path = settings.PDD_COOKIES_FILE
@@ -334,6 +392,101 @@ class PinduoduoWebScraper:
                         print(f"[DEBUG] Переход на страницу товара: {full_url}")
                     # Сначала минимум DOM, затем полная загрузка и сетевой простои
                     await page.goto(full_url, wait_until="domcontentloaded")
+                    # Проверка редиректа на логин
+                    cur_url = page.url or ""
+                    if cur_url.startswith(self.login_url_prefix):
+                        logger.info("[PDD][AUTH] Обнаружен редирект на страницу логина, потребуется интерактивная авторизация пользователем.")
+                        # Закрываем текущий headless-браузер и перезапускаем в видимом режиме
+                        try:
+                            await context.close()
+                            await browser.close()
+                        except Exception:
+                            pass
+                        # Запуск видимого браузера (возможны требования X-сервера на Linux)
+                        visible_kwargs = {
+                            "headless": False,
+                            "chromium_sandbox": False,
+                            "args": [a for a in chromium_args if a not in ("--single-process",)]
+                        }
+                        if slow_mo:
+                            visible_kwargs["slow_mo"] = slow_mo
+                        try:
+                            browser = await p.chromium.launch(**visible_kwargs)
+                        except Exception as e:
+                            logger.error(f"[PDD][AUTH] Не удалось запустить видимый браузер: {e}")
+                            result['code'] = 500
+                            result['msg'] = (
+                                "Ошибка запуска браузера Playwright в видимом режиме. "
+                                "Убедитесь, что настроен доступ к X-серверу (DISPLAY) или запустите бота локально."
+                            )
+                            return result
+                        # Воссоздаём контекст с теми же настройками
+                        if is_mobile:
+                            context = await browser.new_context(**device_kwargs)
+                        else:
+                            context = await browser.new_context(**context_args)
+                        page = await context.new_page()
+                        await page.goto(full_url, wait_until="domcontentloaded")
+
+                        # Ждём авторизацию: пока URL начинается с login.html или контейнер не найден
+                        print("\n[PDD] Требуется авторизация. Пожалуйста, войдите в аккаунт в открытом окне браузера.\n"
+                              "После успешной авторизации бот продолжит работу автоматически.")
+                        # Ждём до тех пор, пока не уйдём со страницы логина и не появится ключевой контейнер / либо goods.html загрузится
+                        auth_ok = False
+                        for _ in range(0, 1800):  # до ~15 минут (1800 * 0.5s)
+                            await asyncio.sleep(0.5)
+                            try:
+                                cur = page.url or ""
+                                if not cur.startswith(self.login_url_prefix):
+                                    # Проверяем наличие ключевого контейнера или смену на goods.html
+                                    if "goods.html" in cur:
+                                        auth_ok = True
+                                        break
+                                    el = await page.query_selector("xpath=//*[@id=\"main\"]/div/div[2]/div[1]/div/div")
+                                    if el:
+                                        auth_ok = True
+                                        break
+                            except Exception:
+                                continue
+                        if not auth_ok:
+                            logger.error("[PDD][AUTH] Не удалось дождаться авторизации пользователя.")
+                            result['code'] = 401
+                            result['msg'] = 'Требуется авторизация пользователя на Pinduoduo (login.html), время ожидания истекло.'
+                            return result
+
+                        # Сохраняем cookies в файл для будущих запусков
+                        await self._save_cookies_json(context, full_url)
+
+                        # Экспортируем состояние, чтобы продолжить headless
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as tf:
+                            storage_state_file = tf.name
+                        try:
+                            await context.storage_state(path=storage_state_file)
+                        except Exception:
+                            storage_state_file = None
+
+                        # Закрываем видимый браузер и возвращаемся в тихий режим
+                        try:
+                            await context.close()
+                            await browser.close()
+                        except Exception:
+                            pass
+
+                        # Перезапуск headless для дальнейшей работы
+                        browser = await p.chromium.launch(**launch_kwargs)
+                        if is_mobile:
+                            device_kwargs2 = dict(device_kwargs)
+                            if storage_state_file:
+                                device_kwargs2["storage_state"] = storage_state_file
+                            context = await browser.new_context(**device_kwargs2)
+                        else:
+                            context_args2 = dict(context_args)
+                            if storage_state_file:
+                                context_args2["storage_state"] = storage_state_file
+                            context = await browser.new_context(**context_args2)
+                        page = await context.new_page()
+                        await page.goto(full_url, wait_until="domcontentloaded")
+
                     try:
                         to = int(getattr(settings, 'PLAYWRIGHT_PAGE_TIMEOUT_MS', 60000))
                         await page.wait_for_load_state("load", timeout=to)
