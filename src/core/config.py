@@ -54,6 +54,33 @@ class Settings(BaseSettings):
     DISABLE_SSL_VERIFY: bool = False  # Отключить проверку SSL (только если есть проблемы с сертификатами)
     TMAPI_NOTIFY_439: bool = False  # Уведомлять пользователя и админа об ошибке 439 (недостаточно средств на счету TMAPI)
 
+    # PostgreSQL
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_DB: str = "taobao_scraper"
+    POSTGRES_USER: str = "taobao"
+    POSTGRES_PASSWORD: str = "taobao_scraper"
+    POSTGRES_SSLMODE: str = "prefer"
+    DATABASE_URL: str | None = None  # если задано — используем напрямую (async URL)
+
+    # LLM / приложение (будет храниться и в БД, но нужны дефолты)
+    DEFAULT_SIGNATURE: str = "@annabbox"
+    DEFAULT_CURRENCY: str = "cny"  # глобальный дефолт
+    DEFAULT_LLM_VENDOR: str = "yandex"  # yandex | openai | proxiapi
+    LLM_CACHE_TTL_MINUTES: int = 240
+    
+    # OpenAI настройки
+    OPENAI_API_KEY: str = ""  # API ключ OpenAI (необязательно, если не используется)
+    OPENAI_MODEL: str = "gpt-4o-mini"  # Модель OpenAI по умолчанию
+    
+    # ProxiAPI настройки
+    PROXIAPI_API_KEY: str = ""  # API ключ ProxiAPI (необязательно, если не используется)
+    PROXIAPI_MODEL: str = "gpt-4o-mini"  # Модель ProxiAPI по умолчанию
+    
+    # Admin Panel настройки
+    ADMIN_JWT_SECRET: str = "change-this-secret-key-in-production"  # Секретный ключ для JWT токенов админ-панели
+    ADMIN_PANEL_PORT: int = 8004  # Порт для админ-панели
+
     # Pinduoduo Web Scraping настройки
     PDD_USE_COOKIES: bool = True  # Использовать заранее выданные браузером куки вместо логина
     PDD_USER_AGENT: str = ""  # User-Agent из вашего браузера
@@ -80,4 +107,24 @@ class Settings(BaseSettings):
     )
 
 
-settings = Settings()
+# Создаем объект settings из .env
+_settings_instance = Settings()
+
+# Экспортируем settings как глобальную переменную
+# При загрузке из БД этот объект будет обновлен
+settings = _settings_instance
+
+
+def build_async_db_url() -> str:
+    """
+    Возвращает async URL для SQLAlchemy.
+
+    Если в .env задан DATABASE_URL, он используется напрямую.
+    Иначе собираем URL из отдельных переменных (использует asyncpg).
+    """
+    if settings.DATABASE_URL:
+        return settings.DATABASE_URL
+    return (
+        f"postgresql+asyncpg://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
+        f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+    )

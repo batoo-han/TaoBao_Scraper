@@ -1,29 +1,45 @@
+"""
+Клиент для взаимодействия с ProxiAPI.ru API.
+Отвечает за генерацию текста поста на основе данных о товаре.
+"""
+
 import httpx
 import json
+from typing import Dict, Any
+
 from src.core.config import settings
 from src.api.llm.base import LLMProvider, LLMResult
 
-class YandexLLMProvider(LLMProvider):
+
+class ProxiapiLLMProvider(LLMProvider):
     """
-    Клиент для взаимодействия с YandexGPT API.
+    Клиент для взаимодействия с ProxiAPI.ru API.
     Отвечает за генерацию текста поста на основе данных о товаре.
     """
-    vendor = "yandex"
+    vendor = "proxiapi"
 
-    def __init__(self):
-        self.base_url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"  # Базовый URL YandexGPT API
-        self.api_key = settings.YANDEX_GPT_API_KEY  # API ключ, загружаемый из настроек
+    def __init__(self, api_key: str | None = None, model: str = "gpt-4o-mini"):
+        """
+        Инициализация клиента ProxiAPI.
+
+        Args:
+            api_key: API ключ ProxiAPI (если не указан, берется из settings)
+            model: Модель для использования (по умолчанию gpt-4o-mini)
+        """
+        self.base_url = "https://api.proxiapi.ru/v1/chat/completions"
+        self.api_key = api_key or settings.PROXIAPI_API_KEY
+        self.model = model
         self.headers = {
-            "Authorization": f"Api-Key {self.api_key}",  # Авторизационный заголовок
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
 
-    async def generate(self, product_data: dict) -> LLMResult:
+    async def generate(self, product_data: Dict[str, Any]) -> LLMResult:
         """
-        Генерирует структурированный контент для поста, используя YandexGPT.
+        Генерирует структурированный контент для поста, используя ProxiAPI.
 
         Args:
-            product_data (dict): Словарь с информацией о товаре.
+            product_data: Словарь с информацией о товаре.
 
         Returns:
             LLMResult: Содержит распарсенный JSON и сырой ответ.
@@ -60,36 +76,38 @@ class YandexLLMProvider(LLMProvider):
         prompt = prompt_template.format(product_data=product_info_str)
 
         if settings.DEBUG_MODE:
-            print(f"[YandexGPT] Отправляем промпт:\n{prompt[:500]}...")
+            print(f"[ProxiAPI] Отправляем промпт:\n{prompt[:500]}...")
 
         data = {
-            "modelUri": f"gpt://{settings.YANDEX_FOLDER_ID}/{settings.YANDEX_GPT_MODEL}", 
-            "completionOptions": {
-                "stream": False,
-                "temperature": 0.05,
-                "maxTokens": "900"
-            },
+            "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "text": "Ты редактор-рефразировщик: переписываешь русский текст товара кратко и нейтрально, без маркетинга, выдумок и англ./кит. слов. Всегда отвечай только валидным JSON указанной структуры."
+                    "content": "Ты редактор-рефразировщик: переписываешь русский текст товара кратко и нейтрально, без маркетинга, выдумок и англ./кит. слов. Всегда отвечай только валидным JSON указанной структуры."
                 },
                 {
                     "role": "user",
-                    "text": prompt
+                    "content": prompt
                 }
-            ]
+            ],
+            "temperature": 0.05,
+            "max_tokens": 900,
+            "response_format": {"type": "json_object"}  # Принудительный JSON режим (для gpt-4o и новее)
         }
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(self.base_url, headers=self.headers, json=data)
             response.raise_for_status()
 
-            llm_response = response.json()["result"]["alternatives"][0]["message"]["text"]
+            response_json = response.json()
+            llm_response = response_json["choices"][0]["message"]["content"]
+            usage = response_json.get("usage", {})
+            tokens_used = usage.get("total_tokens", None)
+
             cleaned_response = llm_response.strip()
 
             if settings.DEBUG_MODE:
-                print(f"[YandexGPT] Получен ответ:\n{llm_response}")
+                print(f"[ProxiAPI] Получен ответ:\n{llm_response}")
 
             # Парсим JSON из ответа
             try:
@@ -103,16 +121,10 @@ class YandexLLMProvider(LLMProvider):
                 cleaned_response = cleaned_response.strip()
 
                 parsed_json = json.loads(cleaned_response)
-                return LLMResult(data=parsed_json, raw_text=llm_response, tokens_used=None)
+                return LLMResult(data=parsed_json, raw_text=llm_response, tokens_used=tokens_used)
             except json.JSONDecodeError as e:
                 if settings.DEBUG_MODE:
-                    print(f"[YandexGPT] Ошибка парсинга JSON: {e}")
-                    print(f"[YandexGPT] Ответ LLM: {llm_response}")
-                raise ValueError(f"YandexGPT вернул невалидный JSON: {e}")
+                    print(f"[ProxiAPI] Ошибка парсинга JSON: {e}")
+                    print(f"[ProxiAPI] Ответ LLM: {llm_response}")
+                raise ValueError(f"ProxiAPI вернул невалидный JSON: {e}")
 
-    async def generate_post_content(self, product_data: dict):
-        """
-        Временный адаптер для существующего кода.
-        """
-        result = await self.generate(product_data)
-        return result.data

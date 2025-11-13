@@ -1,8 +1,11 @@
 import logging
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.services.llm import LLMProviderManager
+    from src.db.models import UserSettings
 
 from src.api.tmapi import TmapiClient
-from src.api.yandex_gpt import YandexGPTClient
-from src.api.exchange_rate import ExchangeRateClient
 from src.api.yandex_translate import YandexTranslateClient
 from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
@@ -16,21 +19,39 @@ class Scraper:
     """
     def __init__(self):
         self.tmapi_client = TmapiClient()  # Клиент для tmapi.top
-        self.yandex_gpt_client = YandexGPTClient()  # Клиент для YandexGPT
-        self.exchange_rate_client = ExchangeRateClient()  # Клиент для ExchangeRate-API
         self.yandex_translate_client = YandexTranslateClient()  # Клиент для Yandex.Translate
 
-    async def scrape_product(self, url: str):
+    async def scrape_product(
+        self,
+        url: str,
+        llm_manager: "LLMProviderManager",
+        *,
+        user_settings: Optional["UserSettings"] = None,
+    ):
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
         и формирует финальный пост.
 
         Args:
             url (str): URL товара для скрапинга.
+            llm_manager (LLMProviderManager): Менеджер LLM-провайдеров.
+            user_settings (UserSettings | None): Настройки пользователя (подпись, валюта, курс).
+                Если не указано, используются значения по умолчанию.
 
         Returns:
             tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
         """
+        # Извлекаем параметры из user_settings или используем дефолты
+        if user_settings:
+            signature = user_settings.signature or settings.DEFAULT_SIGNATURE
+            currency = user_settings.default_currency or "cny"
+            exchange_rate = float(user_settings.exchange_rate) if user_settings.exchange_rate else None
+            user_id = user_settings.user_id
+        else:
+            signature = settings.DEFAULT_SIGNATURE
+            currency = "cny"
+            exchange_rate = None
+            user_id = None
         # Определяем платформу заранее, чтобы Pinduoduo обрабатывать веб-скрапингом
         platform, _ = URLParser.parse_url(url)
         logger.info(f"Определена платформа: {platform} для URL: {url}")
@@ -122,17 +143,11 @@ class Scraper:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper][Pinduoduo] Ошибка перевода описания: {e}")
         
-        exchange_rate = None
-        # Если включена конвертация валют, получаем курс
-        if settings.CONVERT_CURRENCY:
-            exchange_rate = await self.exchange_rate_client.get_exchange_rate()
-
         # Подготавливаем компактные данные для LLM (без огромного массива skus!)
         compact_data = self._prepare_compact_data_for_llm(product_data)
         
-        # Генерируем структурированный контент с помощью YandexGPT
-        # LLM вернет JSON с: title, description, characteristics, hashtags
-        llm_content = await self.yandex_gpt_client.generate_post_content(compact_data)
+        # Генерируем структурированный контент через менеджер LLM
+        llm_content = await llm_manager.generate(user_id, compact_data)
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] LLM контент получен: {llm_content.get('title', 'N/A')}")
@@ -181,7 +196,9 @@ class Scraper:
         post_text = self._build_post_text(
             llm_content=llm_content,
             product_data=product_data,
-            exchange_rate=exchange_rate
+            signature=signature,
+            currency=currency,
+            exchange_rate=exchange_rate,
         )
         
         # Получаем изображения в зависимости от платформы
@@ -895,7 +912,15 @@ class Scraper:
         # Возвращаем как есть (через запятую)
         return ", ".join(sizes_raw)
     
-    def _build_post_text(self, llm_content: dict, product_data: dict, exchange_rate: float = None) -> str:
+    def _build_post_text(
+        self,
+        llm_content: dict,
+        product_data: dict,
+        *,
+        signature: str,
+        currency: str = "cny",
+        exchange_rate: Optional[float] = None,
+    ) -> str:
         """
         Формирует финальный текст поста из структурированных данных LLM и данных API.
         Использует HTML разметку для Telegram.
@@ -1088,20 +1113,28 @@ class Scraper:
             if not post_parts[-1] == "":
                 post_parts.append("")
         
-        # Цена с эмодзи (курсивом)
-        price_text = f"<i>💰 <b>Цена:</b> {price} юаней"
-        if exchange_rate and settings.CONVERT_CURRENCY:
-            try:
-                rub_price = float(price) * exchange_rate
-                price_text += f" (~{rub_price:.2f} ₽)"
-            except (ValueError, TypeError):
-                pass
-        price_text += " + доставка</i>"
+        # Цена с учётом пользовательской валюты
+        currency_lower = (currency or "cny").lower()
+        price_text_parts = [f"<i>💰 <b>Цена:</b> {price} ¥"]
+
+        if currency_lower == "rub":
+            if exchange_rate:
+                try:
+                    rub_price = float(price) * float(exchange_rate)
+                    price_text_parts.append(f"(~{rub_price:.2f} ₽, курс 1 ¥ = {float(exchange_rate):.2f} ₽)")
+                except (ValueError, TypeError):
+                    price_text_parts.append("(уточните курс ₽ в настройках)")
+            else:
+                price_text_parts.append("(укажите курс ₽ в настройках)")
+
+        price_text_parts.append("+ доставка</i>")
+        price_text = " ".join(price_text_parts)
         post_parts.append(price_text)
         post_parts.append("")
         
         # Призыв к действию (курсивом)
-        post_parts.append("<i>📝 Для заказа пишите @annabbox или в комментариях 🛍️</i>")
+        contact = signature.strip() if signature.strip() else settings.DEFAULT_SIGNATURE
+        post_parts.append(f"<i>📝 Для заказа пишите {contact} или в комментариях 🛍️</i>")
         post_parts.append("")
         
         # Хэштеги (курсивом)
