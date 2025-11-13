@@ -382,9 +382,15 @@ textarea.form-control {
 }
 
 .btn-danger {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
     background-color: #d9534f;
     color: #fff;
-    border: none;
 }
 
 .btn-danger:hover {
@@ -401,8 +407,11 @@ textarea.form-control {
     background-color: rgba(217, 83, 79, 0.08);
     display: flex;
     flex-direction: column;
+    align-items: center;
+    text-align: center;
     gap: 12px;
     margin-bottom: 24px;
+    padding: 16px 20px;
 }
 
 .restart-card.hidden {
@@ -416,6 +425,10 @@ textarea.form-control {
 .restart-card p {
     margin: 0;
     color: var(--text-secondary);
+}
+
+.restart-card .btn-danger {
+    align-self: center;
 }
 
 /* ============================================================================
@@ -717,6 +730,10 @@ textarea.form-control {
     border-left: 4px solid var(--warning-color);
 }
 
+.toast.info {
+    border-left: 4px solid var(--primary-color);
+}
+
 @keyframes slideInRight {
     from {
         transform: translateX(100%);
@@ -838,10 +855,49 @@ textarea.form-control {
     margin-bottom: 20px;
 }
 
+.settings-grid.two-columns {
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.settings-sections {
+    display: grid;
+    gap: 24px;
+}
+
+.settings-sections.two-columns {
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+
+.settings-section h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: var(--text-primary);
+}
+
+.section-hint {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 14px;
+}
+
 .setting-item {
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+
+.checkbox-item {
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 500;
+    color: var(--text-primary);
 }
 
 .setting-item label {

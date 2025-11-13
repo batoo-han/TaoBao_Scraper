@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import random
+from pathlib import Path
+from typing import Optional
 from aiogram import F, Router
 from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramBadRequest
@@ -29,6 +31,35 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 scraper = Scraper()
+
+LOCAL_IMAGE_PREFIX = "local::"
+
+
+def _is_local_image(source: str) -> bool:
+    return isinstance(source, str) and source.startswith(LOCAL_IMAGE_PREFIX)
+
+
+def _load_local_image_buffer(source: str) -> Optional[BufferedInputFile]:
+    try:
+        path = Path(source[len(LOCAL_IMAGE_PREFIX):])
+        data = path.read_bytes()
+        return BufferedInputFile(data, filename=path.name)
+    except Exception:
+        return None
+
+
+def _build_media_photo(
+    source: str,
+    *,
+    caption: Optional[str] = None,
+    parse_mode: Optional[str] = None,
+) -> Optional[InputMediaPhoto]:
+    if _is_local_image(source):
+        buffer = _load_local_image_buffer(source)
+        if buffer is None:
+            return None
+        return InputMediaPhoto(media=buffer, caption=caption, parse_mode=parse_mode)
+    return InputMediaPhoto(media=source, caption=caption, parse_mode=parse_mode)
 
 
 class SettingsState(StatesGroup):
@@ -502,39 +533,57 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         main_images = image_urls[:4]
 
         if len(main_images) == 1:
-            try:
-                await message.answer_photo(
-                    main_images[0],
-                    caption=post_text,
-                    parse_mode="HTML",
-                )
-            except TelegramBadRequest:
-                try:
-                    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                        response = await client.get(main_images[0])
-                        if response.status_code == 200 and response.content:
-                            await message.answer_photo(
-                                BufferedInputFile(response.content, filename="photo.jpg"),
-                                caption=post_text,
-                                parse_mode="HTML",
-                            )
-                        else:
-                            async with get_async_session() as session:
-                                _, _, is_new_user = await ensure_user_and_settings(message, session)
-                                await session.commit()
-                            await message.answer(post_text, parse_mode="HTML", reply_markup=build_main_menu_keyboard(is_new_user=is_new_user))
-                except Exception:
+            first_image = main_images[0]
+            if _is_local_image(first_image):
+                buffer = _load_local_image_buffer(first_image)
+                if buffer:
+                    await message.answer_photo(
+                        buffer,
+                        caption=post_text,
+                        parse_mode="HTML",
+                    )
+                else:
                     async with get_async_session() as session:
                         _, _, is_new_user = await ensure_user_and_settings(message, session)
                         await session.commit()
                     await message.answer(post_text, parse_mode="HTML", reply_markup=build_main_menu_keyboard(is_new_user=is_new_user))
+            else:
+                try:
+                    await message.answer_photo(
+                        first_image,
+                        caption=post_text,
+                        parse_mode="HTML",
+                    )
+                except TelegramBadRequest:
+                    try:
+                        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+                            response = await client.get(first_image)
+                            if response.status_code == 200 and response.content:
+                                await message.answer_photo(
+                                    BufferedInputFile(response.content, filename="photo.jpg"),
+                                    caption=post_text,
+                                    parse_mode="HTML",
+                                )
+                            else:
+                                async with get_async_session() as session:
+                                    _, _, is_new_user = await ensure_user_and_settings(message, session)
+                                    await session.commit()
+                                await message.answer(post_text, parse_mode="HTML", reply_markup=build_main_menu_keyboard(is_new_user=is_new_user))
+                    except Exception:
+                        async with get_async_session() as session:
+                            _, _, is_new_user = await ensure_user_and_settings(message, session)
+                            await session.commit()
+                        await message.answer(post_text, parse_mode="HTML", reply_markup=build_main_menu_keyboard(is_new_user=is_new_user))
         else:
             media_main = []
-            for i, url in enumerate(main_images):
-                if i == 0:
-                    media_main.append(InputMediaPhoto(media=url, caption=post_text, parse_mode="HTML"))
-                else:
-                    media_main.append(InputMediaPhoto(media=url))
+            for i, src in enumerate(main_images):
+                media = _build_media_photo(
+                    src,
+                    caption=post_text if i == 0 else None,
+                    parse_mode="HTML" if i == 0 else None,
+                )
+                if media:
+                    media_main.append(media)
 
             try:
                 await message.answer_media_group(media=media_main)
@@ -542,9 +591,21 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                 try:
                     files: list[InputMediaPhoto] = []
                     async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                        for i, url in enumerate(main_images):
+                        for i, src in enumerate(main_images):
+                            if _is_local_image(src):
+                                buffer = _load_local_image_buffer(src)
+                                if not buffer:
+                                    continue
+                                files.append(
+                                    InputMediaPhoto(
+                                        media=buffer,
+                                        caption=post_text if i == 0 else None,
+                                        parse_mode="HTML" if i == 0 else None,
+                                    )
+                                )
+                                continue
                             try:
-                                response = await client.get(url)
+                                response = await client.get(src)
                                 if response.status_code != 200 or not response.content:
                                     continue
                                 buffer = BufferedInputFile(response.content, filename=f"photo_{i+1}.jpg")
@@ -571,16 +632,31 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                 remaining_images = image_urls[len(main_images):]
                 for i in range(0, len(remaining_images), 10):
                     batch = remaining_images[i : i + 10]
-                    media_batch = [InputMediaPhoto(media=url) for url in batch]
+                    media_batch: list[InputMediaPhoto] = []
+                    for src in batch:
+                        media = _build_media_photo(src)
+                        if media:
+                            media_batch.append(media)
+
+                    if not media_batch:
+                        continue
+
                     try:
                         await message.answer_media_group(media=media_batch)
                     except TelegramBadRequest:
                         try:
                             files: list[InputMediaPhoto] = []
                             async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                                for j, url in enumerate(batch):
+                                for j, src in enumerate(batch):
+                                    if _is_local_image(src):
+                                        buffer = _load_local_image_buffer(src)
+                                        if not buffer:
+                                            continue
+                                        files.append(InputMediaPhoto(media=buffer))
+                                        continue
+
                                     try:
-                                        response = await client.get(url)
+                                        response = await client.get(src)
                                         if response.status_code != 200 or not response.content:
                                             continue
                                         files.append(

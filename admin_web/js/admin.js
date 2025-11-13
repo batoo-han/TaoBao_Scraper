@@ -200,13 +200,43 @@ async function loadSettings() {
         const promptConfig = await api.getLLMPromptConfig();
         const promptTemplateEl = document.getElementById('promptTemplate');
         const llmTemperatureEl = document.getElementById('llmTemperature');
+        const llmTemperatureValueEl = document.getElementById('llmTemperatureValue');
         const llmMaxTokensEl = document.getElementById('llmMaxTokens');
+        const llmMaxTokensValueEl = document.getElementById('llmMaxTokensValue');
 
-        if (promptTemplateEl) promptTemplateEl.value = promptConfig.prompt_template || '';
-        if (llmTemperatureEl) llmTemperatureEl.value = promptConfig.temperature ?? 0.05;
-        if (llmMaxTokensEl) llmMaxTokensEl.value = promptConfig.max_tokens ?? 900;
+        if (promptTemplateEl) {
+            promptTemplateEl.value = promptConfig.prompt_template || '';
+        }
+        if (llmTemperatureEl) {
+            const temperatureValue = promptConfig.temperature ?? 0.05;
+            llmTemperatureEl.value = temperatureValue;
+            attachRangeDisplay(llmTemperatureEl, llmTemperatureValueEl, (value) => Number(value).toFixed(2));
+        }
+        if (llmMaxTokensEl) {
+            const tokensValue = promptConfig.max_tokens ?? 900;
+            llmMaxTokensEl.value = tokensValue;
+            attachRangeDisplay(llmMaxTokensEl, llmMaxTokensValueEl, (value) => Math.round(Number(value)));
+        }
     } catch (error) {
         console.error('Ошибка загрузки настроек промпта:', error);
+    } finally {
+        const llmTemperatureEl = document.getElementById('llmTemperature');
+        const llmTemperatureValueEl = document.getElementById('llmTemperatureValue');
+        if (llmTemperatureEl) {
+            if (!llmTemperatureEl.value) {
+                llmTemperatureEl.value = 0.05;
+            }
+            attachRangeDisplay(llmTemperatureEl, llmTemperatureValueEl, (value) => Number(value).toFixed(2));
+        }
+
+        const llmMaxTokensEl = document.getElementById('llmMaxTokens');
+        const llmMaxTokensValueEl = document.getElementById('llmMaxTokensValue');
+        if (llmMaxTokensEl) {
+            if (!llmMaxTokensEl.value) {
+                llmMaxTokensEl.value = 900;
+            }
+            attachRangeDisplay(llmMaxTokensEl, llmMaxTokensValueEl, (value) => Math.round(Number(value)));
+        }
     }
 }
 
@@ -216,6 +246,7 @@ function applySettingsData(settingsData) {
     const appConfig = settingsData.app_config || {};
 
     loadBasicSettings(appConfig);
+    loadImageAnalysisSettings(appConfig);
     loadDatabaseSettings(appConfig);
     loadSystemSettings(appConfig);
 
@@ -244,14 +275,10 @@ function updateRestartNotice(settingsData) {
     const pendingKeys = Object.keys(pendingConfig);
     const safePendingKeys = pendingKeys.map(escapeHtml);
 
-    if (settingsData.restart_required && safePendingKeys.length) {
+    // Показываем блок только если есть реальные pending ключи
+    if (safePendingKeys.length > 0) {
         notice.classList.remove('hidden');
         noticeText.innerHTML = `Для применения настроек требуется перезапуск (изменены ключи: <strong>${safePendingKeys.join(', ')}</strong>).`;
-        restartBtn.disabled = false;
-        restartBtn.textContent = 'Перезапустить сервисы';
-    } else if (settingsData.restart_required) {
-        notice.classList.remove('hidden');
-        noticeText.textContent = 'Для применения части настроек требуется перезапуск сервисов.';
         restartBtn.disabled = false;
         restartBtn.textContent = 'Перезапустить сервисы';
     } else {
@@ -305,6 +332,167 @@ function cssEscape(value) {
         return CSS.escape(value);
     }
     return String(value).replace(/[^a-zA-Z0-9_\-]/g, '\\$&');
+}
+
+function renderSettingField(field, value, scope) {
+    const key = field.key;
+    const inputId = `${scope}-${key}`;
+    const hintHtml = field.hint ? `<small class="form-hint">${escapeHtml(field.hint)}</small>` : '';
+    const placeholder = field.placeholder ? escapeHtml(field.placeholder) : 'Не задано';
+    const disabledAttr = field.disabled ? 'disabled' : '';
+    const requiredAttr = field.required ? 'required' : '';
+    const minAttr = field.min !== undefined ? `min="${field.min}"` : '';
+    const maxAttr = field.max !== undefined ? `max="${field.max}"` : '';
+    const stepAttr = field.step !== undefined ? `step="${field.step}"` : '';
+    const dataset = `data-setting-key="${escapeHtml(key)}" data-setting-scope="${escapeHtml(scope)}"`;
+
+    if (field.type === 'checkbox') {
+        const checked = value === true || value === 'true' || value === 'True' || value === 1;
+        return `
+            <div class="setting-item checkbox-item">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="${escapeHtml(inputId)}" ${dataset} ${checked ? 'checked' : ''} ${disabledAttr}>
+                    ${escapeHtml(field.label)}
+                </label>
+                ${hintHtml}
+            </div>
+        `;
+    }
+
+    if (field.type === 'select') {
+        const options = (field.options || []).map(option => {
+            const optValue = typeof option === 'string' ? option : option.value;
+            const optLabel = typeof option === 'string' ? option : option.label;
+            const selected = optValue === value ? 'selected' : '';
+            return `<option value="${escapeHtml(optValue)}" ${selected}>${escapeHtml(optLabel)}</option>`;
+        }).join('');
+        return `
+            <div class="setting-item">
+                <label for="${escapeHtml(inputId)}">${escapeHtml(field.label)}</label>
+                <select id="${escapeHtml(inputId)}" class="form-control" ${dataset} ${disabledAttr} ${requiredAttr}>
+                    ${options}
+                </select>
+                ${hintHtml}
+            </div>
+        `;
+    }
+
+    if (field.type === 'textarea') {
+        const textValue = value ?? '';
+        return `
+            <div class="setting-item">
+                <label for="${escapeHtml(inputId)}">${escapeHtml(field.label)}</label>
+                <textarea
+                    id="${escapeHtml(inputId)}"
+                    class="form-control"
+                    rows="${field.rows || 5}"
+                    ${dataset}
+                    placeholder="${placeholder}"
+                    ${disabledAttr}
+                    ${requiredAttr}
+                >${escapeHtml(textValue)}</textarea>
+                ${hintHtml}
+            </div>
+        `;
+    }
+
+    const inputType = field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text';
+    const displayValue = field.secret && value ? '' : (value ?? '');
+    const secretHint = field.secret && value ? '<small class="form-hint">Оставьте поле пустым, чтобы сохранить текущее значение.</small>' : '';
+
+    return `
+        <div class="setting-item">
+            <label for="${escapeHtml(inputId)}">${escapeHtml(field.label)}</label>
+            <input
+                type="${inputType}"
+                id="${escapeHtml(inputId)}"
+                class="form-control"
+                ${dataset}
+                value="${escapeHtml(displayValue)}"
+                placeholder="${field.secret && value ? 'Секрет уже задан' : placeholder}"
+                ${disabledAttr}
+                ${requiredAttr}
+                ${minAttr}
+                ${maxAttr}
+                ${stepAttr}
+            >
+            ${hintHtml}
+            ${secretHint}
+        </div>
+    `;
+}
+
+function renderSettingsGrid(containerId, fields, appConfig, scope) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.innerHTML = fields.map(field => renderSettingField(field, appConfig[field.key], scope)).join('');
+}
+
+function collectSettingsPayload(scope) {
+    const payload = {};
+    const elements = document.querySelectorAll(`[data-setting-scope="${scope}"]`);
+    elements.forEach(element => {
+        const key = element.dataset.settingKey;
+        if (!key) return;
+
+        if (element.type === 'checkbox') {
+            payload[key] = element.checked;
+            return;
+        }
+
+        if (element.tagName === 'SELECT') {
+            if (element.value !== '') {
+                payload[key] = element.value;
+            }
+            return;
+        }
+
+        if (element.type === 'number') {
+            if (element.value !== '') {
+                const numericValue = Number(element.value);
+                if (!Number.isNaN(numericValue)) {
+                    payload[key] = numericValue;
+                }
+            }
+            return;
+        }
+
+        if (element.type === 'range') {
+            if (element.value !== '') {
+                const numericValue = Number(element.value);
+                payload[key] = Number.isNaN(numericValue) ? element.value : numericValue;
+            }
+            return;
+        }
+
+        const value = element.value ?? '';
+        if (value.trim() !== '') {
+            payload[key] = value.trim();
+        }
+    });
+    return payload;
+}
+
+function attachRangeDisplay(inputElement, valueElement, formatter) {
+    if (!inputElement || !valueElement) return;
+    const updateValue = (raw) => {
+        if (raw === undefined || raw === null || raw === '') {
+            valueElement.textContent = '';
+            return;
+        }
+        if (formatter) {
+            valueElement.textContent = formatter(raw);
+        } else {
+            valueElement.textContent = raw;
+        }
+    };
+
+    if (!inputElement.dataset.rangeDisplayBound) {
+        inputElement.addEventListener('input', (event) => updateValue(event.target.value));
+        inputElement.dataset.rangeDisplayBound = 'true';
+    }
+
+    updateValue(inputElement.value ?? inputElement.getAttribute('value'));
 }
 
 function renderProviderCard(provider) {
@@ -836,21 +1024,54 @@ function updatePagination(containerId, currentPage, totalPages, onPageChange) {
 
 /**
  * Показ уведомления (toast).
+ * @param {string} message - Текст сообщения
+ * @param {string} type - Тип уведомления ('success', 'error', 'warning', 'info')
+ * @param {number} duration - Длительность показа в миллисекундах (0 = бесконечно)
+ * @returns {HTMLElement} - Элемент toast для возможности удаления
  */
-function showToast(message, type = 'success') {
+function showToast(message, type = 'success', duration = 3000) {
     const container = document.getElementById('toastContainer');
+    if (!container) {
+        console.warn('Toast container not found');
+        return null;
+    }
+    
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     toast.textContent = message;
     
     container.appendChild(toast);
     
+    // Анимация появления
     setTimeout(() => {
-        toast.style.animation = 'slideInRight 0.3s reverse';
+        toast.style.animation = 'slideInRight 0.3s';
+    }, 10);
+    
+    // Автоматическое скрытие (если duration > 0)
+    if (duration > 0) {
         setTimeout(() => {
-            container.removeChild(toast);
-        }, 300);
-    }, 3000);
+            toast.style.animation = 'slideInRight 0.3s reverse';
+            setTimeout(() => {
+                if (toast.parentNode === container) {
+                    container.removeChild(toast);
+                }
+            }, 300);
+        }, duration);
+    }
+    
+    // Возвращаем элемент для возможности ручного удаления
+    toast.remove = function() {
+        if (toast.parentNode === container) {
+            toast.style.animation = 'slideInRight 0.3s reverse';
+            setTimeout(() => {
+                if (toast.parentNode === container) {
+                    container.removeChild(toast);
+                }
+            }, 300);
+        }
+    };
+    
+    return toast;
 }
 
 /**
@@ -1314,121 +1535,99 @@ function initSettingsTabs() {
  * Загрузка основных настроек.
  */
 function loadBasicSettings(appConfig) {
-    const container = document.getElementById('basicSettings');
-    if (!container) return;
-    
-    const settings = [
-        { key: 'BOT_TOKEN', label: 'BOT_TOKEN', type: 'password', hint: 'Токен Telegram бота от @BotFather' },
-        { key: 'YANDEX_GPT_API_KEY', label: 'YANDEX_GPT_API_KEY', type: 'password', hint: 'API ключ YandexGPT' },
-        { key: 'YANDEX_FOLDER_ID', label: 'YANDEX_FOLDER_ID', type: 'text', hint: 'ID каталога Yandex Cloud' },
-        { key: 'YANDEX_GPT_MODEL', label: 'YANDEX_GPT_MODEL', type: 'text', hint: 'Модель YandexGPT (yandexgpt-lite или yandexgpt)' },
-        { key: 'OPENAI_API_KEY', label: 'OPENAI_API_KEY', type: 'password', hint: 'API ключ OpenAI' },
-        { key: 'OPENAI_MODEL', label: 'OPENAI_MODEL', type: 'text', hint: 'Модель OpenAI (например: gpt-4o-mini)' },
-        { key: 'PROXIAPI_API_KEY', label: 'PROXIAPI_API_KEY', type: 'password', hint: 'API ключ ProxiAPI' },
-        { key: 'PROXIAPI_MODEL', label: 'PROXIAPI_MODEL', type: 'text', hint: 'Модель ProxiAPI' },
-        { key: 'TMAPI_TOKEN', label: 'TMAPI_TOKEN', type: 'password', hint: 'API токен для TMAPI (tmapi.top)' },
-        { key: 'EXCHANGE_RATE_API_KEY', label: 'EXCHANGE_RATE_API_KEY', type: 'password', hint: 'API ключ для конвертации валют' },
-        { key: 'ADMIN_CHAT_ID', label: 'ADMIN_CHAT_ID', type: 'text', hint: 'Telegram Chat ID админа для уведомлений' },
-        { key: 'DEFAULT_SIGNATURE', label: 'DEFAULT_SIGNATURE', type: 'text', hint: 'Подпись по умолчанию (например: @annabbox)' },
-        { key: 'DEFAULT_CURRENCY', label: 'DEFAULT_CURRENCY', type: 'text', hint: 'Валюта по умолчанию (cny или rub)' },
-        { key: 'DEFAULT_LLM_VENDOR', label: 'DEFAULT_LLM_VENDOR', type: 'text', hint: 'Провайдер LLM по умолчанию (yandex, openai, proxiapi)' },
-        { key: 'LLM_CACHE_TTL_MINUTES', label: 'LLM_CACHE_TTL_MINUTES', type: 'number', hint: 'Время жизни кэша LLM в минутах' },
+    const botFields = [
+        { key: 'BOT_TOKEN', label: 'BOT_TOKEN', type: 'password', hint: 'Токен Telegram бота от @BotFather.', secret: true },
+        { key: 'ADMIN_CHAT_ID', label: 'ADMIN_CHAT_ID', type: 'text', hint: 'Telegram Chat ID для получения уведомлений от бота.' },
     ];
-    
-    container.innerHTML = settings.map(s => `
-        <div class="setting-item">
-            <label for="setting-${s.key}">${s.label}</label>
-            <input 
-                type="${s.type}" 
-                id="setting-${s.key}" 
-                class="form-control" 
-                value="${appConfig[s.key] || ''}"
-                placeholder="Не задано"
-            >
-            <small class="form-hint">${s.hint}</small>
-        </div>
-    `).join('');
+
+    const integrationsFields = [
+        { key: 'TMAPI_TOKEN', label: 'TMAPI_TOKEN', type: 'password', hint: 'API токен для TMAPI (tmapi.top).', secret: true },
+        { key: 'EXCHANGE_RATE_API_KEY', label: 'EXCHANGE_RATE_API_KEY', type: 'password', hint: 'API ключ сервиса конвертации валют.', secret: true },
+        { key: 'TMAPI_RATE_LIMIT', label: 'TMAPI_RATE_LIMIT', type: 'number', hint: 'Максимальное количество запросов к TMAPI в секунду.', min: 1, max: 20, step: 1 },
+    ];
+
+    const defaultsFields = [
+        { key: 'DEFAULT_SIGNATURE', label: 'DEFAULT_SIGNATURE', type: 'text', hint: 'Подпись, добавляемая в конец сообщения по умолчанию.' },
+        { key: 'DEFAULT_CURRENCY', label: 'DEFAULT_CURRENCY', type: 'select', hint: 'Базовая валюта для расчётов.', options: [
+            { value: 'cny', label: 'CNY (юань)' },
+            { value: 'rub', label: 'RUB (рубль)' },
+        ] },
+        { key: 'DEFAULT_LLM_VENDOR', label: 'DEFAULT_LLM_VENDOR', type: 'select', hint: 'Провайдер LLM по умолчанию.', options: [
+            { value: 'yandex', label: 'YandexGPT' },
+            { value: 'openai', label: 'OpenAI' },
+            { value: 'proxiapi', label: 'ProxiAPI' },
+        ] },
+        { key: 'LLM_CACHE_TTL_MINUTES', label: 'LLM_CACHE_TTL_MINUTES', type: 'number', hint: 'Время жизни кэша ответов LLM (в минутах).', min: 0, step: 30 },
+    ];
+
+    renderSettingsGrid('basicSettings-bot', botFields, appConfig, 'basic');
+    renderSettingsGrid('basicSettings-integrations', integrationsFields, appConfig, 'basic');
+    renderSettingsGrid('basicSettings-defaults', defaultsFields, appConfig, 'basic');
+}
+
+/**
+ * Загрузка настроек OCR/LLM для изображений.
+ */
+function loadImageAnalysisSettings(appConfig) {
+    const fields = [
+        { key: 'ENABLE_IMAGE_TEXT_ANALYSIS', label: 'Включить анализ изображений', type: 'checkbox', hint: 'Запускает распознавание текста и таблиц на всех фотографиях товара.' },
+        { key: 'IMAGE_TEXT_OCR_PROVIDER', label: 'OCR провайдер', type: 'select', hint: 'Сервис, выполняющий распознавание текста.', options: [
+            { value: 'yandex', label: 'Yandex Vision (OCR)' },
+        ] },
+        { key: 'YANDEX_VISION_API_KEY', label: 'YANDEX_VISION_API_KEY', type: 'password', hint: 'API ключ Yandex Vision.', secret: true },
+        { key: 'YANDEX_VISION_MODEL', label: 'YANDEX_VISION_MODEL', type: 'select', hint: 'Алгоритм распознавания Yandex Vision.', options: [
+            { value: 'ocr', label: 'ocr (универсальная печать)' },
+            { value: 'inline-text', label: 'inline-text (текст в линию)' },
+            { value: 'handwriting', label: 'handwriting (рукописный текст)' },
+        ] },
+        { key: 'IMAGE_TEXT_TRANSLATE_LANGUAGE', label: 'IMAGE_TEXT_TRANSLATE_LANGUAGE', type: 'select', hint: 'Язык перевода распознанного текста.', options: [
+            { value: 'ru', label: 'ru (русский)' },
+            { value: 'en', label: 'en (английский)' },
+        ] },
+        { key: 'IMAGE_TEXT_OUTPUT_DIR', label: 'IMAGE_TEXT_OUTPUT_DIR', type: 'text', hint: 'Каталог для сохранения визуализированных таблиц и вспомогательных изображений.' },
+    ];
+
+    renderSettingsGrid('imageSettingsGrid', fields, appConfig, 'image');
+
+    const promptEl = document.getElementById('imageSummaryPrompt');
+    if (promptEl) {
+        promptEl.value = appConfig.IMAGE_TEXT_SUMMARY_PROMPT || '';
+    }
 }
 
 /**
  * Загрузка настроек базы данных.
  */
 function loadDatabaseSettings(appConfig) {
-    const container = document.getElementById('databaseSettings');
-    if (!container) return;
-    
-    const settings = [
-        { key: 'POSTGRES_HOST', label: 'POSTGRES_HOST', type: 'text', hint: 'Хост PostgreSQL' },
-        { key: 'POSTGRES_PORT', label: 'POSTGRES_PORT', type: 'number', hint: 'Порт PostgreSQL' },
-        { key: 'POSTGRES_DB', label: 'POSTGRES_DB', type: 'text', hint: 'Имя базы данных' },
-        { key: 'POSTGRES_USER', label: 'POSTGRES_USER', type: 'text', hint: 'Пользователь PostgreSQL' },
-        { key: 'POSTGRES_PASSWORD', label: 'POSTGRES_PASSWORD', type: 'password', hint: 'Пароль PostgreSQL' },
-        { key: 'POSTGRES_SSLMODE', label: 'POSTGRES_SSLMODE', type: 'text', hint: 'Режим SSL (prefer, require, disable)' },
+    const fields = [
+        { key: 'POSTGRES_HOST', label: 'POSTGRES_HOST', type: 'text', hint: 'Хост сервера PostgreSQL (обычно localhost или адрес контейнера).' },
+        { key: 'POSTGRES_PORT', label: 'POSTGRES_PORT', type: 'number', hint: 'Порт PostgreSQL.', min: 1, max: 65535 },
+        { key: 'POSTGRES_DB', label: 'POSTGRES_DB', type: 'text', hint: 'Имя базы данных.' },
+        { key: 'POSTGRES_USER', label: 'POSTGRES_USER', type: 'text', hint: 'Имя пользователя PostgreSQL.' },
+        { key: 'POSTGRES_PASSWORD', label: 'POSTGRES_PASSWORD', type: 'password', hint: 'Пароль пользователя PostgreSQL.', secret: true },
+        { key: 'POSTGRES_SSLMODE', label: 'POSTGRES_SSLMODE', type: 'select', hint: 'Режим подключения через SSL.', options: [
+            { value: 'prefer', label: 'prefer' },
+            { value: 'require', label: 'require' },
+            { value: 'disable', label: 'disable' },
+        ] },
     ];
-    
-    container.innerHTML = settings.map(s => `
-        <div class="setting-item">
-            <label for="db-setting-${s.key}">${s.label}</label>
-            <input 
-                type="${s.type}" 
-                id="db-setting-${s.key}" 
-                class="form-control" 
-                value="${appConfig[s.key] || ''}"
-                placeholder="Не задано"
-            >
-            <small class="form-hint">${s.hint}</small>
-        </div>
-    `).join('');
+
+    renderSettingsGrid('databaseSettings', fields, appConfig, 'database');
 }
 
 /**
  * Загрузка системных настроек.
  */
 function loadSystemSettings(appConfig) {
-    const container = document.getElementById('systemSettings');
-    if (!container) return;
-    
-    const settings = [
-        { key: 'DEBUG_MODE', label: 'DEBUG_MODE', type: 'checkbox', hint: 'Режим отладки с подробными логами' },
-        { key: 'MOCK_MODE', label: 'MOCK_MODE', type: 'checkbox', hint: 'Mock режим для тестирования без API' },
-        { key: 'DISABLE_SSL_VERIFY', label: 'DISABLE_SSL_VERIFY', type: 'checkbox', hint: 'Отключить проверку SSL (не рекомендуется)' },
-        { key: 'ADMIN_JWT_SECRET', label: 'ADMIN_JWT_SECRET', type: 'password', hint: 'Секретный ключ для JWT токенов админ-панели' },
-        { key: 'ADMIN_PANEL_PORT', label: 'ADMIN_PANEL_PORT', type: 'number', hint: 'Порт для админ-панели' },
+    const fields = [
+        { key: 'DEBUG_MODE', label: 'DEBUG_MODE', type: 'checkbox', hint: 'Включает детализированные логи и отладочные сообщения.' },
+        { key: 'MOCK_MODE', label: 'MOCK_MODE', type: 'checkbox', hint: 'Использовать mock-данные вместо реальных API-запросов.' },
+        { key: 'DISABLE_SSL_VERIFY', label: 'DISABLE_SSL_VERIFY', type: 'checkbox', hint: 'Отключить проверку SSL-сертификатов (не рекомендуется).' },
+        { key: 'ADMIN_JWT_SECRET', label: 'ADMIN_JWT_SECRET', type: 'password', hint: 'Секретный ключ для подписи JWT токенов админ-панели.', secret: true },
+        { key: 'ADMIN_PANEL_PORT', label: 'ADMIN_PANEL_PORT', type: 'number', hint: 'HTTP-порт, на котором доступна админ-панель.', min: 1, max: 65535 },
     ];
-    
-    container.innerHTML = settings.map(s => {
-        if (s.type === 'checkbox') {
-            const checked = appConfig[s.key] === true || appConfig[s.key] === 'true' || appConfig[s.key] === 'True';
-            return `
-                <div class="setting-item">
-                    <label>
-                        <input 
-                            type="checkbox" 
-                            id="sys-setting-${s.key}" 
-                            class="form-checkbox"
-                            ${checked ? 'checked' : ''}
-                        >
-                        ${s.label}
-                    </label>
-                    <small class="form-hint">${s.hint}</small>
-                </div>
-            `;
-        } else {
-            return `
-                <div class="setting-item">
-                    <label for="sys-setting-${s.key}">${s.label}</label>
-                    <input 
-                        type="${s.type}" 
-                        id="sys-setting-${s.key}" 
-                        class="form-control" 
-                        value="${appConfig[s.key] || ''}"
-                        placeholder="Не задано"
-                    >
-                    <small class="form-hint">${s.hint}</small>
-                </div>
-            `;
-        }
-    }).join('');
+
+    renderSettingsGrid('systemSettings', fields, appConfig, 'system');
 }
 
 /**
@@ -1443,13 +1642,7 @@ function setupSettingsHandlers() {
         saveBasicBtn.parentNode.replaceChild(newBtn, saveBasicBtn);
         
         newBtn.addEventListener('click', async () => {
-            const config = {};
-            document.querySelectorAll('#basicSettings input').forEach(input => {
-                const key = input.id.replace('setting-', '');
-                if (input.value) {
-                    config[key] = input.value;
-                }
-            });
+            const config = collectSettingsPayload('basic');
             if (Object.keys(config).length === 0) {
                 showToast('Изменений не обнаружено', 'info');
                 return;
@@ -1471,13 +1664,7 @@ function setupSettingsHandlers() {
         saveDbBtn.parentNode.replaceChild(newBtn, saveDbBtn);
         
         newBtn.addEventListener('click', async () => {
-            const config = {};
-            document.querySelectorAll('#databaseSettings input').forEach(input => {
-                const key = input.id.replace('db-setting-', '');
-                if (input.value) {
-                    config[key] = input.type === 'number' ? parseInt(input.value, 10) : input.value;
-                }
-            });
+            const config = collectSettingsPayload('database');
             if (Object.keys(config).length === 0) {
                 showToast('Изменений не обнаружено', 'info');
                 return;
@@ -1492,6 +1679,34 @@ function setupSettingsHandlers() {
         });
     }
 
+    // Настройки анализа изображений
+    const saveImageBtn = document.getElementById('saveImageSettingsBtn');
+    if (saveImageBtn) {
+        const newBtn = saveImageBtn.cloneNode(true);
+        saveImageBtn.parentNode.replaceChild(newBtn, saveImageBtn);
+
+        newBtn.addEventListener('click', async () => {
+            const config = collectSettingsPayload('image');
+            const promptEl = document.getElementById('imageSummaryPrompt');
+            if (promptEl) {
+                config.IMAGE_TEXT_SUMMARY_PROMPT = promptEl.value || '';
+            }
+
+            if (Object.keys(config).length === 0) {
+                showToast('Изменений не обнаружено', 'info');
+                return;
+            }
+
+            try {
+                const result = await api.updateAppConfig(config);
+                handleConfigUpdateResult(result);
+            } catch (error) {
+                console.error('Ошибка сохранения настроек распознавания изображений:', error);
+                showToast('Ошибка сохранения настроек', 'error');
+            }
+        });
+    }
+
     // Системные настройки
     const saveSysBtn = document.getElementById('saveSystemSettingsBtn');
     if (saveSysBtn) {
@@ -1499,15 +1714,7 @@ function setupSettingsHandlers() {
         saveSysBtn.parentNode.replaceChild(newBtn, saveSysBtn);
         
         newBtn.addEventListener('click', async () => {
-            const config = {};
-            document.querySelectorAll('#systemSettings input').forEach(input => {
-                const key = input.id.replace('sys-setting-', '');
-                if (input.type === 'checkbox') {
-                    config[key] = input.checked;
-                } else if (input.value) {
-                    config[key] = input.type === 'number' ? parseInt(input.value, 10) : input.value;
-                }
-            });
+            const config = collectSettingsPayload('system');
             if (Object.keys(config).length === 0) {
                 showToast('Изменений не обнаружено', 'info');
                 return;
@@ -1596,16 +1803,65 @@ function setupSettingsHandlers() {
         restartBtn.parentNode.replaceChild(newBtn, restartBtn);
 
         newBtn.addEventListener('click', async () => {
+            if (!confirm('Вы уверены, что хотите перезапустить сервисы? Это займет 10-15 секунд.')) {
+                return;
+            }
+
             newBtn.disabled = true;
             const originalText = newBtn.textContent;
             newBtn.textContent = 'Перезапуск...';
+            
             try {
                 const response = await api.restartSystem();
-                showToast(response.message || 'Перезапуск инициирован', 'warning');
+                
+                if (response.success) {
+                    showToast(response.message || 'Перезапуск инициирован', 'info');
+                    
+                    // Показываем индикатор загрузки
+                    const loadingToast = showToast('Ожидание перезапуска сервисов...', 'info', 0);
+                    
+                    // Ждем 12 секунд для перезапуска
+                    await new Promise(resolve => setTimeout(resolve, 12000));
+                    
+                    // Пытаемся переподключиться к API
+                    let reconnected = false;
+                    for (let attempt = 0; attempt < 5; attempt++) {
+                        try {
+                            await api.getStatsOverview();
+                            reconnected = true;
+                            break;
+                        } catch (error) {
+                            console.log(`Попытка переподключения ${attempt + 1}/5...`);
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                        }
+                    }
+                    
+                    // Закрываем индикатор загрузки
+                    if (loadingToast && loadingToast.remove) {
+                        loadingToast.remove();
+                    }
+                    
+                    if (reconnected) {
+                        showToast('✅ Сервисы успешно перезапущены!', 'success');
+                        // Обновляем страницу через 1 секунду
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 1000);
+                    } else {
+                        showToast('⚠️ Перезапуск выполнен, но не удалось проверить статус. Обновляю страницу...', 'warning');
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 2000);
+                    }
+                } else {
+                    showToast(response.message || 'Ошибка при перезапуске', 'error');
+                    newBtn.disabled = false;
+                    newBtn.textContent = originalText;
+                }
             } catch (error) {
                 console.error('Ошибка перезапуска сервисов:', error);
-                showToast('Не удалось инициировать перезапуск', 'error');
-            } finally {
+                showToast('Не удалось инициировать перезапуск: ' + (error.message || 'неизвестная ошибка'), 'error');
+                newBtn.disabled = false;
                 newBtn.textContent = originalText;
             }
         });

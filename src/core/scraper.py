@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,6 +11,7 @@ from src.api.yandex_translate import YandexTranslateClient
 from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
 from src.scrapers.pinduoduo_web import PinduoduoWebScraper
+from src.services.image_analysis import ImageTextAnalysisService
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,7 @@ class Scraper:
     def __init__(self):
         self.tmapi_client = TmapiClient()  # Клиент для tmapi.top
         self.yandex_translate_client = YandexTranslateClient()  # Клиент для Yandex.Translate
+        self.image_analysis_service = ImageTextAnalysisService(translate_client=self.yandex_translate_client)
 
     async def scrape_product(
         self,
@@ -143,6 +146,47 @@ class Scraper:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper][Pinduoduo] Ошибка перевода описания: {e}")
         
+        # Подготовка изображений для анализа (до фильтрации)
+        if platform == 'pinduoduo':
+            sku_images = product_data.get('main_imgs', []) or []
+            detail_images_raw = [
+                {"url": url}
+                for url in (product_data.get('detail_imgs') or [])
+                if isinstance(url, str) and url
+            ]
+            filtered_detail_urls = [entry["url"] for entry in detail_images_raw]
+        else:
+            sku_images = self._get_unique_images_from_sku_props(product_data)
+            detail_images_raw = []
+            filtered_detail_urls = []
+            item_id = product_data.get('item_id')
+            if settings.DEBUG_MODE:
+                print(f"[Scraper] Извлечен item_id: {item_id}")
+            if item_id:
+                detail_images_raw = await self._load_detail_images(item_id)
+                filtered_entries = self._filter_images_by_size(detail_images_raw)
+                filtered_detail_urls = [img['url'] for img in filtered_entries]
+                if settings.DEBUG_MODE:
+                    print(
+                        f"[Scraper] Detail изображений: {len(detail_images_raw)} → {len(filtered_entries)} после фильтрации"
+                    )
+            else:
+                if settings.DEBUG_MODE:
+                    print(f"[Scraper] ⚠️ item_id отсутствует! Пропускаем получение detail изображений.")
+
+        image_analysis = await self.image_analysis_service.analyze_product_images(
+            product_data=product_data,
+            sku_images=sku_images,
+            detail_images=detail_images_raw,
+        )
+        product_data['_image_text_analysis'] = image_analysis.as_dict()
+        if image_analysis.aggregated_text:
+            product_data['_image_text_aggregated'] = image_analysis.aggregated_text
+        if image_analysis.insights:
+            product_data['_image_text_insights'] = image_analysis.insights
+        if image_analysis.table_image_paths:
+            product_data['_image_generated_images'] = image_analysis.table_image_paths
+
         # Подготавливаем компактные данные для LLM (без огромного массива skus!)
         compact_data = self._prepare_compact_data_for_llm(product_data)
         
@@ -188,6 +232,9 @@ class Scraper:
                     if comp:
                         if not str(mc.get('Состав') or '').strip():
                             mc['Состав'] = comp
+                insights = product_data.get('_image_text_insights') or {}
+                if insights:
+                    self._merge_image_insights(mc, insights, llm_content)
                 llm_content['main_characteristics'] = mc
         except Exception:
             pass
@@ -201,42 +248,101 @@ class Scraper:
             exchange_rate=exchange_rate,
         )
         
-        # Получаем изображения в зависимости от платформы
-        if platform == 'pinduoduo':
-            # Для Pinduoduo: main_imgs + detail_imgs (нет sku_props)
-            sku_images = product_data.get('main_imgs', [])
-            
-            # У Pinduoduo detail_imgs уже есть в основном ответе
-            detail_images = product_data.get('detail_imgs', [])
-            
-            if settings.DEBUG_MODE:
-                print(f"[Scraper] Pinduoduo: main_imgs={len(sku_images)}, detail_imgs={len(detail_images)}")
-        else:
-            # Для Taobao/Tmall: сравниваем main_imgs и sku_props
-            sku_images = self._get_unique_images_from_sku_props(product_data)
-            
-            # Получаем дополнительные изображения из item_desc
-            item_id = product_data.get('item_id')
-            detail_images = []
-            
-            if settings.DEBUG_MODE:
-                print(f"[Scraper] Извлечен item_id: {item_id}")
-            
-            if item_id:
-                detail_images = await self._get_filtered_detail_images(item_id)
-                if settings.DEBUG_MODE:
-                    print(f"[Scraper] Получено detail изображений: {len(detail_images)}")
-            else:
-                if settings.DEBUG_MODE:
-                    print(f"[Scraper] ⚠️ item_id отсутствует! Пропускаем получение detail изображений.")
-        
-        # Объединяем изображения: сначала из sku_props, потом из detail_html
-        image_urls = sku_images + detail_images
-        
         if settings.DEBUG_MODE:
-            print(f"[Scraper] Итого изображений: {len(image_urls)} (sku: {len(sku_images)}, detail: {len(detail_images)})")
+            print(
+                f"[Scraper] Итого изображений (без таблиц): sku={len(sku_images)}, detail={len(filtered_detail_urls)}"
+            )
+
+        # Объединяем изображения и добавляем визуализированные таблицы
+        seen_sources: set[str] = set()
+        image_urls: list[str] = []
+
+        for src in sku_images + filtered_detail_urls:
+            if not src or src in seen_sources:
+                continue
+            seen_sources.add(src)
+            image_urls.append(src)
+
+        generated_images = product_data.get('_image_generated_images') or []
+        for local_path in generated_images:
+            if not local_path:
+                continue
+            path = Path(local_path)
+            if not path.exists():
+                continue
+            marker = f"local::{path.resolve()}"
+            if marker in seen_sources:
+                continue
+            seen_sources.add(marker)
+            image_urls.append(marker)
 
         return post_text, image_urls
+
+    def _merge_image_insights(self, characteristics: dict, insights: dict, llm_content: dict) -> None:
+        """
+        Вливает найденные на изображениях факты в итоговые характеристики товара.
+        """
+        mapping = {
+            "materials": "Материалы",
+            "composition": "Состав",
+            "colors": "Цвета",
+            "usage": "Назначение и применение",
+            "special_features": "Особенности",
+        }
+
+        for key, label in mapping.items():
+            value = insights.get(key)
+            if not value:
+                continue
+
+            if isinstance(value, list):
+                normalized = [str(v).strip() for v in value if str(v).strip()]
+                if not normalized:
+                    continue
+                existing = characteristics.get(label)
+                if isinstance(existing, list):
+                    merged = existing + normalized
+                    # сохраняем порядок, удаляя дубликаты
+                    seen: set[str] = set()
+                    merged_unique = []
+                    for item in merged:
+                        lowered = item.lower()
+                        if lowered in seen:
+                            continue
+                        seen.add(lowered)
+                        merged_unique.append(item)
+                    characteristics[label] = merged_unique
+                elif isinstance(existing, str) and existing.strip():
+                    merged = [existing] + normalized
+                    seen: set[str] = set()
+                    merged_unique = []
+                    for item in merged:
+                        lowered = item.lower()
+                        if lowered in seen:
+                            continue
+                        seen.add(lowered)
+                        merged_unique.append(item)
+                    characteristics[label] = merged_unique
+                else:
+                    characteristics[label] = normalized
+            elif isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned and not str(characteristics.get(label) or "").strip():
+                    characteristics[label] = cleaned
+
+        notes = insights.get("notes")
+        if notes:
+            additional = llm_content.get("additional_info") or {}
+            if not isinstance(additional, dict):
+                additional = {}
+            existing_notes = additional.get("Дополнительно из изображений")
+            if isinstance(existing_notes, list):
+                existing_notes.append(notes)
+            elif isinstance(existing_notes, str):
+                additional["Дополнительно из изображений"] = [existing_notes, notes]
+            else:
+                additional["Дополнительно из изображений"] = notes
+            llm_content["additional_info"] = additional
     
     def _prepare_compact_data_for_llm(self, product_data: dict) -> dict:
         """
@@ -300,6 +406,20 @@ class Scraper:
                         sizes = [v.get('name', '') for v in prop.get('values', [])]
                         if sizes:
                             compact['available_sizes'] = sizes[:30]
+        
+        image_analysis = product_data.get('_image_text_analysis') or {}
+        aggregated_text = (
+            product_data.get('_image_text_aggregated')
+            or image_analysis.get('aggregated_text')
+        )
+        if aggregated_text:
+            compact['image_text'] = aggregated_text[:4000]
+        insights = product_data.get('_image_text_insights') or image_analysis.get('insights')
+        if insights:
+            compact['image_insights'] = insights
+        tables_info = image_analysis.get('tables')
+        if tables_info:
+            compact['image_tables'] = tables_info
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] Компактные данные для LLM подготовлены. Размер: ~{len(str(compact))} символов")
@@ -366,16 +486,9 @@ class Scraper:
                 print(f"[Scraper] main_imgs: {main_imgs_count} = sku_props: {sku_props_count} → используем main_imgs (приоритет)")
             return main_imgs if main_imgs else sku_unique_images
     
-    async def _get_filtered_detail_images(self, item_id: int) -> list:
+    async def _load_detail_images(self, item_id: int) -> list:
         """
-        Получает дополнительные изображения из item_desc и фильтрует их по размерам.
-        Убирает баннеры и изображения, которые сильно отличаются от основной группы.
-        
-        Args:
-            item_id: ID товара
-            
-        Returns:
-            list: Отфильтрованный список URL изображений
+        Получает дополнительные изображения из item_desc вместе с размерами (без фильтрации).
         """
         try:
             if settings.DEBUG_MODE:
@@ -425,13 +538,7 @@ class Scraper:
             if settings.DEBUG_MODE:
                 print(f"[Scraper] Всего изображений с размерами: {len(images_with_sizes)}")
             
-            # Фильтруем изображения
-            filtered_images = self._filter_images_by_size(images_with_sizes)
-            
-            if settings.DEBUG_MODE:
-                print(f"[Scraper] Detail изображений: {len(images_with_sizes)} → {len(filtered_images)} после фильтрации")
-            
-            return [img['url'] for img in filtered_images]
+            return images_with_sizes
             
         except Exception as e:
             if settings.DEBUG_MODE:
@@ -706,8 +813,8 @@ class Scraper:
         large_enough = []
         
         for img in images_with_sizes:
-            width = img['width']
-            height = img['height']
+            width = int(img.get('width') or 0)
+            height = int(img.get('height') or 0)
             
             if width >= min_dimension and height >= min_dimension:
                 large_enough.append(img)
@@ -745,8 +852,8 @@ class Scraper:
         # Шаг 3: Убираем явные баннеры (соотношение сторон > 5:1 или < 1:5)
         non_banners = []
         for img in size_filtered:
-            width = img['width']
-            height = img['height']
+            width = int(img.get('width') or 0)
+            height = int(img.get('height') or 0)
             aspect_ratio = width / height if height > 0 else 0
             
             # Если соотношение от 0.2 до 5.0 - это НЕ баннер
@@ -761,7 +868,7 @@ class Scraper:
             return []
         
         # Шаг 4: Находим медианный размер (площадь)
-        areas = [img['width'] * img['height'] for img in non_banners]
+        areas = [int(img.get('width') or 0) * int(img.get('height') or 0) for img in non_banners]
         median_area = statistics.median(areas)
         
         if settings.DEBUG_MODE:
@@ -771,7 +878,9 @@ class Scraper:
         # УЖЕСТОЧЕННЫЙ допуск: изображение должно быть в пределах 0.6x - 1.7x от медианы
         area_filtered = []
         for img in non_banners:
-            area = img['width'] * img['height']
+            width = int(img.get('width') or 0)
+            height = int(img.get('height') or 0)
+            area = width * height
             ratio = area / median_area if median_area > 0 else 0
             
             if 0.6 <= ratio <= 1.7:
@@ -785,7 +894,10 @@ class Scraper:
             return []
         
         # Шаг 6: Проверяем однородность aspect ratio (чтобы отсеять горизонтальные среди вертикальных и наоборот)
-        aspect_ratios = [img['width'] / img['height'] if img['height'] > 0 else 0 for img in area_filtered]
+        aspect_ratios = [
+            (int(img.get('width') or 0) / int(img.get('height') or 1)) if int(img.get('height') or 0) > 0 else 0
+            for img in area_filtered
+        ]
         median_aspect = statistics.median(aspect_ratios)
         
         if settings.DEBUG_MODE:
@@ -793,7 +905,9 @@ class Scraper:
         
         filtered = []
         for img in area_filtered:
-            aspect = img['width'] / img['height'] if img['height'] > 0 else 0
+            width = int(img.get('width') or 0)
+            height = int(img.get('height') or 0)
+            aspect = width / height if height > 0 else 0
             # Если медианный aspect ~0.77 (вертикальные), то допускаем 0.5-1.5
             # Если медианный aspect ~1.0 (квадратные), то допускаем 0.7-1.4
             # Если медианный aspect ~1.5 (горизонтальные), то допускаем 1.0-2.0
@@ -807,7 +921,7 @@ class Scraper:
                 print(f"[Scraper] Пропускаем изображение {img['width']}x{img['height']} (aspect {aspect:.2f} не в диапазоне {min_aspect:.2f}-{max_aspect:.2f})")
         
         if settings.DEBUG_MODE and filtered:
-            sizes = [f"{img['width']}x{img['height']}" for img in filtered]
+            sizes = [f"{int(img.get('width') or 0)}x{int(img.get('height') or 0)}" for img in filtered]
             print(f"[Scraper] ✅ Прошли фильтр: {', '.join(sizes)}")
         
         return filtered

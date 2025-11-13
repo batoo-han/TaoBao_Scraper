@@ -100,6 +100,31 @@ class Settings(BaseSettings):
     # Debug вспомогательные опции для Playwright
     PLAYWRIGHT_KEEP_BROWSER_OPEN: bool = False  # Не закрывать браузер в DEBUG_MODE
 
+    # Анализ изображений и распознанного текста
+    ENABLE_IMAGE_TEXT_ANALYSIS: bool = False  # Включить распознавание текста на фото
+    IMAGE_TEXT_OCR_PROVIDER: str = "yandex"  # Провайдер OCR (на данный момент поддерживается yandex)
+    YANDEX_VISION_API_KEY: str = ""  # API ключ для Yandex Vision OCR
+    YANDEX_VISION_MODEL: str = "ocr"  # Модель Yandex Vision (ocr, inline-text, handwriting)
+    IMAGE_TEXT_TRANSLATE_LANGUAGE: str = "ru"  # Целевой язык перевода распознанного текста
+    IMAGE_TEXT_OUTPUT_DIR: str = "data/image_analysis"  # Папка для сохранения артефактов анализа
+    IMAGE_TEXT_SUMMARY_PROMPT: str = (
+        "Ты аналитик характеристик товаров. На входе уже переведённые на русский текстовые фрагменты и таблицы, "
+        "распознанные с фотографий товара. Извлеки только фактическую информацию.\n\n"
+        "Верни JSON вида:\n"
+        "{\n"
+        '  "materials": ["материал 1", "..."],\n'
+        '  "composition": "строка с составом, если явно указан",\n'
+        '  "colors": ["основные цвета"],\n'
+        '  "usage": ["варианты использования или назначения"],\n'
+        '  "special_features": ["особенности, преимущества, уход и т.п."],\n'
+        '  "notes": "свободные важные факты",\n'
+        '  "tables": [\n'
+        "    {\"index\": 1, \"title\": \"тип таблицы (например: размерная сетка)\", \"summary\": \"ключевые данные\"}\n"
+        "  ]\n"
+        "}\n"
+        "Не выдумывай данные и не делай маркетинговых выводов."
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

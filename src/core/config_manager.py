@@ -109,16 +109,29 @@ class ConfigManager:
                         runtime_values = await runtime_service.get_all()
 
                     pending_config = await app_settings_service.get_pending_restart_config()
-                    self._pending_restart_keys = set(pending_config.keys())
+                    
+                    # Если есть pending настройки, значит перезапуск уже произошел - применяем их и очищаем
+                    if pending_config:
+                        logger.info(
+                            "Обнаружены pending настройки после перезапуска (%d ключей). Применяем и очищаем.",
+                            len(pending_config)
+                        )
+                        # Применяем pending настройки к runtime
+                        await runtime_service.set_values(pending_config, source="restart", requires_restart=False)
+                        # Очищаем pending_restart_config, так как перезапуск уже выполнен
+                        await app_settings_service.clear_pending_restart_keys(list(pending_config.keys()))
+                        # Перечитываем runtime_values с учетом примененных настроек
+                        runtime_values = await runtime_service.get_all()
+                    
+                    self._pending_restart_keys = set()
 
                     self._runtime_cache = self._convert_types(runtime_values)
                     self._apply_to_settings(self._runtime_cache)
                     self._db_config_loaded = True
 
                     logger.info(
-                        "Runtime настройки загружены (%d значений). Pending restart: %s",
+                        "Runtime настройки загружены (%d значений). Pending restart: нет",
                         len(self._runtime_cache),
-                        ", ".join(self._pending_restart_keys) if self._pending_restart_keys else "нет",
                     )
             except Exception:
                 logger.exception("Ошибка инициализации ConfigManager")

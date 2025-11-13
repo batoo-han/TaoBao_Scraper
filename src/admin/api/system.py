@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -11,6 +13,8 @@ from fastapi import APIRouter, Depends
 from src.admin.dependencies import require_permission
 from src.core.restart_manager import restart_manager
 from src.db.models import AdminUser
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -22,10 +26,26 @@ async def restart_services(
     """
     Инициирует перезапуск бота и админ-панели.
 
-    Возвращает немедленный ответ, а фактический перезапуск запускается в фоне.
+    Запускает скрипт перезапуска и ждет некоторое время, чтобы убедиться,
+    что скрипт успешно запустился.
     """
-    await restart_manager.schedule_restart()
-    return {
-        "message": "Перезапуск инициирован. Сервисы будут перезапущены в течение нескольких секунд."
-    }
+    try:
+        # Запускаем перезапуск
+        await restart_manager.schedule_restart()
+        
+        # Ждем немного, чтобы скрипт успел запуститься
+        await asyncio.sleep(2)
+        
+        logger.info("Перезапуск сервисов инициирован через API")
+        
+        return {
+            "success": True,
+            "message": "Перезапуск инициирован. Сервисы будут перезапущены в течение 10-15 секунд. Страница автоматически обновится."
+        }
+    except Exception as e:
+        logger.error("Ошибка при инициировании перезапуска: %s", e, exc_info=True)
+        return {
+            "success": False,
+            "message": f"Ошибка при инициировании перезапуска: {str(e)}"
+        }
 

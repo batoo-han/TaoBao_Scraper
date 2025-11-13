@@ -141,6 +141,7 @@
             <div class="tabs">
                 <button class="tab-btn active" data-tab="basic">Основные</button>
                 <button class="tab-btn" data-tab="llm">LLM</button>
+                <button class="tab-btn" data-tab="images">Изображения</button>
                 <button class="tab-btn" data-tab="database">База данных</button>
                 <button class="tab-btn" data-tab="system">Системные</button>
                 <button class="tab-btn" data-tab="personal-data">Персональные данные</button>
@@ -151,8 +152,22 @@
                 <div class="card">
                     <h2>Основные настройки</h2>
                     <p class="description">Настройки бота, API ключи и другие основные параметры.</p>
-                    <div class="settings-grid" id="basicSettings">
-                        <!-- Заполняется через JS -->
+                    <div class="settings-sections two-columns">
+                        <section class="settings-section">
+                            <h3>Telegram и уведомления</h3>
+                            <p class="section-hint">Подключение бота и чат для оповещений.</p>
+                            <div class="settings-grid" id="basicSettings-bot"></div>
+                        </section>
+                        <section class="settings-section">
+                            <h3>Внешние сервисы</h3>
+                            <p class="section-hint">TMAPI и сервисы конвертации валют.</p>
+                            <div class="settings-grid" id="basicSettings-integrations"></div>
+                        </section>
+                        <section class="settings-section">
+                            <h3>Значения по умолчанию</h3>
+                            <p class="section-hint">Настройки валюты, подписи и кэша.</p>
+                            <div class="settings-grid" id="basicSettings-defaults"></div>
+                        </section>
                     </div>
                     <button class="btn-primary" id="saveBasicSettingsBtn">Сохранить изменения</button>
                 </div>
@@ -181,17 +196,34 @@
                     </div>
                     <div class="form-row">
                         <div class="form-group">
-                            <label>Температура (0.0 - 1.0)</label>
-                            <input type="number" id="llmTemperature" class="form-control" min="0" max="1" step="0.01" placeholder="0.05">
-                            <small class="form-hint">Чем выше, тем более креативные ответы. Рекомендуется: 0.05-0.3</small>
+                            <label>Температура (0.0 - 1.0): <span id="llmTemperatureValue">0.05</span></label>
+                            <input type="range" id="llmTemperature" class="form-control" min="0" max="1" step="0.01" value="0.05">
+                            <small class="form-hint">Чем выше значение, тем более креативные ответы. Рекомендуется 0.05–0.3.</small>
                         </div>
                         <div class="form-group">
-                            <label>Макс. токенов</label>
-                            <input type="number" id="llmMaxTokens" class="form-control" min="1" max="10000" placeholder="900">
-                            <small class="form-hint">Максимальное количество токенов в ответе</small>
+                            <label>Макс. токенов: <span id="llmMaxTokensValue">900</span></label>
+                            <input type="range" id="llmMaxTokens" class="form-control" min="100" max="4000" step="50" value="900">
+                            <small class="form-hint">Ограничение на длину ответа модели. Диапазон 100–4000 токенов.</small>
                         </div>
                     </div>
                     <button class="btn-primary" id="savePromptConfigBtn">Сохранить настройки промпта</button>
+                </div>
+            </div>
+
+            <!-- Вкладка: Анализ изображений -->
+            <div class="tab-content hidden" id="tab-images">
+                <div class="card">
+                    <h2>Распознавание текста на изображениях</h2>
+                <p class="description">Настройки OCR и обработка данных, извлечённых с фотографий товаров.</p>
+                <div class="settings-grid two-columns" id="imageSettingsGrid">
+                        <!-- Заполняется через JS -->
+                    </div>
+                    <div class="form-group">
+                    <label>Промпт для суммаризации данных с изображений</label>
+                    <textarea id="imageSummaryPrompt" class="form-control" rows="12" placeholder="Введите шаблон промпта..."></textarea>
+                    <small class="form-hint">Используется для формирования структурированных инсайтов из распознанного текста и таблиц. Можно оставить значение по умолчанию.</small>
+                    </div>
+                    <button class="btn-primary" id="saveImageSettingsBtn">Сохранить изменения</button>
                 </div>
             </div>
 

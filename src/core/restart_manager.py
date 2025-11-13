@@ -60,9 +60,18 @@ class RestartManager:
         }
 
         if platform.system() == "Windows":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+            # Используем CREATE_NO_WINDOW для скрытия окна консоли
+            # CREATE_NEW_PROCESS_GROUP нужен для независимой группы процессов
+            CREATE_NO_WINDOW = 0x08000000  # Константа из Windows API
+            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW  # type: ignore[attr-defined]
+            kwargs["creationflags"] = creation_flags
+            # Перенаправляем stdout и stderr, чтобы не было видно вывода
+            kwargs["stdout"] = subprocess.DEVNULL
+            kwargs["stderr"] = subprocess.DEVNULL
         else:
             kwargs["start_new_session"] = True
+            kwargs["stdout"] = subprocess.DEVNULL
+            kwargs["stderr"] = subprocess.DEVNULL
 
         try:
             subprocess.Popen(cmd, **kwargs)
