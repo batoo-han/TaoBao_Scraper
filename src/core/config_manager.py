@@ -37,6 +37,9 @@ class ConfigManager:
         "ADMIN_PANEL_PORT",
         "ADMIN_JWT_SECRET",
         "BOT_TOKEN",
+        "YANDEX_VISION_API_KEY",
+        "YANDEX_VISION_FOLDER_ID",
+        "YANDEX_VISION_MODEL",
     }
 
     def __init__(self) -> None:

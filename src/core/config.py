@@ -104,7 +104,8 @@ class Settings(BaseSettings):
     ENABLE_IMAGE_TEXT_ANALYSIS: bool = False  # Включить распознавание текста на фото
     IMAGE_TEXT_OCR_PROVIDER: str = "yandex"  # Провайдер OCR (на данный момент поддерживается yandex)
     YANDEX_VISION_API_KEY: str = ""  # API ключ для Yandex Vision OCR
-    YANDEX_VISION_MODEL: str = "ocr"  # Модель Yandex Vision (ocr, inline-text, handwriting)
+    YANDEX_VISION_FOLDER_ID: str = ""  # ID каталога Yandex Cloud для Vision (если отличается от YANDEX_FOLDER_ID)
+    YANDEX_VISION_MODEL: str = "page"  # Модель Yandex Vision: page (по умолчанию, одноколоночный текст), page-column-sort (многоколоночный), handwritten (рукописный), table (таблицы), markdown, math-markdown
     IMAGE_TEXT_TRANSLATE_LANGUAGE: str = "ru"  # Целевой язык перевода распознанного текста
     IMAGE_TEXT_OUTPUT_DIR: str = "data/image_analysis"  # Папка для сохранения артефактов анализа
     IMAGE_TEXT_SUMMARY_PROMPT: str = (

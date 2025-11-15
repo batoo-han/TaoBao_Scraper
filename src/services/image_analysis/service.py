@@ -76,16 +76,28 @@ class ImageTextAnalysisService:
 
         image_entries = self._collect_unique_images(sku_images, detail_images)
         if not image_entries:
+            logger.info("Image OCR: нет изображений для анализа")
             return ImageAnalysisResult()
 
+        logger.info(f"Image OCR: начинаем обработку {len(image_entries)} изображений")
         raw_results: List[Optional[Dict[str, Any]]] = []
         tasks = [self._process_single_image(entry) for entry in image_entries]
+        
+        processed_count = 0
+        error_count = 0
         for result in await asyncio.gather(*tasks, return_exceptions=True):
             if isinstance(result, Exception):
-                logger.debug("Image OCR: исключение %s", result)
+                error_count += 1
+                logger.debug("Image OCR: исключение при обработке изображения: %s", result)
                 continue
             if result:
                 raw_results.append(result)
+                processed_count += 1
+        
+        logger.info(
+            f"Image OCR: обработано {processed_count} изображений, "
+            f"ошибок {error_count}, найдено результатов {len(raw_results)}"
+        )
 
         if not raw_results:
             return ImageAnalysisResult()
@@ -171,15 +183,25 @@ class ImageTextAnalysisService:
             async with self._semaphore:
                 image_bytes = await self._download_image(url)
                 if not image_bytes:
+                    logger.debug("Image OCR: не удалось загрузить изображение %s", url[:80])
                     return None
+                
+                logger.debug("Image OCR: отправляем изображение %s на распознавание (размер: %d байт)", url[:80], len(image_bytes))
                 vision_payload = await self.vision_client.analyze_image(image_bytes)
+                
         except Exception as exc:
-            logger.debug("Image OCR: ошибка обработки %s: %s", url, exc)
+            logger.warning("Image OCR: ошибка обработки %s: %s", url[:80], exc)
             return None
 
         text_blocks, tables = self._parse_vision_result(vision_payload)
         if not text_blocks and not tables:
+            logger.debug("Image OCR: на изображении %s не найдено текста и таблиц", url[:80])
             return None
+
+        logger.info(
+            "Image OCR: на изображении %s найдено: текстовых блоков=%d, таблиц=%d",
+            url[:80], len(text_blocks), len(tables)
+        )
 
         return {
             "source_url": url,
@@ -364,40 +386,82 @@ class ImageTextAnalysisService:
         analysis: ImageAnalysisResult,
         runtime_config: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """
+        Генерирует структурированные инсайты из распознанного текста и таблиц.
+        Возвращает JSON с text_img и table_img для использования в основном LLM промпте.
+        """
         if not analysis.text_blocks and not analysis.tables:
-            return {}
+            logger.info("Image OCR: нет текстовых блоков и таблиц для анализа")
+            return {"text_img": [], "table_img": []}
 
         prompt_template = runtime_config.get("IMAGE_TEXT_SUMMARY_PROMPT") or settings.IMAGE_TEXT_SUMMARY_PROMPT
-        temperature = 0.1
-        max_tokens = 700
+        temperature = runtime_config.get("IMAGE_TEXT_LLM_TEMPERATURE", 0.1)
+        max_tokens = runtime_config.get("IMAGE_TEXT_LLM_MAX_TOKENS", 700)
 
-        text_section = ""
+        # Формируем списки текстов и таблиц
+        text_img: List[str] = []
         if analysis.text_blocks:
-            parts = []
-            for idx, block in enumerate(analysis.text_blocks, start=1):
+            for block in analysis.text_blocks:
                 snippet = block.translated_text.strip()
                 if snippet:
-                    parts.append(f"{idx}. {snippet}")
-            text_section = "\n".join(parts)
+                    text_img.append(snippet)
+            logger.info(f"Image OCR: собрано {len(text_img)} текстовых фрагментов")
 
-        tables_section = ""
+        table_img: List[Dict[str, Any]] = []
         if analysis.tables:
-            parts = []
             for idx, table in enumerate(analysis.tables, start=1):
-                formatted_rows = [" | ".join(row) for row in table.translated_rows]
+                table_info = {
+                    "index": idx,
+                    "rows": table.translated_rows,
+                    "image_path": table.image_path,
+                    "classification": table.classification,
+                    "summary": table.summary,
+                }
+                table_img.append(table_info)
+            logger.info(f"Image OCR: собрано {len(table_img)} таблиц")
+
+        # Формируем промпт для LLM
+        text_section = "\n".join(f"{i+1}. {text}" for i, text in enumerate(text_img)) if text_img else "—"
+        
+        tables_section = ""
+        if table_img:
+            parts = []
+            for table_info in table_img:
+                idx = table_info.get("index", 0)
+                rows = table_info.get("rows", [])
+                formatted_rows = [" | ".join(row) for row in rows]
                 table_text = "\n".join(formatted_rows)
                 parts.append(f"Таблица {idx}:\n{table_text}")
-            tables_section = "\n\n".join(parts)
+            tables_section = "\n\n".join(parts) if parts else "—"
+        else:
+            tables_section = "—"
 
         final_prompt = (
             f"{prompt_template}\n\n"
-            f"### Текстовые фрагменты:\n{text_section or '—'}\n\n"
-            f"### Таблицы:\n{tables_section or '—'}"
+            f"### Текстовые фрагменты с изображений:\n{text_section}\n\n"
+            f"### Таблицы с изображений:\n{tables_section}\n\n"
+            f"Верни JSON вида:\n"
+            f'{{"text_img": [...], "table_img": [...]}}'
         )
+
+        # Если промпт пустой или не задан, возвращаем простую структуру
+        if not prompt_template or not prompt_template.strip():
+            logger.info("Image OCR: промпт не задан, возвращаем простую структуру")
+            return {
+                "text_img": text_img,
+                "table_img": [
+                    {
+                        "index": t.get("index", i+1),
+                        "title": t.get("classification", f"Таблица {i+1}"),
+                        "summary": t.get("summary", ""),
+                    }
+                    for i, t in enumerate(table_img)
+                ],
+            }
 
         raw = await self._call_yandex_llm(
             prompt=final_prompt,
-            model=settings.YANDEX_GPT_MODEL,
+            model=runtime_config.get("IMAGE_TEXT_LLM_MODEL", settings.YANDEX_GPT_MODEL),
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -412,20 +476,64 @@ class ImageTextAnalysisService:
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
             if not cleaned:
-                return {}
-            return json.loads(cleaned)
+                logger.warning("Image OCR: LLM вернул пустой ответ")
+                return {"text_img": text_img, "table_img": []}
+            
+            parsed = json.loads(cleaned)
+            
+            # Объединяем результаты LLM с фактическими данными
+            result = {
+                "text_img": parsed.get("text_img", text_img) or text_img,
+                "table_img": parsed.get("table_img", []) or [],
+            }
+            
+            # Дополняем table_img путями к изображениям
+            for i, table_info in enumerate(table_img):
+                if i < len(result["table_img"]):
+                    result["table_img"][i]["image_path"] = table_info.get("image_path")
+                else:
+                    result["table_img"].append({
+                        "index": table_info.get("index", i+1),
+                        "title": table_info.get("classification", f"Таблица {i+1}"),
+                        "summary": table_info.get("summary", ""),
+                        "image_path": table_info.get("image_path"),
+                    })
+            
+            logger.info(f"Image OCR: LLM вернул {len(result['text_img'])} текстов и {len(result['table_img'])} таблиц")
+            return result
+            
         except json.JSONDecodeError as exc:
             logger.warning("Image OCR: LLM вернул невалидный JSON: %s", exc)
             logger.debug("Image OCR: сырой ответ LLM:\n%s", raw)
-            return {}
+            # Возвращаем хотя бы то, что распознали
+            return {
+                "text_img": text_img,
+                "table_img": [
+                    {
+                        "index": t.get("index", i+1),
+                        "title": t.get("classification", f"Таблица {i+1}"),
+                        "summary": t.get("summary", ""),
+                        "image_path": t.get("image_path"),
+                    }
+                    for i, t in enumerate(table_img)
+                ],
+            }
 
     async def _call_yandex_llm(self, *, prompt: str, model: str, temperature: float, max_tokens: int) -> str:
+        # Используем folder_id для Vision, если задан, иначе общий
+        folder_id = settings.YANDEX_VISION_FOLDER_ID or settings.YANDEX_FOLDER_ID
+        if not folder_id:
+            raise RuntimeError(
+                "Не указан идентификатор каталога для Yandex LLM. "
+                "Заполните YANDEX_VISION_FOLDER_ID или общий YANDEX_FOLDER_ID."
+            )
+        
         headers = {
             "Authorization": f"Api-Key {settings.YANDEX_GPT_API_KEY}",
             "Content-Type": "application/json",
         }
         body = {
-            "modelUri": f"gpt://{settings.YANDEX_FOLDER_ID}/{model}",
+            "modelUri": f"gpt://{folder_id}/{model}",
             "completionOptions": {
                 "stream": False,
                 "temperature": max(0.0, min(1.0, temperature)),

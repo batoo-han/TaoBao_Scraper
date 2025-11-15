@@ -1575,10 +1575,14 @@ function loadImageAnalysisSettings(appConfig) {
             { value: 'yandex', label: 'Yandex Vision (OCR)' },
         ] },
         { key: 'YANDEX_VISION_API_KEY', label: 'YANDEX_VISION_API_KEY', type: 'password', hint: 'API ключ Yandex Vision.', secret: true },
-        { key: 'YANDEX_VISION_MODEL', label: 'YANDEX_VISION_MODEL', type: 'select', hint: 'Алгоритм распознавания Yandex Vision.', options: [
-            { value: 'ocr', label: 'ocr (универсальная печать)' },
-            { value: 'inline-text', label: 'inline-text (текст в линию)' },
-            { value: 'handwriting', label: 'handwriting (рукописный текст)' },
+        { key: 'YANDEX_VISION_FOLDER_ID', label: 'YANDEX_VISION_FOLDER_ID', type: 'text', hint: 'ID каталога Yandex Cloud для Vision (если отличается от YANDEX_FOLDER_ID).' },
+        { key: 'YANDEX_VISION_MODEL', label: 'YANDEX_VISION_MODEL', type: 'select', hint: 'Модель распознавания Yandex Vision. page - по умолчанию (одноколоночный текст), table - для таблиц, handwritten - рукописный текст.', options: [
+            { value: 'page', label: 'page (одноколоночный текст, по умолчанию)' },
+            { value: 'page-column-sort', label: 'page-column-sort (многоколоночный текст)' },
+            { value: 'handwritten', label: 'handwritten (рукописный текст)' },
+            { value: 'table', label: 'table (таблицы)' },
+            { value: 'markdown', label: 'markdown (результат в формате Markdown)' },
+            { value: 'math-markdown', label: 'math-markdown (математические формулы)' },
         ] },
         { key: 'IMAGE_TEXT_TRANSLATE_LANGUAGE', label: 'IMAGE_TEXT_TRANSLATE_LANGUAGE', type: 'select', hint: 'Язык перевода распознанного текста.', options: [
             { value: 'ru', label: 'ru (русский)' },

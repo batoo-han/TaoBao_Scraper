@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 import base64
+import logging
 from typing import Any, Dict
 
 import httpx
 
 from src.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class YandexVisionClient:
@@ -40,32 +43,52 @@ class YandexVisionClient:
 
         encoded = base64.b64encode(image_bytes).decode("ascii")
 
+        folder_id = settings.YANDEX_VISION_FOLDER_ID or settings.YANDEX_FOLDER_ID
+        if not folder_id:
+            raise RuntimeError(
+                "Не указан идентификатор каталога для Yandex Vision. "
+                "Заполните YANDEX_VISION_FOLDER_ID или общий YANDEX_FOLDER_ID."
+            )
+
         request_payload: Dict[str, Any] = {
-            "folderId": settings.YANDEX_FOLDER_ID,
+            "folderId": folder_id,
             "analyzeSpecs": [
                 {
                     "content": encoded,
                     "features": [
                         {
-                            "type": "DOCUMENT_TEXT_DETECTION",
+                            "type": "TEXT_DETECTION",
                             "textDetectionConfig": {
-                                "model": settings.YANDEX_VISION_MODEL or "ocr",
-                                "languageCodes": ["ru", "en"],
+                                # Доступные модели: page, page-column-sort, handwritten, table, markdown, math-markdown
+                                # page - по умолчанию, для текста в одну колонку
+                                "model": settings.YANDEX_VISION_MODEL or "page",
+                                "languageCodes": ["ru", "en", "zh"],
                             },
                         },
-                        {
-                            "type": "LAYOUT_DETECTION",
-                        },
                     ],
+                    #"mimeType": "image/png",
+                    #"signature": "content",
                 }
             ],
         }
 
-        async with httpx.AsyncClient(timeout=40.0) as client:
-            response = await client.post(self.endpoint, headers=headers, json=request_payload)
-            response.raise_for_status()
-            payload = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=40.0) as client:
+                response = await client.post(self.endpoint, headers=headers, json=request_payload)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as http_err:
+            body = http_err.response.text
+            logger.error(
+                "Yandex Vision HTTP %s: %s",
+                http_err.response.status_code,
+                body[:2000],
+            )
+            raise
+        except httpx.RequestError as req_err:
+            logger.error("Yandex Vision request error: %s", req_err)
+            raise
 
+        payload = response.json()
         results = payload.get("results") or []
         if not results:
             return {}

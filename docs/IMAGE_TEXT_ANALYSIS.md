@@ -43,6 +43,7 @@
 |------|----------|-------------------|
 | `ENABLE_IMAGE_TEXT_ANALYSIS` | Включить/выключить весь модуль анализа изображений | Нет |
 | `YANDEX_VISION_API_KEY` | API ключ Yandex Vision OCR | Да |
+| `YANDEX_VISION_FOLDER_ID` | Отдельный ID каталога в Yandex Cloud для Yandex Vision (если ключ относится к другому каталогу) | Да |
 | `YANDEX_VISION_MODEL` | Модель Vision (`ocr`, `inline-text`) | Да |
 | `IMAGE_TEXT_TRANSLATE_LANGUAGE` | Целевой язык перевода распознанного текста (`ru`, `en`) | Нет |
 | `IMAGE_TEXT_LLM_VENDOR` | Провайдер LLM для анализа текста с изображений (`yandex`, `openai`, `proxiapi`) | Нет |

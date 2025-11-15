@@ -97,6 +97,49 @@ class Scraper:
             print(f"[Scraper] Платформа: {platform}")
             print(f"[Scraper] Данные товара получены: {product_data.get('title', 'N/A')[:50]}...")
         
+        # ====================================================================
+        # РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (ДО ФИЛЬТРАЦИИ)
+        # ====================================================================
+        # Собираем все изображения для распознавания ДО фильтрации
+        logger.info("[Scraper] Начинаем распознавание текста на изображениях...")
+        sku_images_for_ocr = self._get_unique_images_from_sku_props(product_data) if platform != 'pinduoduo' else (product_data.get('main_imgs', []) or [])
+        detail_images_for_ocr = []
+        
+        if platform == 'pinduoduo':
+            detail_images_for_ocr = [
+                {"url": url}
+                for url in (product_data.get('detail_imgs') or [])
+                if isinstance(url, str) and url
+            ]
+        else:
+            item_id = product_data.get('item_id')
+            if item_id:
+                detail_images_for_ocr = await self._load_detail_images(item_id)
+        
+        logger.info(f"[Scraper] Изображений для OCR: SKU={len(sku_images_for_ocr)}, Detail={len(detail_images_for_ocr)}")
+        
+        # Выполняем распознавание изображений
+        image_analysis = await self.image_analysis_service.analyze_product_images(
+            product_data=product_data,
+            sku_images=sku_images_for_ocr,
+            detail_images=detail_images_for_ocr,
+        )
+        
+        # Сохраняем результаты распознавания
+        product_data['_image_text_analysis'] = image_analysis.as_dict()
+        if image_analysis.aggregated_text:
+            product_data['_image_text_aggregated'] = image_analysis.aggregated_text
+        if image_analysis.insights:
+            product_data['_image_text_insights'] = image_analysis.insights
+        if image_analysis.table_image_paths:
+            product_data['_image_generated_images'] = image_analysis.table_image_paths
+        
+        logger.info(
+            f"[Scraper] OCR завершён: текстовых блоков={len(image_analysis.text_blocks)}, "
+            f"таблиц={len(image_analysis.tables)}, "
+            f"сгенерированных изображений={len(image_analysis.table_image_paths)}"
+        )
+        
         # Ранняя проверка: если Pinduoduo и ошибка авторизации (401) — сообщаем пользователю
         if platform == 'pinduoduo':
             logger.info(f"Проверка ответа Pinduoduo: code={api_response.get('code') if isinstance(api_response, dict) else 'N/A'}")
@@ -146,7 +189,10 @@ class Scraper:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper][Pinduoduo] Ошибка перевода описания: {e}")
         
-        # Подготовка изображений для анализа (до фильтрации)
+        # ====================================================================
+        # ФИЛЬТРАЦИЯ ИЗОБРАЖЕНИЙ (после распознавания)
+        # ====================================================================
+        # Подготовка изображений для отправки в чат (с фильтрацией)
         if platform == 'pinduoduo':
             sku_images = product_data.get('main_imgs', []) or []
             detail_images_raw = [
@@ -163,7 +209,11 @@ class Scraper:
             if settings.DEBUG_MODE:
                 print(f"[Scraper] Извлечен item_id: {item_id}")
             if item_id:
-                detail_images_raw = await self._load_detail_images(item_id)
+                # Используем уже загруженные изображения из OCR, если они есть
+                if detail_images_for_ocr:
+                    detail_images_raw = detail_images_for_ocr
+                else:
+                    detail_images_raw = await self._load_detail_images(item_id)
                 filtered_entries = self._filter_images_by_size(detail_images_raw)
                 filtered_detail_urls = [img['url'] for img in filtered_entries]
                 if settings.DEBUG_MODE:
@@ -173,19 +223,6 @@ class Scraper:
             else:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper] ⚠️ item_id отсутствует! Пропускаем получение detail изображений.")
-
-        image_analysis = await self.image_analysis_service.analyze_product_images(
-            product_data=product_data,
-            sku_images=sku_images,
-            detail_images=detail_images_raw,
-        )
-        product_data['_image_text_analysis'] = image_analysis.as_dict()
-        if image_analysis.aggregated_text:
-            product_data['_image_text_aggregated'] = image_analysis.aggregated_text
-        if image_analysis.insights:
-            product_data['_image_text_insights'] = image_analysis.insights
-        if image_analysis.table_image_paths:
-            product_data['_image_generated_images'] = image_analysis.table_image_paths
 
         # Подготавливаем компактные данные для LLM (без огромного массива skus!)
         compact_data = self._prepare_compact_data_for_llm(product_data)
@@ -263,18 +300,25 @@ class Scraper:
             seen_sources.add(src)
             image_urls.append(src)
 
+        # Добавляем визуализированные таблицы в список изображений
         generated_images = product_data.get('_image_generated_images') or []
+        added_tables_count = 0
         for local_path in generated_images:
             if not local_path:
                 continue
             path = Path(local_path)
             if not path.exists():
+                logger.warning(f"[Scraper] Файл таблицы не найден: {local_path}")
                 continue
             marker = f"local::{path.resolve()}"
             if marker in seen_sources:
                 continue
             seen_sources.add(marker)
             image_urls.append(marker)
+            added_tables_count += 1
+        
+        if added_tables_count > 0:
+            logger.info(f"[Scraper] Добавлено {added_tables_count} визуализированных таблиц в список изображений")
 
         return post_text, image_urls
 
@@ -407,19 +451,28 @@ class Scraper:
                         if sizes:
                             compact['available_sizes'] = sizes[:30]
         
+        # Добавляем результаты распознавания изображений
         image_analysis = product_data.get('_image_text_analysis') or {}
-        aggregated_text = (
-            product_data.get('_image_text_aggregated')
-            or image_analysis.get('aggregated_text')
-        )
-        if aggregated_text:
-            compact['image_text'] = aggregated_text[:4000]
-        insights = product_data.get('_image_text_insights') or image_analysis.get('insights')
+        insights = product_data.get('_image_text_insights') or image_analysis.get('insights') or {}
+        
+        # Используем структуру text_img и table_img из insights
+        text_img = insights.get('text_img', [])
+        table_img = insights.get('table_img', [])
+        
+        if text_img:
+            # Объединяем все тексты в одну строку для LLM
+            aggregated_text = "\n".join(str(t) for t in text_img if t).strip()
+            if aggregated_text:
+                compact['image_text'] = aggregated_text[:4000]
+                logger.info(f"[Scraper] Добавлено {len(text_img)} текстовых фрагментов с изображений в LLM промпт")
+        
+        if table_img:
+            compact['image_tables'] = table_img
+            logger.info(f"[Scraper] Добавлено {len(table_img)} таблиц с изображений в LLM промпт")
+        
+        # Сохраняем полные insights для последующего использования
         if insights:
             compact['image_insights'] = insights
-        tables_info = image_analysis.get('tables')
-        if tables_info:
-            compact['image_tables'] = tables_info
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] Компактные данные для LLM подготовлены. Размер: ~{len(str(compact))} символов")
