@@ -1043,7 +1043,13 @@ class Scraper:
                     # Если значение - список (например, цвета)
                     post_parts.append(f"<i><b>{key}:</b></i>")
                     for item in value:
-                        post_parts.append(f"<i>  • {item}</i>")
+                        # После маркера слово должно начинаться с прописной буквы
+                        # Делаем первую букву заглавной, если это строка
+                        formatted_item = str(item).strip()
+                        if formatted_item:
+                            # Делаем первую букву заглавной, остальные оставляем как есть
+                            formatted_item = formatted_item[0].upper() + formatted_item[1:]
+                        post_parts.append(f"<i>  • {formatted_item}</i>")
                     post_parts.append("")
                 else:
                     # Если значение - строка
