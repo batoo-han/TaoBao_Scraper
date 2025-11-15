@@ -20,17 +20,31 @@ class Scraper:
         self.exchange_rate_client = ExchangeRateClient()  # Клиент для ExchangeRate-API
         self.yandex_translate_client = YandexTranslateClient()  # Клиент для Yandex.Translate
 
-    async def scrape_product(self, url: str):
+    async def scrape_product(
+        self, 
+        url: str,
+        user_signature: str = None,
+        user_currency: str = None,
+        exchange_rate: float = None
+    ):
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
         и формирует финальный пост.
 
         Args:
             url (str): URL товара для скрапинга.
+            user_signature (str, optional): Подпись пользователя для поста
+            user_currency (str, optional): Валюта пользователя (cny или rub)
+            exchange_rate (float, optional): Курс обмена для рубля
 
         Returns:
             tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
         """
+        # Используем настройки пользователя или значения по умолчанию
+        signature = user_signature or settings.DEFAULT_SIGNATURE
+        currency = (user_currency or settings.DEFAULT_CURRENCY).lower()
+        # Сохраняем переданный курс пользователя (если есть)
+        user_exchange_rate = exchange_rate if exchange_rate is not None else None
         # Определяем платформу заранее, чтобы Pinduoduo обрабатывать веб-скрапингом
         platform, _ = URLParser.parse_url(url)
         logger.info(f"Определена платформа: {platform} для URL: {url}")
@@ -122,9 +136,9 @@ class Scraper:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper][Pinduoduo] Ошибка перевода описания: {e}")
         
-        exchange_rate = None
-        # Если включена конвертация валют, получаем курс
-        if settings.CONVERT_CURRENCY:
+        # Используем курс пользователя, если он передан, иначе получаем из API (если включено)
+        exchange_rate = user_exchange_rate
+        if exchange_rate is None and settings.CONVERT_CURRENCY:
             exchange_rate = await self.exchange_rate_client.get_exchange_rate()
 
         # Подготавливаем компактные данные для LLM (без огромного массива skus!)
@@ -181,6 +195,8 @@ class Scraper:
         post_text = self._build_post_text(
             llm_content=llm_content,
             product_data=product_data,
+            signature=signature,
+            currency=currency,
             exchange_rate=exchange_rate
         )
         
@@ -898,7 +914,14 @@ class Scraper:
         # Возвращаем как есть (через запятую)
         return ", ".join(sizes_raw)
     
-    def _build_post_text(self, llm_content: dict, product_data: dict, exchange_rate: float = None) -> str:
+    def _build_post_text(
+        self, 
+        llm_content: dict, 
+        product_data: dict, 
+        signature: str = None,
+        currency: str = "cny",
+        exchange_rate: float = None
+    ) -> str:
         """
         Формирует финальный текст поста из структурированных данных LLM и данных API.
         Использует HTML разметку для Telegram.
@@ -906,11 +929,15 @@ class Scraper:
         Args:
             llm_content (dict): Структурированный контент от YandexGPT
             product_data (dict): Данные о товаре от TMAPI
+            signature (str, optional): Подпись пользователя для поста
+            currency (str): Валюта пользователя (cny или rub)
             exchange_rate (float, optional): Курс обмена CNY в RUB
 
         Returns:
             str: Отформатированный текст поста в HTML
         """
+        # Используем подпись пользователя или значение по умолчанию
+        user_signature = signature or settings.DEFAULT_SIGNATURE
         # Извлекаем данные из LLM ответа
         title = llm_content.get('title', 'Товар')
         description = llm_content.get('description', '')
@@ -1097,20 +1124,32 @@ class Scraper:
             if not post_parts[-1] == "":
                 post_parts.append("")
         
-        # Цена с эмодзи (курсивом)
-        price_text = f"<i>💰 <b>Цена:</b> {price} юаней"
-        if exchange_rate and settings.CONVERT_CURRENCY:
+        # Цена с учётом пользовательской валюты
+        currency_lower = (currency or "cny").lower()
+        
+        # Проверяем, что exchange_rate не None и не 0
+        has_exchange_rate = exchange_rate is not None and float(exchange_rate) > 0
+        
+        if currency_lower == "rub" and has_exchange_rate:
+            # Если валюта рубль и курс установлен - показываем сразу в рублях
             try:
-                rub_price = float(price) * exchange_rate
-                price_text += f" (~{rub_price:.2f} ₽)"
+                rub_price = float(price) * float(exchange_rate)
+                # Округляем до 10 рублей (без копеек)
+                rub_price_rounded = round(rub_price / 10) * 10
+                price_text = f"<i>💰 <b>Цена:</b> {int(rub_price_rounded)} ₽ + доставка</i>"
             except (ValueError, TypeError):
-                pass
-        price_text += " + доставка</i>"
+                # Если ошибка конвертации - показываем в юанях
+                price_text = f"<i>💰 <b>Цена:</b> {price} ¥ + доставка</i>"
+        else:
+            # По умолчанию показываем в юанях
+            price_text = f"<i>💰 <b>Цена:</b> {price} ¥ + доставка</i>"
+        
         post_parts.append(price_text)
         post_parts.append("")
         
-        # Призыв к действию (курсивом)
-        post_parts.append("<i>📝 Для заказа пишите @annabbox или в комментариях 🛍️</i>")
+        # Призыв к действию (курсивом) с подписью пользователя
+        contact = user_signature.strip() if user_signature.strip() else settings.DEFAULT_SIGNATURE
+        post_parts.append(f"<i>📝 Для заказа пишите {contact} или в комментариях 🛍️</i>")
         post_parts.append("")
         
         # Хэштеги (курсивом)

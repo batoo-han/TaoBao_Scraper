@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     YANDEX_GPT_MODEL: str = "yandexgpt-lite"  # Модель YandexGPT для использования
     TMAPI_RATE_LIMIT: int = 5  # Максимальное количество запросов к TMAPI в секунду (по умолчанию 5)
     CONVERT_CURRENCY: bool = False  # Флаг для включения/отключения конвертации валют
+    DEFAULT_SIGNATURE: str = "@annabbox"  # Подпись по умолчанию для постов
+    DEFAULT_CURRENCY: str = "cny"  # Валюта по умолчанию (cny или rub)
     DEBUG_MODE: bool = False  # Режим отладки - показывать подробные логи в консоли
     MOCK_MODE: bool = False  # Mock режим - использовать данные из result.txt вместо реальных API-запросов к TMAPI
     DISABLE_SSL_VERIFY: bool = False  # Отключить проверку SSL (только если есть проблемы с сертификатами)

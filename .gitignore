@@ -64,3 +64,4 @@ test*.py
 src/pdd_cookies.json
 pdd_cookies.json
 scripts/*.json
+data/user_settings.json
