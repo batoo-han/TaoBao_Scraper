@@ -6,7 +6,7 @@ TAOBAO SCRAPER BOT - CONFIGURATION
 Использует Pydantic Settings для валидации и загрузки из .env файла.
 
 Author: Your Name
-Version: 1.0.0
+Version: 1.1.0
 License: MIT
 ==============================================================================
 """

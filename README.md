@@ -117,7 +117,14 @@ python -m venv .venv
 source .venv/bin/activate
 
 # Установите зависимости
-pip install -r requirements.txt
+# Если возникают проблемы с таймаутом, используйте скрипт:
+# Windows:
+.\scripts\install_dependencies.ps1
+# Linux/Mac:
+bash scripts/install_dependencies.sh
+
+# Или вручную с увеличенным таймаутом:
+pip install -r requirements.txt --default-timeout=300
 
 # Создайте .env из примера
 cp .env.example .env
@@ -382,6 +389,7 @@ docker-compose logs -f --tail=50
 ### 🎯 Быстрый старт
 - [**QUICK_START.md**](docs/QUICK_START.md) — Быстрое начало работы
 - [**SERVICES_SETUP.md**](docs/SERVICES_SETUP.md) — Настройка API сервисов
+- [**INSTALLATION_TROUBLESHOOTING.md**](docs/INSTALLATION_TROUBLESHOOTING.md) — 🔧 Решение проблем при установке зависимостей
 
 ### 🏗️ Архитектура
 - [**PROJECT_STRUCTURE.md**](docs/PROJECT_STRUCTURE.md) — 📦 **Структура проекта (ВАЖНО!)**
