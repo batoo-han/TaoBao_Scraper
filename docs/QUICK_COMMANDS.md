@@ -114,11 +114,10 @@ alias bot-restart="cd ~/TaoBao_Scraper && sudo docker-compose restart"
 
 ## 📚 Подробная документация
 
-- [UPDATE_WORKFLOW.md](UPDATE_WORKFLOW.md) - Полное руководство по обновлению
-- [DEPLOYMENT.md](DEPLOYMENT.md) - Развёртывание и настройка
-- [SERVICES_SETUP.md](SERVICES_SETUP.md) - Настройка API сервисов
+- [update_WORKFLOW.md](UPDATE_WORKFLOW.md) - Полное руководство по обновлению
+- [deployment.md](DEPLOYMENT.md) - Развёртывание и настройка
+- [services_SETUP.md](SERVICES_SETUP.md) - Настройка API сервисов
 
 ---
 
 **Дата создания:** 2025-10-24
-

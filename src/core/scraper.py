@@ -913,6 +913,19 @@ class Scraper:
         
         # Возвращаем как есть (через запятую)
         return ", ".join(sizes_raw)
+
+    def _ensure_lowercase_bullet(self, text: str) -> str:
+        """
+        Гарантирует, что первый алфавитный символ в пункте списка — строчный.
+        """
+        if not text:
+            return text
+        chars = list(text)
+        for idx, ch in enumerate(chars):
+            if ch.isalpha():
+                chars[idx] = ch.lower()
+                return "".join(chars)
+        return text
     
     def _build_post_text(
         self, 
@@ -1070,12 +1083,10 @@ class Scraper:
                     # Если значение - список (например, цвета)
                     post_parts.append(f"<i><b>{key}:</b></i>")
                     for item in value:
-                        # После маркера слово должно начинаться с прописной буквы
-                        # Делаем первую букву заглавной, если это строка
+                        # После маркера слово должно начинаться со строчной буквы
                         formatted_item = str(item).strip()
                         if formatted_item:
-                            # Делаем первую букву заглавной, остальные оставляем как есть
-                            formatted_item = formatted_item[0].upper() + formatted_item[1:]
+                            formatted_item = self._ensure_lowercase_bullet(formatted_item)
                         post_parts.append(f"<i>  • {formatted_item}</i>")
                     post_parts.append("")
                 else:

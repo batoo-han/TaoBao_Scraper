@@ -69,9 +69,9 @@ def format_settings_summary(user_settings) -> str:
     rate_display = f"{float(rate):.4f} ₽ за 1 ¥" if rate else "не задан"
     return (
         "<b>Ваши настройки</b>\n"
-        f"• Подпись: <code>{signature}</code>\n"
-        f"• Валюта по умолчанию: <b>{currency}</b>\n"
-        f"• Курс для рубля: {rate_display}"
+        f"• подпись: <code>{signature}</code>\n"
+        f"• валюта по умолчанию: <b>{currency}</b>\n"
+        f"• курс для рубля: {rate_display}"
     ) 
 
 

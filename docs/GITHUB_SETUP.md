@@ -11,23 +11,23 @@
 Убедитесь что следующие файлы на месте:
 
 #### ✅ Обязательные файлы:
-- [x] `README.md` - описание проекта
-- [x] `LICENSE` - лицензия (MIT)
+- [x] `readme.md` - описание проекта
+- [x] `license` - лицензия (MIT)
 - [x] `.gitignore` - игнорируемые файлы
 - [x] `requirements.txt` - зависимости
 - [x] `.env.example` - пример конфигурации
-- [x] `CONTRIBUTING.md` - руководство для контрибьюторов
+- [x] `contributing.md` - руководство для контрибьюторов
 
 #### ✅ Docker файлы:
-- [x] `Dockerfile`
+- [x] `dockerfile`
 - [x] `docker-compose.yml`
 - [x] `.dockerignore`
 
 #### ✅ Документация:
-- [x] `docs/SERVICES_SETUP.md`
-- [x] `docs/DEPLOYMENT.md`
-- [x] `docs/FAQ.md`
-- [x] И другие...
+- [x] `docs/services_SETUP.md`
+- [x] `docs/deployment.md`
+- [x] `docs/faq.md`
+- [x] и другие...
 
 ### 2. Проверка .gitignore
 
@@ -69,12 +69,12 @@ git rm --cached .env
 ### Вариант 1: Через веб-интерфейс GitHub
 
 1. **Создайте репозиторий:**
-   - Откройте [github.com/new](https://github.com/new)
-   - Имя: `TaoBao_Scraper_2` (или ваше название)
-   - Описание: `Telegram bot for parsing Taobao/Tmall with AI-powered post generation`
-   - Visibility: `Public` или `Private`
-   - **НЕ** инициализируйте с README (у нас уже есть)
-   - Нажмите "Create repository"
+   - откройте [github.com/new](https://github.com/new)
+   - имя: `TaoBao_Scraper_2` (или ваше название)
+   - описание: `Telegram bot for parsing Taobao/Tmall with AI-powered post generation`
+   - visibility: `Public` или `Private`
+   - **не** инициализируйте с README (у нас уже есть)
+   - нажмите "Create repository"
 
 2. **Свяжите локальный репозиторий:**
    ```bash
@@ -125,9 +125,9 @@ AI-powered Telegram bot for parsing Taobao/Tmall and generating beautiful produc
 ### 2. README badges
 
 Уже добавлены в README.md:
-- Python version
-- License
-- Docker ready
+- python version
+- license
+- docker ready
 
 ### 3. GitHub Actions (опционально)
 
@@ -148,7 +148,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     
-    - name: Build Docker image
+    - name: build Docker image
       run: docker build . --file Dockerfile --tag taobao-bot:latest
 ```
 
@@ -175,9 +175,9 @@ Steps to reproduce the behavior.
 What you expected to happen.
 
 **Environment:**
-- Python version:
-- OS:
-- Docker: Yes/No
+- python version:
+- os:
+- docker: Yes/No
 
 **Additional context**
 Logs, screenshots, etc.
@@ -209,22 +209,22 @@ git push origin v2.2.0
 ## 🎉 Release v2.2.0
 
 ### ✨ Features
-- AI-powered post generation with YandexGPT
-- Support for multiple product images
-- HTML formatting in Telegram
-- Docker and Docker Compose support
-- Comprehensive documentation
+- ai-powered post generation with YandexGPT
+- support for multiple product images
+- html formatting in Telegram
+- docker and Docker Compose support
+- comprehensive documentation
 
 ### 📚 Documentation
-- Complete setup guides
-- API services registration instructions
-- Deployment guide
-- FAQ
+- complete setup guides
+- api services registration instructions
+- deployment guide
+- faq
 
 ### 🐛 Bug Fixes
-- SSL certificate handling
-- TMAPI integration fixed
-- Image processing improvements
+- ssl certificate handling
+- tmapi integration fixed
+- image processing improvements
 
 ### 📦 Installation
 See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for details.
@@ -240,10 +240,10 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for details.
 
 1. Settings → Secrets and variables → Actions
 2. Добавьте secrets:
-   - `BOT_TOKEN`
-   - `TMAPI_TOKEN`
-   - `YANDEX_GPT_API_KEY`
-   - И другие...
+   - `bot_TOKEN`
+   - `tmapi_TOKEN`
+   - `yandex_GPT_API_KEY`
+   - и другие...
 
 ### 2. Dependabot
 
@@ -260,8 +260,8 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for details.
 1. Settings → Branches → Add rule
 2. Branch name pattern: `main`
 3. Включите:
-   - [x] Require pull request before merging
-   - [x] Require status checks to pass
+   - [x] require pull request before merging
+   - [x] require status checks to pass
 
 ---
 
@@ -333,15 +333,15 @@ git push origin hotfix/critical-bug
 ### GitHub Insights
 
 Регулярно проверяйте:
-- **Traffic** - кто посещает репозиторий
-- **Clones** - сколько раз клонировали
-- **Popular content** - какие файлы смотрят
-- **Referrers** - откуда приходят
+- **traffic** - кто посещает репозиторий
+- **clones** - сколько раз клонировали
+- **popular content** - какие файлы смотрят
+- **referrers** - откуда приходят
 
 ### Star History
 
 Отслеживайте рост популярности:
-- [Star History Chart](https://star-history.com/)
+- [star History Chart](https://star-history.com/)
 
 ---
 
@@ -349,41 +349,40 @@ git push origin hotfix/critical-bug
 
 - [ ] `.env` не в репозитории
 - [ ] `.gitignore` настроен
-- [ ] README.md заполнен
-- [ ] LICENSE добавлен
-- [ ] Документация полная
-- [ ] CONTRIBUTING.md готов
+- [ ] readme.md заполнен
+- [ ] license добавлен
+- [ ] документация полная
+- [ ] contributing.md готов
 - [ ] `.env.example` создан
-- [ ] Все секретные данные удалены из кода
-- [ ] Тестовые файлы не включены
-- [ ] Dockerfile работает
+- [ ] все секретные данные удалены из кода
+- [ ] тестовые файлы не включены
+- [ ] dockerfile работает
 - [ ] docker-compose.yml настроен
-- [ ] Создан первый release
-- [ ] Описание и topics добавлены
+- [ ] создан первый release
+- [ ] описание и topics добавлены
 
 ---
 
 ## 🎯 После публикации
 
 1. **Поделитесь:**
-   - Reddit (r/Python, r/learnpython)
-   - Twitter/X
-   - Dev.to
-   - Хабр (если русскоязычная аудитория)
+   - reddit (r/Python, r/learnpython)
+   - twitter/X
+   - dev.to
+   - хабр (если русскоязычная аудитория)
 
 2. **Мониторьте:**
-   - Issues
-   - Pull Requests
-   - Stars и Forks
+   - issues
+   - pull Requests
+   - stars и Forks
 
 3. **Обновляйте:**
-   - Регулярные релизы
-   - Ответы на Issues
-   - Мердж PR
+   - регулярные релизы
+   - ответы на Issues
+   - мердж PR
 
 ---
 
 <p align="center">
   <b>Удачи с вашим open source проектом! 🚀</b>
 </p>
-

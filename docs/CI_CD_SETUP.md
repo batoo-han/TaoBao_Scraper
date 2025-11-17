@@ -4,11 +4,11 @@
 
 В проекте настроен полностью автоматизированный CI/CD pipeline через GitHub Actions, который обеспечивает:
 
-- ✅ **Автоматическую проверку кода** при каждом коммите
-- 🐳 **Сборку и публикацию Docker образов** в GitHub Container Registry
-- 🚀 **Автоматический деплой** на production сервер
-- 🔒 **Сканирование безопасности** кода и зависимостей
-- 📦 **Автоматические обновления** зависимостей через Dependabot
+- ✅ **автоматическую проверку кода** при каждом коммите
+- 🐳 **сборку и публикацию Docker образов** в GitHub Container Registry
+- 🚀 **автоматический деплой** на production сервер
+- 🔒 **сканирование безопасности** кода и зависимостей
+- 📦 **автоматические обновления** зависимостей через Dependabot
 
 ---
 
@@ -31,14 +31,14 @@
 ### 1. CI - Проверка качества кода
 
 **Триггеры:**
-- Push в ветки `main` и `develop`
-- Pull Request в `main` и `develop`
+- push в ветки `main` и `develop`
+- pull Request в `main` и `develop`
 
 **Что проверяется:**
-- Форматирование кода (Black, isort)
-- Линтинг (flake8)
-- Синтаксис Python файлов
-- Валидация Docker Compose конфигурации
+- форматирование кода (Black, isort)
+- линтинг (flake8)
+- синтаксис Python файлов
+- валидация Docker Compose конфигурации
 
 **Время выполнения:** ~2-3 минуты
 
@@ -47,9 +47,9 @@
 ### 2. Docker - Сборка и публикация
 
 **Триггеры:**
-- Push в ветку `main`
-- Создание тега `v*.*.*`
-- Ручной запуск через workflow_dispatch
+- push в ветку `main`
+- создание тега `v*.*.*`
+- ручной запуск через workflow_dispatch
 
 **Что происходит:**
 1. Сборка Docker образа для `linux/amd64` и `linux/arm64`
@@ -57,7 +57,7 @@
 3. Создание тегов:
    - `latest` - для main ветки
    - `v1.2.3` - для тегов версий
-   - `main-abc1234` - SHA коммита
+   - `main-abc1234` - sha коммита
 
 **Время выполнения:** ~5-7 минут
 
@@ -72,8 +72,8 @@ ghcr.io/your-username/taobao-scraper:main-abc1234
 ### 3. Deploy - Автоматический деплой
 
 **Триггеры:**
-- Успешное завершение "Docker - Build and Push" для `main`
-- Ручной запуск с выбором окружения (production/staging)
+- успешное завершение "Docker - Build and Push" для `main`
+- ручной запуск с выбором окружения (production/staging)
 
 **Что происходит:**
 1. Подключение к серверу по SSH
@@ -91,14 +91,14 @@ ghcr.io/your-username/taobao-scraper:main-abc1234
 ### 4. Security - Сканирование безопасности
 
 **Триггеры:**
-- Push в `main` и `develop`
-- Каждый понедельник в 09:00 UTC (расписание)
-- Ручной запуск
+- push в `main` и `develop`
+- каждый понедельник в 09:00 UTC (расписание)
+- ручной запуск
 
 **Что проверяется:**
-- Уязвимости в Python зависимостях (Safety, pip-audit)
-- Проблемы безопасности в коде (Bandit)
-- Уязвимости в Docker образе (Trivy)
+- уязвимости в Python зависимостях (Safety, pip-audit)
+- проблемы безопасности в коде (Bandit)
+- уязвимости в Docker образе (Trivy)
 
 **Время выполнения:** ~3-4 минуты
 
@@ -200,7 +200,7 @@ services:
     env_file:
       - .env
     environment:
-      - TZ=Europe/Moscow
+      - tz=Europe/Moscow
     logging:
       driver: "json-file"
       options:
@@ -505,7 +505,7 @@ docker compose run --rm taobao-bot /bin/bash
 **Решение:**
 1. Проверьте `.github/dependabot.yml`
 2. Убедитесь что Dependabot включен:
-   - Settings → Code security and analysis → Dependabot
+   - settings → Code security and analysis → Dependabot
 3. Включите "Dependabot version updates"
 
 ---
@@ -529,7 +529,7 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-    - name: Send Telegram notification
+    - name: send Telegram notification
       uses: appleboy/telegram-action@master
       with:
         to: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -546,7 +546,7 @@ jobs:
 Обновите `.github/workflows/deploy.yml`, добавьте условие для staging:
 
 ```yaml
-- name: Deploy to staging
+- name: deploy to staging
   if: github.ref == 'refs/heads/develop'
   # ... SSH action для staging сервера
 ```
@@ -565,27 +565,27 @@ cache-to: type=gha,mode=max
 
 ## ✅ Checklist перед использованием
 
-- [ ] GitHub Secrets настроены (`SERVER_HOST`, `SERVER_USER`, `SSH_PRIVATE_KEY`)
-- [ ] SSH ключ добавлен на сервер
-- [ ] Docker установлен на сервере
-- [ ] Директория `/opt/taobao-scraper` создана
+- [ ] github Secrets настроены (`SERVER_HOST`, `SERVER_USER`, `SSH_PRIVATE_KEY`)
+- [ ] ssh ключ добавлен на сервер
+- [ ] docker установлен на сервере
+- [ ] директория `/opt/taobao-scraper` создана
 - [ ] `docker-compose.yml` создан на сервере
 - [ ] `.env` файл с токенами создан на сервере
-- [ ] Тестовое SSH подключение работает
-- [ ] Workflow файлы закоммичены в `.github/workflows/`
-- [ ] Первый push в `main` сделан
-- [ ] Pipeline запустился в Actions tab
-- [ ] Docker образ опубликован в GHCR
-- [ ] Бот успешно задеплоен и работает
+- [ ] тестовое SSH подключение работает
+- [ ] workflow файлы закоммичены в `.github/workflows/`
+- [ ] первый push в `main` сделан
+- [ ] pipeline запустился в Actions tab
+- [ ] docker образ опубликован в GHCR
+- [ ] бот успешно задеплоен и работает
 
 ---
 
 ## 📚 Полезные ссылки
 
-- [GitHub Actions Documentation](https://docs.github.com/en/actions)
-- [Docker Documentation](https://docs.docker.com/)
-- [GitHub Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
-- [Dependabot Documentation](https://docs.github.com/en/code-security/dependabot)
+- [github Actions Documentation](https://docs.github.com/en/actions)
+- [docker Documentation](https://docs.docker.com/)
+- [github Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+- [dependabot Documentation](https://docs.github.com/en/code-security/dependabot)
 
 ---
 
@@ -600,4 +600,3 @@ cache-to: type=gha,mode=max
 5. ✔️ Проверяется что все работает
 
 **Просто пишите код и пушьте в `main` - все остальное произойдет автоматически!** 🎊
-
