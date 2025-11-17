@@ -25,8 +25,14 @@ RUN apt-get update && apt-get install -y \
     libcups2 \
     libdbus-1-3 \
     libdrm2 \
+    libegl1 \
     libgbm1 \
     libgtk-3-0 \
+    libgudev-1.0-0 \
+    libgles2 \
+    libgl1 \
+    libopengl0 \
+    libpci3 \
     libnspr4 \
     libnss3 \
     libpango-1.0-0 \
@@ -37,8 +43,10 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 \
     libxext6 \
     libxfixes3 \
+    libxi6 \
     libxkbcommon0 \
     libxrandr2 \
+    libxshmfence1 \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
@@ -50,6 +58,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Создаём non-root пользователя для безопасности
 RUN useradd -m -u 1000 botuser
+
+# Настраиваем переменные окружения для X11 (headful Playwright в контейнере)
+ENV QT_X11_NO_MITSHM=1 \
+    XDG_RUNTIME_DIR=/tmp/runtime-botuser
+RUN mkdir -p /tmp/runtime-botuser && chown botuser:botuser /tmp/runtime-botuser
 
 # Копируем исходный код (новая структура)
 COPY main.py ./

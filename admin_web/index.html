@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Админ-панель - Taobao Scraper Bot</title>
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+    <!-- Боковое меню -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h2>🔧 Админ-панель</h2>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="#" class="nav-item active" data-page="dashboard">
+                <span class="icon">📊</span>
+                <span>Дашборд</span>
+            </a>
+            <a href="#" class="nav-item" data-page="settings">
+                <span class="icon">⚙️</span>
+                <span>Настройки</span>
+            </a>
+            <a href="#" class="nav-item" data-page="providers">
+                <span class="icon">🤖</span>
+                <span>LLM Провайдеры</span>
+            </a>
+            <a href="#" class="nav-item" data-page="users">
+                <span class="icon">👥</span>
+                <span>Пользователи</span>
+            </a>
+            <a href="#" class="nav-item" data-page="stats">
+                <span class="icon">📈</span>
+                <span>Статистика</span>
+            </a>
+            <a href="#" class="nav-item" data-page="audit">
+                <span class="icon">📋</span>
+                <span>Аудит ПД</span>
+            </a>
+            <a href="#" class="nav-item" data-page="logs">
+                <span class="icon">📜</span>
+                <span>Логи</span>
+            </a>
+            <a href="#" class="nav-item" data-page="platforms">
+                <span class="icon">🛒</span>
+                <span>Платформы</span>
+            </a>
+            <a href="#" class="nav-item" data-page="docs">
+                <span class="icon">📚</span>
+                <span>Документация</span>
+            </a>
+            <a href="#" class="nav-item" data-page="billing">
+                <span class="icon">💳</span>
+                <span>Биллинг</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="user-info" id="userInfo">
+                <span class="username">Загрузка...</span>
+            </div>
+            <button class="btn-logout" id="logoutBtn">Выйти</button>
+        </div>
+    </aside>
+
+    <!-- Основной контент -->
+    <main class="main-content">
+        <header class="header">
+            <h1 id="pageTitle">Дашборд</h1>
+            <div class="header-actions">
+                <span class="status-indicator" id="statusIndicator">●</span>
+            </div>
+        </header>
+
+        <!-- Страница: Дашборд -->
+        <div class="page" id="page-dashboard">
+            <div class="stats-grid">
+                <div class="stat-card clickable" data-page="users" title="Перейти к пользователям">
+                    <div class="stat-icon">👥</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-total-users">-</div>
+                        <div class="stat-label">Всего пользователей</div>
+                    </div>
+                </div>
+                <div class="stat-card clickable" data-page="stats" title="Перейти к статистике">
+                    <div class="stat-icon">🟢</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-active-users">-</div>
+                        <div class="stat-label">Активных (30 дней)</div>
+                    </div>
+                </div>
+                <div class="stat-card clickable" data-page="stats" title="Перейти к статистике">
+                    <div class="stat-icon">📝</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-total-requests">-</div>
+                        <div class="stat-label">Всего запросов</div>
+                    </div>
+                </div>
+                <div class="stat-card clickable" data-page="stats" title="Перейти к статистике">
+                    <div class="stat-icon">💬</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-total-tokens">-</div>
+                        <div class="stat-label">Всего токенов</div>
+                    </div>
+                </div>
+                <div class="stat-card clickable" data-page="providers" title="Перейти к провайдерам">
+                    <div class="stat-icon">🤖</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-active-provider">-</div>
+                        <div class="stat-label">Активный провайдер</div>
+                    </div>
+                </div>
+                <div class="stat-card clickable" data-page="stats" title="Перейти к статистике">
+                    <div class="stat-icon">💾</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-cache-rate">-</div>
+                        <div class="stat-label">Cache hit rate</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="charts-section">
+                <div class="chart-card">
+                    <h3>Запросы по периодам</h3>
+                    <div class="chart-placeholder" id="requestsChart">
+                        <p>Сегодня: <span id="requests-today">-</span></p>
+                        <p>Эта неделя: <span id="requests-week">-</span></p>
+                        <p>Этот месяц: <span id="requests-month">-</span></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Настройки -->
+        <div class="page hidden" id="page-settings">
+            <div class="card restart-card hidden" id="restartNotice">
+                <h2>Необходим перезапуск</h2>
+                <p id="restartNoticeText"></p>
+                <button class="btn-danger" id="restartSystemBtn" disabled>Перезапустить сервисы</button>
+            </div>
+            <!-- Вкладки настроек -->
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="basic">Основные</button>
+                <button class="tab-btn" data-tab="llm">LLM</button>
+                <button class="tab-btn" data-tab="database">База данных</button>
+                <button class="tab-btn" data-tab="system">Системные</button>
+                <button class="tab-btn" data-tab="personal-data">Персональные данные</button>
+            </div>
+
+            <!-- Вкладка: Основные настройки -->
+            <div class="tab-content active" id="tab-basic">
+                <div class="card">
+                    <h2>Основные настройки</h2>
+                    <p class="description">Настройки бота, API ключи и другие основные параметры.</p>
+                    <div class="settings-grid" id="basicSettings">
+                        <!-- Заполняется через JS -->
+                    </div>
+                    <button class="btn-primary" id="saveBasicSettingsBtn">Сохранить изменения</button>
+                </div>
+            </div>
+
+            <!-- Вкладка: LLM настройки -->
+            <div class="tab-content hidden" id="tab-llm">
+                <div class="card">
+                    <h2>LLM Провайдер</h2>
+                    <div class="form-group">
+                        <label>Активный LLM провайдер</label>
+                        <select id="llmProviderSelect" class="form-control">
+                            <option value="yandex">YandexGPT</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="proxiapi">ProxiAPI</option>
+                        </select>
+                        <button class="btn-primary" id="saveProviderBtn">Сохранить</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Настройки промпта</h2>
+                    <div class="form-group">
+                        <label>Шаблон промпта</label>
+                        <textarea id="promptTemplate" class="form-control" rows="15" placeholder="Введите шаблон промпта..."></textarea>
+                        <small class="form-hint">Шаблон промпта для генерации описаний товаров. Используйте {product_data} для вставки данных товара.</small>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Температура (0.0 - 1.0)</label>
+                            <input type="number" id="llmTemperature" class="form-control" min="0" max="1" step="0.01" placeholder="0.05">
+                            <small class="form-hint">Чем выше, тем более креативные ответы. Рекомендуется: 0.05-0.3</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Макс. токенов</label>
+                            <input type="number" id="llmMaxTokens" class="form-control" min="1" max="10000" placeholder="900">
+                            <small class="form-hint">Максимальное количество токенов в ответе</small>
+                        </div>
+                    </div>
+                    <button class="btn-primary" id="savePromptConfigBtn">Сохранить настройки промпта</button>
+                </div>
+            </div>
+
+            <!-- Вкладка: База данных -->
+            <div class="tab-content hidden" id="tab-database">
+                <div class="card">
+                    <h2>Настройки базы данных</h2>
+                    <p class="description">Параметры подключения к PostgreSQL.</p>
+                    <div class="settings-grid" id="databaseSettings">
+                        <!-- Заполняется через JS -->
+                    </div>
+                    <button class="btn-primary" id="saveDatabaseSettingsBtn">Сохранить изменения</button>
+                </div>
+            </div>
+
+            <!-- Вкладка: Системные настройки -->
+            <div class="tab-content hidden" id="tab-system">
+                <div class="card">
+                    <h2>Системные настройки</h2>
+                    <p class="description">Режимы работы, порты, секретные ключи и другие системные параметры.</p>
+                    <div class="settings-grid" id="systemSettings">
+                        <!-- Заполняется через JS -->
+                    </div>
+                    <button class="btn-primary" id="saveSystemSettingsBtn">Сохранить изменения</button>
+                </div>
+            </div>
+
+            <!-- Вкладка: Персональные данные -->
+            <div class="tab-content hidden" id="tab-personal-data">
+                <div class="card">
+                    <h2>Персональные данные</h2>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="personalDataEnabled" class="form-checkbox">
+                            Включить обработку персональных данных
+                        </label>
+                        <small class="form-hint">Если включено, пользователям будет показываться ссылка на согласие и работать вся логика ПД</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Текст согласия на обработку ПД (ФЗ-152)</label>
+                        <textarea id="consentText" class="form-control" rows="15" placeholder="Введите текст согласия..."></textarea>
+                        <small class="form-hint">Текст согласия должен соответствовать требованиям ФЗ-152</small>
+                    </div>
+                    <button class="btn-primary" id="saveConsentBtn">Сохранить</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Провайдеры -->
+        <div class="page hidden" id="page-providers">
+            <div class="card">
+                <h2>LLM Провайдеры</h2>
+                <div id="providersList" class="providers-list">
+                    <!-- Заполняется через JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Пользователи -->
+        <div class="page hidden" id="page-users">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Пользователи</h2>
+                    <div class="search-box">
+                        <input type="text" id="userSearch" placeholder="Поиск по username или имени..." class="form-control">
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Telegram ID</th>
+                                <th>Username</th>
+                                <th>Имя</th>
+                                <th>Админ</th>
+                                <th>Создан</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody id="usersTableBody">
+                            <tr>
+                                <td colspan="7" class="loading">Загрузка...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="pagination" id="usersPagination">
+                    <!-- Заполняется через JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Статистика -->
+        <div class="page hidden" id="page-stats">
+            <div class="card">
+                <h2>Статистика по пользователям</h2>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Пользователь</th>
+                                <th>Запросов</th>
+                                <th>Токенов</th>
+                                <th>Последний запрос</th>
+                            </tr>
+                        </thead>
+                        <tbody id="statsTableBody">
+                            <tr>
+                                <td colspan="4" class="loading">Загрузка...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Статистика по провайдерам</h2>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Провайдер</th>
+                                <th>Запросов</th>
+                                <th>Токенов</th>
+                                <th>Пользователей</th>
+                                <th>Cache hits</th>
+                                <th>Cache misses</th>
+                            </tr>
+                        </thead>
+                        <tbody id="providersStatsTableBody">
+                            <tr>
+                                <td colspan="6" class="loading">Загрузка...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Аудит -->
+        <div class="page hidden" id="page-audit">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Аудит персональных данных</h2>
+                    <div class="filters">
+                        <input type="text" id="auditSearch" placeholder="Поиск..." class="form-control">
+                        <input type="date" id="auditDateFrom" class="form-control">
+                        <input type="date" id="auditDateTo" class="form-control">
+                        <button class="btn-primary" id="auditFilterBtn">Применить</button>
+                        <button class="btn-secondary" id="auditExportBtn">Экспорт CSV</button>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Актор</th>
+                                <th>Целевой пользователь</th>
+                                <th>Действие</th>
+                                <th>Детали</th>
+                                <th>Дата</th>
+                            </tr>
+                        </thead>
+                        <tbody id="auditTableBody">
+                            <tr>
+                                <td colspan="6" class="loading">Загрузка...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="pagination" id="auditPagination">
+                    <!-- Заполняется через JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Логи -->
+        <div class="page hidden" id="page-logs">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Логи приложения</h2>
+                    <div class="log-controls">
+                        <input type="number" id="logLines" class="form-control" value="100" min="1" max="10000" style="width: 100px;">
+                        <select id="logLevel" class="form-control" style="width: 150px;">
+                            <option value="">Все уровни</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                        <input type="text" id="logSearch" class="form-control" placeholder="Поиск..." style="width: 200px;">
+                        <button class="btn-primary" id="refreshLogsBtn">Обновить</button>
+                        <button class="btn-secondary" id="streamLogsBtn">Поток (SSE)</button>
+                        <button class="btn-secondary" id="downloadLogsBtn">Скачать</button>
+                    </div>
+                </div>
+                <div class="log-container">
+                    <pre id="logsContent" class="log-content">Загрузка логов...</pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Платформы -->
+        <div class="page hidden" id="page-platforms">
+            <div class="card">
+                <h2>Управление платформами (магазинами)</h2>
+                <p class="description">Включите или выключите поддержку различных платформ для парсинга товаров.</p>
+                <div class="platforms-list" id="platformsList">
+                    <!-- Заполняется через JS -->
+                </div>
+            </div>
+            <div class="card">
+                <h2>Статистика по платформам</h2>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Платформа</th>
+                                <th>Статус</th>
+                                <th>Всего запросов</th>
+                                <th>Последний запрос</th>
+                            </tr>
+                        </thead>
+                        <tbody id="platformsStatsTableBody">
+                            <tr>
+                                <td colspan="4" class="loading">Загрузка...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Документация -->
+        <div class="page hidden" id="page-docs">
+            <div class="card">
+                <h2>📚 Документация</h2>
+                <div class="docs-tabs">
+                    <button class="tab-btn active" data-doc-tab="admin">Для админов</button>
+                    <button class="tab-btn" data-doc-tab="dev">Для разработчиков</button>
+                </div>
+                <div class="doc-content" id="docContent">
+                    <!-- Заполняется через JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Страница: Биллинг -->
+        <div class="page hidden" id="page-billing">
+            <div class="card">
+                <h2>💳 Биллинг и подписки</h2>
+                <div class="info-box">
+                    <p>📌 <strong>В разработке</strong></p>
+                    <p>В этом разделе будет отображаться:</p>
+                    <ul>
+                        <li>Мониторинг подписок пользователей</li>
+                        <li>История платежей</li>
+                        <li>Статистика по доходам</li>
+                        <li>Управление тарифами</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Модальное окно для деталей пользователя -->
+    <div class="modal" id="userModal">
+        <div class="modal-content">
+            <span class="modal-close" id="userModalClose">&times;</span>
+            <h2>Детали пользователя</h2>
+            <div id="userModalContent">
+                <!-- Заполняется через JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Уведомления -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/admin.js"></script>
+</body>
+</html>
+

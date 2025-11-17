@@ -1,8 +1,11 @@
 import logging
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.services.llm import LLMProviderManager
+    from src.db.models import UserSettings
 
 from src.api.tmapi import TmapiClient
-from src.api.yandex_gpt import YandexGPTClient
-from src.api.exchange_rate import ExchangeRateClient
 from src.api.yandex_translate import YandexTranslateClient
 from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
@@ -16,16 +19,22 @@ class Scraper:
     """
     def __init__(self):
         self.tmapi_client = TmapiClient()  # Клиент для tmapi.top
-        self.yandex_gpt_client = YandexGPTClient()  # Клиент для YandexGPT
-        self.exchange_rate_client = ExchangeRateClient()  # Клиент для ExchangeRate-API
         self.yandex_translate_client = YandexTranslateClient()  # Клиент для Yandex.Translate
 
     async def scrape_product(
+<<<<<<< HEAD
         self, 
         url: str,
         user_signature: str = None,
         user_currency: str = None,
         exchange_rate: float = None
+=======
+        self,
+        url: str,
+        llm_manager: "LLMProviderManager",
+        *,
+        user_settings: Optional["UserSettings"] = None,
+>>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
     ):
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
@@ -33,18 +42,38 @@ class Scraper:
 
         Args:
             url (str): URL товара для скрапинга.
+<<<<<<< HEAD
             user_signature (str, optional): Подпись пользователя для поста
             user_currency (str, optional): Валюта пользователя (cny или rub)
             exchange_rate (float, optional): Курс обмена для рубля
+=======
+            llm_manager (LLMProviderManager): Менеджер LLM-провайдеров.
+            user_settings (UserSettings | None): Настройки пользователя (подпись, валюта, курс).
+                Если не указано, используются значения по умолчанию.
+>>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
 
         Returns:
             tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
         """
+<<<<<<< HEAD
         # Используем настройки пользователя или значения по умолчанию
         signature = user_signature or settings.DEFAULT_SIGNATURE
         currency = (user_currency or settings.DEFAULT_CURRENCY).lower()
         # Сохраняем переданный курс пользователя (если есть)
         user_exchange_rate = exchange_rate if exchange_rate is not None else None
+=======
+        # Извлекаем параметры из user_settings или используем дефолты
+        if user_settings:
+            signature = user_settings.signature or settings.DEFAULT_SIGNATURE
+            currency = user_settings.default_currency or "cny"
+            exchange_rate = float(user_settings.exchange_rate) if user_settings.exchange_rate else None
+            user_id = user_settings.user_id
+        else:
+            signature = settings.DEFAULT_SIGNATURE
+            currency = "cny"
+            exchange_rate = None
+            user_id = None
+>>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
         # Определяем платформу заранее, чтобы Pinduoduo обрабатывать веб-скрапингом
         platform, _ = URLParser.parse_url(url)
         logger.info(f"Определена платформа: {platform} для URL: {url}")
@@ -136,17 +165,19 @@ class Scraper:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper][Pinduoduo] Ошибка перевода описания: {e}")
         
+<<<<<<< HEAD
         # Используем курс пользователя, если он передан, иначе получаем из API (если включено)
         exchange_rate = user_exchange_rate
         if exchange_rate is None and settings.CONVERT_CURRENCY:
             exchange_rate = await self.exchange_rate_client.get_exchange_rate()
 
+=======
+>>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
         # Подготавливаем компактные данные для LLM (без огромного массива skus!)
         compact_data = self._prepare_compact_data_for_llm(product_data)
         
-        # Генерируем структурированный контент с помощью YandexGPT
-        # LLM вернет JSON с: title, description, characteristics, hashtags
-        llm_content = await self.yandex_gpt_client.generate_post_content(compact_data)
+        # Генерируем структурированный контент через менеджер LLM
+        llm_content = await llm_manager.generate(user_id, compact_data)
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] LLM контент получен: {llm_content.get('title', 'N/A')}")
@@ -197,7 +228,11 @@ class Scraper:
             product_data=product_data,
             signature=signature,
             currency=currency,
+<<<<<<< HEAD
             exchange_rate=exchange_rate
+=======
+            exchange_rate=exchange_rate,
+>>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
         )
         
         # Получаем изображения в зависимости от платформы
@@ -928,12 +963,22 @@ class Scraper:
         return text
     
     def _build_post_text(
+<<<<<<< HEAD
         self, 
         llm_content: dict, 
         product_data: dict, 
         signature: str = None,
         currency: str = "cny",
         exchange_rate: float = None
+=======
+        self,
+        llm_content: dict,
+        product_data: dict,
+        *,
+        signature: str,
+        currency: str = "cny",
+        exchange_rate: Optional[float] = None,
+>>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
     ) -> str:
         """
         Формирует финальный текст поста из структурированных данных LLM и данных API.
@@ -1137,6 +1182,7 @@ class Scraper:
         
         # Цена с учётом пользовательской валюты
         currency_lower = (currency or "cny").lower()
+<<<<<<< HEAD
         
         # Проверяем, что exchange_rate не None и не 0
         has_exchange_rate = exchange_rate is not None and float(exchange_rate) > 0
@@ -1160,6 +1206,27 @@ class Scraper:
         
         # Призыв к действию (курсивом) с подписью пользователя
         contact = user_signature.strip() if user_signature.strip() else settings.DEFAULT_SIGNATURE
+=======
+        price_text_parts = [f"<i>💰 <b>Цена:</b> {price} ¥"]
+
+        if currency_lower == "rub":
+            if exchange_rate:
+                try:
+                    rub_price = float(price) * float(exchange_rate)
+                    price_text_parts.append(f"(~{rub_price:.2f} ₽, курс 1 ¥ = {float(exchange_rate):.2f} ₽)")
+                except (ValueError, TypeError):
+                    price_text_parts.append("(уточните курс ₽ в настройках)")
+            else:
+                price_text_parts.append("(укажите курс ₽ в настройках)")
+
+        price_text_parts.append("+ доставка</i>")
+        price_text = " ".join(price_text_parts)
+        post_parts.append(price_text)
+        post_parts.append("")
+        
+        # Призыв к действию (курсивом)
+        contact = signature.strip() if signature.strip() else settings.DEFAULT_SIGNATURE
+>>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
         post_parts.append(f"<i>📝 Для заказа пишите {contact} или в комментариях 🛍️</i>")
         post_parts.append("")
         

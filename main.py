@@ -14,12 +14,36 @@ License: MIT
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeDefault,
+    MenuButtonCommands,
+)
 from src.core.config import settings
+from src.core.config_manager import config_manager
+from src.core.logging_config import setup_logging
 from src.bot.error_handler import init_error_handler
 from src.bot.handlers import router
 
-# Конфигурация базового логирования (детальное логирование в error_handler.py)
-logging.basicConfig(level=logging.INFO)
+# Конфигурация логирования
+setup_logging()
+
+
+async def setup_bot_menu(bot: Bot) -> None:
+    """
+    Настраивает список команд бота, отображаемых в боковом меню Telegram.
+    """
+    commands = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="request", description="Запросить описание товара"),
+        BotCommand(command="about", description="О сервисе"),
+        BotCommand(command="faq", description="Часто задаваемые вопросы"),
+        BotCommand(command="settings", description="Открыть настройки"),
+        BotCommand(command="mysettings", description="Показать мои настройки"),
+        BotCommand(command="subscription", description="Информация о подписке"),
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
 async def main():
@@ -27,18 +51,27 @@ async def main():
     Основная асинхронная функция для запуска Telegram бота.
     
     Выполняет следующие шаги:
-    1. Инициализирует бота с токеном из .env
-    2. Создаёт диспетчер для обработки сообщений
-    3. Инициализирует систему обработки ошибок с уведомлениями админу
-    4. Регистрирует обработчики сообщений (роутеры)
-    5. Удаляет старые вебхуки (если были)
-    6. Запускает long polling для получения обновлений
+    1. Загружает настройки из БД (если доступны)
+    2. Инициализирует бота с токеном из настроек
+    3. Создаёт диспетчер для обработки сообщений
+    4. Инициализирует систему обработки ошибок с уведомлениями админу
+    5. Регистрирует обработчики сообщений (роутеры)
+    6. Удаляет старые вебхуки (если были)
+    7. Запускает long polling для получения обновлений
     
     Raises:
         Exception: Любые ошибки логируются и приводят к остановке бота
     """
+    # Загружаем настройки из БД (с приоритетом над .env)
+    try:
+        await config_manager.load_from_db()
+        logging.info("Настройки из БД загружены успешно")
+    except Exception as e:
+        logging.warning(f"Не удалось загрузить настройки из БД, используем .env: {e}")
+    
     # Инициализация бота с токеном из настроек
     bot = Bot(token=settings.BOT_TOKEN)
+    await setup_bot_menu(bot)
     # Инициализация диспетчера
     dp = Dispatcher()
     

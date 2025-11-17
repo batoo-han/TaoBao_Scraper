@@ -20,3 +20,20 @@ Pillow  # Определение размеров и обработка изоб
 
 # Browser Automation for Pinduoduo scraping
 playwright>=1.46.0  # Асинхронный Playwright для веб-скрапинга Pinduoduo
+
+# Database & migrations
+SQLAlchemy>=2.0.0  # ORM/Query builder (используем async engine)
+asyncpg>=0.29.0  # Postgres драйвер для async SQLAlchemy
+psycopg2-binary>=2.9.0  # Синхронный Postgres драйвер для Alembic миграций
+alembic>=1.13.0  # Миграции схемы БД
+
+# Admin Panel
+fastapi>=0.104.0  # Веб-фреймворк для админ-панели
+uvicorn[standard]>=0.24.0  # ASGI сервер для FastAPI
+python-jose[cryptography]>=3.3.0  # JWT токены для аутентификации
+passlib[bcrypt,argon2]>=1.7.4  # Хеширование паролей (bcrypt + argon2)
+argon2-cffi>=23.1.0  # Argon2 для хеширования паролей (без ограничения 72 байта)
+python-multipart>=0.0.6  # Для работы с формами
+psutil>=5.9.0  # Для проверки запущенных процессов
+
+
