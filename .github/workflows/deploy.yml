@@ -28,7 +28,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     
     - name: Deploy to production server via SSH
       uses: appleboy/ssh-action@v1.0.3
