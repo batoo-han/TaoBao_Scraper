@@ -22,19 +22,11 @@ class Scraper:
         self.yandex_translate_client = YandexTranslateClient()  # Клиент для Yandex.Translate
 
     async def scrape_product(
-<<<<<<< HEAD
-        self, 
-        url: str,
-        user_signature: str = None,
-        user_currency: str = None,
-        exchange_rate: float = None
-=======
         self,
         url: str,
         llm_manager: "LLMProviderManager",
         *,
         user_settings: Optional["UserSettings"] = None,
->>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
     ):
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
@@ -42,26 +34,13 @@ class Scraper:
 
         Args:
             url (str): URL товара для скрапинга.
-<<<<<<< HEAD
-            user_signature (str, optional): Подпись пользователя для поста
-            user_currency (str, optional): Валюта пользователя (cny или rub)
-            exchange_rate (float, optional): Курс обмена для рубля
-=======
             llm_manager (LLMProviderManager): Менеджер LLM-провайдеров.
             user_settings (UserSettings | None): Настройки пользователя (подпись, валюта, курс).
                 Если не указано, используются значения по умолчанию.
->>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
 
         Returns:
             tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
         """
-<<<<<<< HEAD
-        # Используем настройки пользователя или значения по умолчанию
-        signature = user_signature or settings.DEFAULT_SIGNATURE
-        currency = (user_currency or settings.DEFAULT_CURRENCY).lower()
-        # Сохраняем переданный курс пользователя (если есть)
-        user_exchange_rate = exchange_rate if exchange_rate is not None else None
-=======
         # Извлекаем параметры из user_settings или используем дефолты
         if user_settings:
             signature = user_settings.signature or settings.DEFAULT_SIGNATURE
@@ -73,7 +52,6 @@ class Scraper:
             currency = "cny"
             exchange_rate = None
             user_id = None
->>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
         # Определяем платформу заранее, чтобы Pinduoduo обрабатывать веб-скрапингом
         platform, _ = URLParser.parse_url(url)
         logger.info(f"Определена платформа: {platform} для URL: {url}")
@@ -165,14 +143,6 @@ class Scraper:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper][Pinduoduo] Ошибка перевода описания: {e}")
         
-<<<<<<< HEAD
-        # Используем курс пользователя, если он передан, иначе получаем из API (если включено)
-        exchange_rate = user_exchange_rate
-        if exchange_rate is None and settings.CONVERT_CURRENCY:
-            exchange_rate = await self.exchange_rate_client.get_exchange_rate()
-
-=======
->>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
         # Подготавливаем компактные данные для LLM (без огромного массива skus!)
         compact_data = self._prepare_compact_data_for_llm(product_data)
         
@@ -228,11 +198,7 @@ class Scraper:
             product_data=product_data,
             signature=signature,
             currency=currency,
-<<<<<<< HEAD
-            exchange_rate=exchange_rate
-=======
             exchange_rate=exchange_rate,
->>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
         )
         
         # Получаем изображения в зависимости от платформы
@@ -628,8 +594,7 @@ class Scraper:
             
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=browser_headers) as client:
                 # Попытка 1: Range запрос (экономия трафика)
-                # Увеличиваем до 64KB для более надёжного определения размеров JPEG/PNG
-                headers = {'Range': 'bytes=0-65535'}  # 64KB достаточно для определения размеров большинства изображений
+                headers = {'Range': 'bytes=0-16383'}  # 16KB достаточно для определения размеров
                 
                 try:
                     response = await client.get(url, headers=headers)
@@ -645,11 +610,11 @@ class Scraper:
                             width, height = img.size
                             
                             if width > 0 and height > 0:
-                                # Для Range запроса file_size берём из Content-Range (формат: "bytes 0-65535/150000")
+                                # Для Range запроса file_size берём из Content-Range (формат: "bytes 0-16383/150000")
                                 file_size = 0
                                 content_range = response.headers.get('Content-Range', '')
                                 if content_range:
-                                    # Парсим "bytes 0-65535/150000" -> берём 150000
+                                    # Парсим "bytes 0-16383/150000" -> берём 150000
                                     parts = content_range.split('/')
                                     if len(parts) == 2:
                                         try:
@@ -676,18 +641,16 @@ class Scraper:
                     if settings.DEBUG_MODE:
                         print(f"[Scraper] ⚠️ Range запрос не сработал: {type(range_error).__name__}: {range_error}")
                 
-                # Попытка 2: Полная загрузка (с лимитом 2MB для определения размеров)
-                # Увеличиваем лимит, так как многие изображения Taobao имеют размер 500-700KB
+                # Попытка 2: Полная загрузка (с лимитом 500KB для безопасности)
                 if settings.DEBUG_MODE:
                     print(f"[Scraper] 🔄 Пробуем полную загрузку...")
                 
                 response = await client.get(url)
                 
-                # Ограничение: не более 2MB (для определения размеров это нормально)
-                # Большие изображения (>2MB) обычно являются баннерами или некачественными
-                if len(response.content) > 2 * 1024 * 1024:
+                # Ограничение: не более 500KB
+                if len(response.content) > 500 * 1024:
                     if settings.DEBUG_MODE:
-                        print(f"[Scraper] ⚠️ Изображение слишком большое: {len(response.content)/1024:.1f}KB (лимит 2MB)")
+                        print(f"[Scraper] ⚠️ Изображение слишком большое: {len(response.content)/1024:.1f}KB")
                     return None
                 
                 try:
@@ -739,7 +702,7 @@ class Scraper:
             return []
         
         # Шаг 1: Убираем слишком маленькие изображения (иконки, кнопки)
-        min_dimension = 150  # Минимум 150x150
+        min_dimension = 400  # Минимум 400x400
         large_enough = []
         
         for img in images_with_sizes:
@@ -948,29 +911,8 @@ class Scraper:
         
         # Возвращаем как есть (через запятую)
         return ", ".join(sizes_raw)
-
-    def _ensure_lowercase_bullet(self, text: str) -> str:
-        """
-        Гарантирует, что первый алфавитный символ в пункте списка — строчный.
-        """
-        if not text:
-            return text
-        chars = list(text)
-        for idx, ch in enumerate(chars):
-            if ch.isalpha():
-                chars[idx] = ch.lower()
-                return "".join(chars)
-        return text
     
     def _build_post_text(
-<<<<<<< HEAD
-        self, 
-        llm_content: dict, 
-        product_data: dict, 
-        signature: str = None,
-        currency: str = "cny",
-        exchange_rate: float = None
-=======
         self,
         llm_content: dict,
         product_data: dict,
@@ -978,7 +920,6 @@ class Scraper:
         signature: str,
         currency: str = "cny",
         exchange_rate: Optional[float] = None,
->>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
     ) -> str:
         """
         Формирует финальный текст поста из структурированных данных LLM и данных API.
@@ -987,15 +928,11 @@ class Scraper:
         Args:
             llm_content (dict): Структурированный контент от YandexGPT
             product_data (dict): Данные о товаре от TMAPI
-            signature (str, optional): Подпись пользователя для поста
-            currency (str): Валюта пользователя (cny или rub)
             exchange_rate (float, optional): Курс обмена CNY в RUB
 
         Returns:
             str: Отформатированный текст поста в HTML
         """
-        # Используем подпись пользователя или значение по умолчанию
-        user_signature = signature or settings.DEFAULT_SIGNATURE
         # Извлекаем данные из LLM ответа
         title = llm_content.get('title', 'Товар')
         description = llm_content.get('description', '')
@@ -1128,11 +1065,7 @@ class Scraper:
                     # Если значение - список (например, цвета)
                     post_parts.append(f"<i><b>{key}:</b></i>")
                     for item in value:
-                        # После маркера слово должно начинаться со строчной буквы
-                        formatted_item = str(item).strip()
-                        if formatted_item:
-                            formatted_item = self._ensure_lowercase_bullet(formatted_item)
-                        post_parts.append(f"<i>  • {formatted_item}</i>")
+                        post_parts.append(f"<i>  • {item}</i>")
                     post_parts.append("")
                 else:
                     # Если значение - строка
@@ -1182,31 +1115,6 @@ class Scraper:
         
         # Цена с учётом пользовательской валюты
         currency_lower = (currency or "cny").lower()
-<<<<<<< HEAD
-        
-        # Проверяем, что exchange_rate не None и не 0
-        has_exchange_rate = exchange_rate is not None and float(exchange_rate) > 0
-        
-        if currency_lower == "rub" and has_exchange_rate:
-            # Если валюта рубль и курс установлен - показываем сразу в рублях
-            try:
-                rub_price = float(price) * float(exchange_rate)
-                # Округляем до 10 рублей (без копеек)
-                rub_price_rounded = round(rub_price / 10) * 10
-                price_text = f"<i>💰 <b>Цена:</b> {int(rub_price_rounded)} ₽ + доставка</i>"
-            except (ValueError, TypeError):
-                # Если ошибка конвертации - показываем в юанях
-                price_text = f"<i>💰 <b>Цена:</b> {price} ¥ + доставка</i>"
-        else:
-            # По умолчанию показываем в юанях
-            price_text = f"<i>💰 <b>Цена:</b> {price} ¥ + доставка</i>"
-        
-        post_parts.append(price_text)
-        post_parts.append("")
-        
-        # Призыв к действию (курсивом) с подписью пользователя
-        contact = user_signature.strip() if user_signature.strip() else settings.DEFAULT_SIGNATURE
-=======
         price_text_parts = [f"<i>💰 <b>Цена:</b> {price} ¥"]
 
         if currency_lower == "rub":
@@ -1226,7 +1134,6 @@ class Scraper:
         
         # Призыв к действию (курсивом)
         contact = signature.strip() if signature.strip() else settings.DEFAULT_SIGNATURE
->>>>>>> ea50f5eeb9953ad571713ef3461bd36d187f61e9
         post_parts.append(f"<i>📝 Для заказа пишите {contact} или в комментариях 🛍️</i>")
         post_parts.append("")
         
