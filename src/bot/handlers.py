@@ -1,10 +1,12 @@
 import asyncio
 import random
 import logging
+import re
+from collections import deque
 from aiogram import Router, F
 from aiogram.types import Message, InputMediaPhoto, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import FSInputFile, BufferedInputFile
+from aiogram.types import BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import httpx
@@ -73,6 +75,240 @@ def format_settings_summary(user_settings) -> str:
         f"• валюта по умолчанию: <b>{currency}</b>\n"
         f"• курс для рубля: {rate_display}"
     ) 
+
+
+MAX_TEXT_CHUNK = 2000
+CAPTION_TEXT_LIMIT = 1000  # Telegram captions <= 1024 символов
+PUNCTUATION_BREAKS = ('.', '!', '?', ';', ':', ',', '…', '\n')
+MIN_BREAK_RATIO = 0.4
+HTML_SELF_CLOSING_TAGS = {"br", "hr"}
+HTML_TAG_PATTERN = re.compile(r"<(/?)([a-zA-Z0-9]+)(?:\s[^<>]*)?>")
+
+
+def split_text_chunks(text: str, limit: int) -> list[str]:
+    """
+    Делит текст на части, стараясь обрывать по знакам препинания, переносам строк или пробелам.
+    Также следит, чтобы разбиение не приходилось на середину HTML-тегов.
+    """
+    if not text:
+        return []
+
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+
+    chunks: list[str] = []
+    idx = 0
+    length = len(cleaned)
+    min_break = max(int(limit * MIN_BREAK_RATIO), 120)
+
+    while idx < length:
+        target = min(idx + limit, length)
+        candidate = cleaned[idx:target]
+
+        break_idx = -1
+        for pos in range(len(candidate) - 1, -1, -1):
+            if candidate[pos] in PUNCTUATION_BREAKS:
+                if pos >= min_break or target == length:
+                    break_idx = pos + 1
+                    break
+
+        if break_idx == -1:
+            space_idx = candidate.rfind(' ')
+            if space_idx != -1 and (space_idx >= min_break or target == length):
+                break_idx = space_idx + 1
+
+        if break_idx > 0:
+            target = idx + break_idx
+            candidate = cleaned[idx:target]
+
+        last_lt = candidate.rfind('<')
+        last_gt = candidate.rfind('>')
+        if last_lt > last_gt:
+            closing = cleaned.find('>', target)
+            if closing != -1:
+                target = closing + 1
+                candidate = cleaned[idx:target]
+            else:
+                candidate = candidate[:last_lt]
+                target = idx + last_lt
+
+        chunk = candidate.strip()
+        if not chunk:
+            chunk = cleaned[idx:target].strip()
+
+        if not chunk:
+            idx = target if target > idx else idx + 1
+            continue
+
+        fragment, adjusted_target = _extend_chunk_to_close_tags(cleaned, idx, target)
+        fragment = fragment.strip()
+        if not fragment:
+            idx = adjusted_target if adjusted_target > idx else idx + 1
+            continue
+
+        chunks.append(fragment)
+        idx = adjusted_target
+
+    return chunks
+
+
+def prepare_caption_and_queue(text: str) -> tuple[str, deque[str]]:
+    """
+    Возвращает текст подписи для первой медиагруппы и очередь оставшихся частей поста.
+    """
+    base_chunks = split_text_chunks(text, MAX_TEXT_CHUNK)
+    if not base_chunks:
+        return "", deque()
+
+    remaining = deque(base_chunks[1:])
+    caption_parts = split_text_chunks(base_chunks[0], CAPTION_TEXT_LIMIT)
+    caption_text = caption_parts[0] if caption_parts else base_chunks[0]
+
+    # Остаток от подписи возвращаем в очередь, чтобы не потерять текст
+    for part in reversed(caption_parts[1:]):
+        remaining.appendleft(part)
+
+    return caption_text, remaining
+
+
+async def send_text_sequence(message: Message, chunks: list[str]) -> None:
+    """
+    Отправляет список текстовых сообщений по очереди.
+    """
+    for chunk in chunks:
+        if not chunk or not chunk.strip():
+            continue
+        await message.answer(chunk.strip(), parse_mode="HTML")
+
+
+async def _send_single_photo(message: Message, url: str, caption: str | None) -> bool:
+    """
+    Отправляет одиночное фото с подписью. Возвращает True при успехе.
+    """
+    parse_mode = "HTML" if caption else None
+    try:
+        await message.answer_photo(url, caption=caption or None, parse_mode=parse_mode)
+        return True
+    except TelegramBadRequest:
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+                response = await client.get(url)
+                if response.status_code == 200 and response.content:
+                    buffer = BufferedInputFile(response.content, filename="photo.jpg")
+                    await message.answer_photo(buffer, caption=caption or None, parse_mode=parse_mode)
+                    return True
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return False
+
+
+async def _send_media_group(message: Message, urls: list[str], caption: str | None) -> bool:
+    """
+    Отправляет медиагруппу (2-10 фото) с опциональной подписью на первом фото.
+    """
+    if not urls:
+        return False
+
+    media = []
+    for idx, url in enumerate(urls):
+        if idx == 0 and caption:
+            media.append(InputMediaPhoto(media=url, caption=caption, parse_mode="HTML"))
+        else:
+            media.append(InputMediaPhoto(media=url))
+
+    try:
+        await message.answer_media_group(media=media)
+        return True
+    except TelegramBadRequest:
+        pass
+    except Exception:
+        pass
+
+    files: list[InputMediaPhoto] = []
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+            for idx, url in enumerate(urls):
+                try:
+                    response = await client.get(url)
+                    if response.status_code != 200 or not response.content:
+                        continue
+                    buffer = BufferedInputFile(response.content, filename=f"album_{idx+1}.jpg")
+                    if not files and caption:
+                        files.append(InputMediaPhoto(media=buffer, caption=caption, parse_mode="HTML"))
+                    else:
+                        files.append(InputMediaPhoto(media=buffer))
+                except Exception:
+                    continue
+        if files:
+            await message.answer_media_group(media=files)
+            return True
+    except TelegramBadRequest:
+        pass
+    except Exception:
+        pass
+
+    return False
+
+
+async def send_media_block(message: Message, urls: list[str], caption: str | None) -> bool:
+    """
+    Универсальная отправка фотоблока: одиночное фото или альбом.
+    """
+    if not urls:
+        return False
+    if len(urls) == 1:
+        return await _send_single_photo(message, urls[0], caption)
+    return await _send_media_group(message, urls, caption)
+
+
+def _extend_chunk_to_close_tags(text: str, start: int, end: int) -> tuple[str, int]:
+    """
+    Расширяет срез текста до тех пор, пока внутри него не останется незакрытых HTML-тегов.
+    """
+    end_pos = min(end, len(text))
+    while True:
+        fragment = text[start:end_pos]
+        open_tags = _find_unclosed_html_tags(fragment)
+        if not open_tags or end_pos >= len(text):
+            return fragment, end_pos
+
+        extended = False
+        for tag in reversed(open_tags):
+            closing_marker = f"</{tag}>"
+            closing_idx = text.find(closing_marker, end_pos)
+            if closing_idx != -1:
+                end_pos = closing_idx + len(closing_marker)
+                extended = True
+                break
+        if not extended:
+            return fragment, end_pos
+
+
+def _find_unclosed_html_tags(fragment: str) -> list[str]:
+    """
+    Возвращает стек незакрытых HTML-тегов внутри фрагмента.
+    """
+    stack: list[str] = []
+    for match in HTML_TAG_PATTERN.finditer(fragment):
+        full = match.group(0)
+        closing = match.group(1) == '/'
+        tag_name = match.group(2).lower()
+
+        if full.endswith('/>') or tag_name in HTML_SELF_CLOSING_TAGS:
+            continue
+
+        if closing:
+            if stack:
+                for idx in range(len(stack) - 1, -1, -1):
+                    if stack[idx] == tag_name:
+                        stack = stack[:idx]
+                        break
+        else:
+            stack.append(tag_name)
+    return stack
 
 
 async def send_typing_action(message: Message, stop_event: asyncio.Event):
@@ -313,92 +549,31 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             )
             return
         
-        if image_urls and len(image_urls) > 0:
-            # Готовим первые изображения для первого сообщения
-            # Основной пост ограничиваем 4 фото (Taobao/Tmall/PDD)
+        caption_text, caption_queue = prepare_caption_and_queue(post_text)
+        if not caption_text:
+            caption_text = post_text.strip()
+            caption_queue = deque()
+        full_text_chunks = [caption_text] + list(caption_queue)
+
+        if image_urls:
             main_images = image_urls[:4]
+            album_sent = await send_media_block(message, main_images, caption_text)
+            if not album_sent:
+                await send_text_sequence(message, full_text_chunks)
+                return
 
-            # Если только одно изображение — отправляем как одиночное фото (альбом требует ≥2)
-            if len(main_images) == 1:
-                try:
-                    await message.answer_photo(main_images[0], caption=post_text, parse_mode="HTML")
-                except TelegramBadRequest:
-                    # Фолбэк: скачать и отправить как файл
-                    try:
-                        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                            r = await client.get(main_images[0])
-                            if r.status_code == 200 and r.content:
-                                fname = "photo.jpg"
-                                await message.answer_photo(BufferedInputFile(r.content, filename=fname), caption=post_text, parse_mode="HTML")
-                            else:
-                                await message.answer(post_text, parse_mode="HTML")
-                    except Exception:
-                        await message.answer(post_text, parse_mode="HTML")
-            else:
-                # Собираем медиагруппу (первая с подписью)
-                media_main = []
-                for i, url in enumerate(main_images):
-                    if i == 0:
-                        media_main.append(InputMediaPhoto(media=url, caption=post_text, parse_mode="HTML"))
-                    else:
-                        media_main.append(InputMediaPhoto(media=url))
+            if caption_queue:
+                await send_text_sequence(message, list(caption_queue))
+                caption_queue.clear()
 
-                try:
-                    await message.answer_media_group(media=media_main)
-                except TelegramBadRequest:
-                    # Фолбэк: предварительно скачиваем и отправляем как файлы (альбом)
-                    try:
-                        files: list[InputMediaPhoto] = []
-                        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                            for i, url in enumerate(main_images):
-                                try:
-                                    r = await client.get(url)
-                                    if r.status_code != 200 or not r.content:
-                                        continue
-                                    fname = f"photo_{i+1}.jpg"
-                                    buf = BufferedInputFile(r.content, filename=fname)
-                                    if i == 0:
-                                        files.append(InputMediaPhoto(media=buf, caption=post_text, parse_mode="HTML"))
-                                    else:
-                                        files.append(InputMediaPhoto(media=buf))
-                                except Exception:
-                                    continue
-                        if files:
-                            await message.answer_media_group(media=files)
-                        else:
-                            await message.answer(post_text, parse_mode="HTML")
-                    except Exception:
-                        await message.answer(post_text, parse_mode="HTML")
-
-                # Дополнительные фото после первых 10 (если есть)
-                if len(image_urls) > len(main_images):
-                    remaining_images = image_urls[len(main_images):]
-                    for i in range(0, len(remaining_images), 10):
-                        batch = remaining_images[i:i+10]
-                        media_batch = [InputMediaPhoto(media=url) for url in batch]
-                        try:
-                            await message.answer_media_group(media=media_batch)
-                        except TelegramBadRequest:
-                            # Фолбэк: скачиваем и отправляем файлы
-                            try:
-                                files: list[InputMediaPhoto] = []
-                                async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                                    for j, url in enumerate(batch):
-                                        try:
-                                            r = await client.get(url)
-                                            if r.status_code != 200 or not r.content:
-                                                continue
-                                            fname = f"photo_more_{i+j+1}.jpg"
-                                            files.append(InputMediaPhoto(media=BufferedInputFile(r.content, filename=fname)))
-                                        except Exception:
-                                            continue
-                                if files:
-                                    await message.answer_media_group(media=files)
-                            except Exception:
-                                pass
+            remaining_images = image_urls[len(main_images):]
+            for i in range(0, len(remaining_images), 10):
+                batch = remaining_images[i:i+10]
+                sent = await send_media_block(message, batch, None)
+                if not sent:
+                    break
         else:
-            # Если изображений нет, отправляем только текст
-            await message.answer(post_text, parse_mode="HTML")
+            await send_text_sequence(message, full_text_chunks)
 
     except Exception as e:
         # Логируем ошибку перед обработкой
