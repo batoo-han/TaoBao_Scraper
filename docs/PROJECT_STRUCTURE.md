@@ -17,6 +17,9 @@ TaoBao_Scraper_2/
 │   │   ├── __init__.py
 │   │   ├── tmapi.py              # TMAPI клиент (Taobao/Tmall/Pinduoduo)
 │   │   ├── yandex_gpt.py         # YandexGPT клиент
+│   │   ├── openai_client.py      # OpenAI клиент
+│   │   ├── llm_provider.py       # Переключение провайдеров LLM
+│   │   ├── prompts.py            # Общие промпты для генерации описаний
 │   │   ├── yandex_translate.py   # Yandex.Translate клиент
 │   │   └── exchange_rate.py      # Курсы валют
 │   ├── core/                     # 🧠 Бизнес-логика
@@ -103,6 +106,23 @@ TaoBao_Scraper_2/
 **Зависимости:**
 - `src.core.config` - api ключ, model, folder_id
 
+#### `openai_client.py`
+- асинхронный клиент OpenAI (`AsyncOpenAI`)
+- поддержка моделей `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4o`, `o4-mini`
+- строгий JSON-ответ через `response_format`
+
+**Зависимости:**
+- `src.core.config` - ключ и модель
+
+#### `llm_provider.py`
+- фабрика провайдеров (YandexGPT/OpenAI) с кэшированием
+- читает `DEFAULT_LLM` и валидирует значение
+- возвращает единый интерфейс `generate_post_content`
+
+#### `prompts.py`
+- хранит шаблоны промптов
+- используется обоими провайдерами для полностью идентичного поведения
+
 #### `yandex_translate.py`
 - клиент для Yandex.Translate
 - перевод китайских названий на русский
@@ -133,7 +153,7 @@ TaoBao_Scraper_2/
 **Workflow:**
 ```
 1. Получение данных → tmapi.py
-2. Генерация LLM контента → yandex_gpt.py
+2. Генерация LLM контента → llm_provider.py → (yandex_gpt.py или openai_client.py)
 3. Получение курса валют → exchange_rate.py
 4. Получение detail изображений → tmapi.py
 5. Фильтрация изображений → встроенная логика
@@ -212,9 +232,10 @@ TaoBao_Scraper_2/
 └───────────────────┘
         ↓
 ┌───────────────────────────────────┐
-│ src/api/yandex_gpt.py             │
+│ src/api/llm_provider.py           │
+│ - Выбор YandexGPT/OpenAI          │
 │ - Генерация title/description     │
-│ - Извлечение характеристик        │
+│ - Валидация JSON                  │
 └───────────────────────────────────┘
         ↓
 ┌───────────────────────────────────┐

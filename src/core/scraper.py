@@ -1,9 +1,12 @@
+import inspect
+import json
 import logging
+import re
+from collections import Counter, OrderedDict, defaultdict
 
 from src.api.tmapi import TmapiClient
-from src.api.yandex_gpt import YandexGPTClient
+from src.api.llm_provider import get_llm_client, get_translation_client
 from src.api.exchange_rate import ExchangeRateClient
-from src.api.yandex_translate import YandexTranslateClient
 from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
 from src.scrapers.pinduoduo_web import PinduoduoWebScraper
@@ -14,11 +17,42 @@ class Scraper:
     """
     Класс-оркестратор для сбора информации о товаре, его обработки и генерации поста.
     """
+    
+    COLOR_KEYWORDS = {
+        "белый", "белая", "белые", "черный", "черная", "черные", "чёрный", "чёрная", "чёрные",
+        "красный", "красная", "красные", "розовый", "розовая", "розовые",
+        "синий", "синяя", "синие", "голубой", "голубая",
+        "зелёный", "зелёная", "зелёные", "зеленый", "зеленая", "зеленые",
+        "жёлтый", "жёлтая", "жёлтые", "желтый", "желтая", "желтые",
+        "фиолетовый", "фиолетовая", "фиолетовые",
+        "серый", "серая", "серые", "серебряный", "серебристый",
+        "золотой", "золотая",
+        "коричневый", "коричневая",
+        "бежевый", "бежевые",
+        "хаки", "бордовый", "мятный", "пудровый", "бирюзовый",
+        "разноцветный", "многоцветный", "пёстрый", "пестрый"
+    }
+    COLOR_REGEX = re.compile(
+        r"\b(" + "|".join(sorted(re.escape(word) for word in COLOR_KEYWORDS)) + r")\b",
+        re.IGNORECASE
+    )
+
+    GENERIC_STOPWORDS = {
+        "вариант", "варианты", "комплект", "комплекты", "набор", "наборы",
+        "версии", "версия", "тип", "типы", "модель", "модели",
+        "для", "из", "от", "без", "под", "на", "по", "и", "или", "с", "со",
+        "в", "во", "это", "этот", "эта", "эти", "новый", "новая", "новые",
+        "размер", "размеры", "цвет", "цвета"
+    }
+
+    BATTERY_KEYWORDS = ("батар", "battery", "power")
+    CHARGE_KEYWORDS = ("заряд", "заряжа", "аккум", "recharge", "charging")
     def __init__(self):
         self.tmapi_client = TmapiClient()  # Клиент для tmapi.top
-        self.yandex_gpt_client = YandexGPTClient()  # Клиент для YandexGPT
+        self.llm_client = get_llm_client()  # Унифицированный LLM клиент (YandexGPT или OpenAI)
         self.exchange_rate_client = ExchangeRateClient()  # Клиент для ExchangeRate-API
-        self.yandex_translate_client = YandexTranslateClient()  # Клиент для Yandex.Translate
+        self.translation_client = get_translation_client()  # Отдельный LLM для переводов/предобработки цен
+        self.translation_supports_structured = hasattr(self.translation_client, "generate_json_response")
 
     async def scrape_product(
         self, 
@@ -127,8 +161,8 @@ class Scraper:
                     (product_data.get('title') or '').strip()
                 )
                 if raw_description:
-                    translated = await self.yandex_translate_client.translate_text(raw_description, target_language="ru")
-                    if translated:
+                    translated = await self._translate_text_generic(raw_description, target_language="ru")
+                    if translated and translated != raw_description:
                         product_data['details'] = translated
                         if settings.DEBUG_MODE:
                             print(f"[Scraper][Pinduoduo] Перевод описания выполнен, длина: {len(translated)}")
@@ -143,10 +177,21 @@ class Scraper:
 
         # Подготавливаем компактные данные для LLM (без огромного массива skus!)
         compact_data = self._prepare_compact_data_for_llm(product_data)
+
+        # Заготавливаем переведённый заголовок и ценовые варианты, чтобы отдать их основной LLM сразу
+        raw_title = product_data.get('title', '') or ''
+        translated_title_hint = await self._translate_text_generic(raw_title, target_language="ru")
+        if translated_title_hint:
+            compact_data["title_hint"] = translated_title_hint
+
+        price_lines = await self._prepare_price_entries(product_data, translated_title_hint)
+        if price_lines:
+            compact_data["translated_sku_prices"] = price_lines
         
-        # Генерируем структурированный контент с помощью YandexGPT
+        # Генерируем структурированный контент с помощью выбранного LLM
         # LLM вернет JSON с: title, description, characteristics, hashtags
-        llm_content = await self.yandex_gpt_client.generate_post_content(compact_data)
+        llm_content = await self.llm_client.generate_post_content(compact_data)
+        translated_title = llm_content.get('title') or translated_title_hint
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] LLM контент получен: {llm_content.get('title', 'N/A')}")
@@ -157,8 +202,9 @@ class Scraper:
                 mc = llm_content.get('main_characteristics') or {}
                 if not isinstance(mc, dict):
                     mc = {}
+                looks_like_apparel = self._is_apparel_product(translated_title or translated_title_hint, product_data)
                 # 1) Удаляем цвета, если LLM выдумал вроде «Чистый цвет»/«Однотонный»
-                colors = mc.get('Цвета')
+                colors = mc.get('Цвета') or mc.get('Цвет')
                 if colors:
                     bad_markers = {'чистый цвет', 'однотон', 'однотонный', 'plain', 'solid'}
                     def _is_bad(val: str) -> bool:
@@ -172,7 +218,15 @@ class Scraper:
                             mc.pop('Цвета', None)
                     elif isinstance(colors, str) and _is_bad(colors):
                         mc.pop('Цвета', None)
-                # 2) Гарантируем «Состав», если он явным образом указан в описании
+                if not looks_like_apparel:
+                    mc.pop('Цвета', None)
+                    mc.pop('Цвет', None)
+                # 2) Удаляем лишние секции «Варианты наборов», «Комплектации» и т.п.
+                forbidden_sections = ('вариант', 'комплектац', 'набор')
+                for key in list(mc.keys()):
+                    if any(token in key.lower() for token in forbidden_sections):
+                        mc.pop(key, None)
+                # 3) Гарантируем «Состав», если он явным образом указан в описании
                 platform = product_data.get('_platform')
                 if platform == 'pinduoduo':
                     import re
@@ -197,7 +251,8 @@ class Scraper:
             product_data=product_data,
             signature=signature,
             currency=currency,
-            exchange_rate=exchange_rate
+            exchange_rate=exchange_rate,
+            price_lines=price_lines
         )
         
         # Получаем изображения в зависимости от платформы
@@ -856,6 +911,504 @@ class Scraper:
         
         # Fallback на price_info
         return product_data.get('price_info', {}).get('price', 'N/A')
+
+    async def _prepare_price_entries(self, product_data: dict, product_title: str | None) -> list[dict]:
+        """
+        Готовит список цен по уникальным SKU для отображения в посте.
+        Возвращает только если найдено несколько ценовых групп.
+        """
+        entries = self._get_unique_sku_price_items(product_data)
+        if len(entries) <= 1:
+            return []
+
+        if self._translation_supports_structured_tasks():
+            structured = await self._process_prices_with_llm(entries, product_title or "")
+            if structured:
+                return structured
+
+        return await self._prepare_price_entries_fallback(entries)
+
+    async def _process_prices_with_llm(self, entries: list[dict], product_title: str) -> list[dict]:
+        """
+        Использует translation LLM для перевода и сжатия списка цен.
+        """
+        try:
+            translated = await self._translate_price_entries_with_llm(entries)
+            if not translated:
+                return []
+            summarized = await self._summarize_price_entries_with_llm(product_title, translated)
+            return summarized
+        except Exception as e:
+            if settings.DEBUG_MODE:
+                print(f"[Scraper] Ошибка обработки цен через LLM: {e}")
+            return []
+
+    async def _translate_price_entries_with_llm(self, entries: list[dict]) -> list[dict]:
+        payload = json.dumps(entries, ensure_ascii=False, indent=2)
+        system_prompt = (
+            "Ты профессиональный переводчик. Переводи товарные позиции на русский язык максимально кратко, "
+            "сохраняя смысл и тип товара."
+        )
+        user_prompt = (
+            "Ниже передан JSON-массив позиций с оригинальными названиями и ценами в юанях.\n"
+            "Переведи каждое название на русский язык и верни JSON-массив вида:\n"
+            "[{\"label\": \"переведённое название\", \"price\": число}].\n"
+            "Цены не изменяй.\n\n"
+            f"Исходный JSON:\n{payload}"
+        )
+        token_limit = max(2000, len(entries) * 80)
+        last_error = None
+
+        for attempt in range(2):
+            try:
+                response_text = await self._call_translation_json(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    token_limit=token_limit,
+                    temperature=0.0,
+                )
+                data = self._parse_json_response(response_text)
+                normalized = []
+                for item in data if isinstance(data, list) else []:
+                    label = str(item.get('label') or item.get('name') or "").strip()
+                    price = item.get('price')
+                    try:
+                        price_value = float(price)
+                    except (TypeError, ValueError):
+                        continue
+                    if label:
+                        normalized.append({"label": label, "price": price_value})
+                if normalized:
+                    return normalized
+                last_error = ValueError("LLM вернул пустой список после перевода цен.")
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                token_limit = int(token_limit * 1.5) + 500
+                continue
+
+        if last_error:
+            raise last_error
+        return []
+
+    async def _summarize_price_entries_with_llm(self, product_title: str, items: list[dict]) -> list[dict]:
+        if not items:
+            return []
+        payload = json.dumps(items, ensure_ascii=False, indent=2)
+        system_prompt = (
+            "Ты специалист по товарным каталогам. Обобщай вариации товаров, если различия несущественны "
+            "(цвет, мелкие аксессуары). Если различия влияют на комплектность или тип, оставляй отдельными."
+        )
+        user_prompt = (
+            f"Краткое название товара: {product_title or 'не указано'}\n\n"
+            "Ниже приведён JSON-массив позиций с переводами и ценами:\n"
+            f"{payload}\n\n"
+            "Объедини элементы с одинаковой ценой в более краткие описания. "
+            "Игнорируй различия только в цвете/оттенке — цвета упоминать не нужно. "
+            "Если отличаются только модели/животные, перечисли их в скобках через косую черту "
+            "(например, «коляска для питомца (кот/такса), на аккумуляторе»). "
+            "Верни JSON-массив в формате [{\"label\": \"описание\", \"price\": число}], "
+            "где label написан на русском и отражает суть позиции. "
+            "Не добавляй новых цен и не повторяй одну и ту же цену более одного раза."
+        )
+        token_limit = max(2000, len(items) * 40)
+        last_error = None
+
+        for attempt in range(2):
+            try:
+                response_text = await self._call_translation_json(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    token_limit=token_limit,
+                    temperature=0.0,
+                )
+                data = self._parse_json_response(response_text)
+                result = []
+                seen = set()
+                for item in data if isinstance(data, list) else []:
+                    label = str(item.get('label') or "").strip()
+                    price = item.get('price')
+                    try:
+                        price_value = float(price)
+                    except (TypeError, ValueError):
+                        continue
+                    if not label:
+                        continue
+                    key = (label, price_value)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    result.append({"label": label, "price": price_value})
+
+                if result:
+                    price_groups: OrderedDict[float, list[str]] = OrderedDict()
+                    for entry in sorted(result, key=lambda e: e['price']):
+                        price_groups.setdefault(entry['price'], []).append(entry['label'])
+
+                    merged: list[dict] = []
+                    for price_value, labels in price_groups.items():
+                        if not labels:
+                            continue
+                        merged_label = self._merge_price_labels(labels)
+                        if isinstance(merged_label, list):
+                            for lbl in merged_label:
+                                cleaned = (lbl or "").strip()
+                                if cleaned:
+                                    merged.append({"label": cleaned, "price": price_value})
+                        else:
+                            cleaned = (merged_label or "").strip()
+                            if cleaned:
+                                merged.append({"label": cleaned, "price": price_value})
+
+                    return merged
+                last_error = ValueError("LLM вернул пустой список после суммаризации цен.")
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                token_limit = int(token_limit * 1.5) + 500
+                continue
+
+        if last_error:
+            raise last_error
+        return []
+
+    async def _prepare_price_entries_fallback(self, entries: list[dict]) -> list[dict]:
+        grouped: OrderedDict[float, list[str]] = OrderedDict()
+        for entry in entries:
+            grouped.setdefault(entry['price'], []).append(entry['name'])
+
+        if len(grouped) <= 1:
+            return []
+
+        all_names = [name for names in grouped.values() for name in names]
+        translated_names = await self._translate_variant_names(all_names)
+
+        idx = 0
+        summarized_lines = []
+        for price_value, names in grouped.items():
+            translated_group = []
+            for _ in names:
+                translated = translated_names[idx] if idx < len(translated_names) else _
+                idx += 1
+                translated_group.append(translated.strip() or _)
+            summaries = self._summarize_price_group(translated_group)
+            for label in summaries:
+                cleaned_label = (label or "").strip()
+                if cleaned_label:
+                    summarized_lines.append({"label": cleaned_label, "price": price_value})
+
+        unique = []
+        seen = set()
+        for item in summarized_lines:
+            key = (item['label'], item['price'])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
+    def _get_unique_sku_price_items(self, product_data: dict) -> list[dict]:
+        """
+        Собирает уникальные комбинации (название варианта + цена).
+        """
+        items = []
+        seen = set()
+        for sku in product_data.get('skus', []) or []:
+            price_str = sku.get('sale_price') or sku.get('origin_price')
+            try:
+                price_value = float(str(price_str).replace(',', '.'))
+            except (TypeError, ValueError):
+                continue
+
+            name = self._normalize_sku_prop_name(sku.get('props_names') or '')
+            if not name:
+                continue
+
+            key = (name.lower(), price_value)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({'name': name, 'price': price_value})
+        return items
+
+    def _normalize_sku_prop_name(self, props_names: str) -> str:
+        """
+        Приводит props_names к удобочитаемому виду без ключей.
+        """
+        if not props_names:
+            return ""
+
+        parts = []
+        for part in props_names.split(';'):
+            part = part.strip()
+            if not part:
+                continue
+            if ':' in part:
+                _, value = part.split(':', 1)
+            else:
+                value = part
+            value = value.strip()
+            if value:
+                parts.append(value)
+        return ", ".join(parts) if parts else props_names.strip()
+
+    async def _translate_variant_names(self, names: list[str]) -> list[str]:
+        """
+        Переводит список названий вариантов на русский язык.
+        """
+        if not names:
+            return names
+
+        if self.translation_supports_structured:
+            payload = [{"id": idx, "label": name} for idx, name in enumerate(names)]
+            token_limit = max(800, len(names) * 40)
+            user_prompt = (
+                "Ниже передан JSON-массив объектов с полями id и label. "
+                "Переведи поле label на русский язык, сохранив тот же id. "
+                "Верни массив в формате [{\"id\": 0, \"label\": \"перевод\"}]. "
+                "Не добавляй новых элементов и не меняй порядок.\n\n"
+                f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+            )
+            for attempt in range(2):
+                try:
+                    response_text = await self._call_translation_json(
+                        system_prompt="Ты профессиональный переводчик. Всегда отвечай JSON.",
+                        user_prompt=user_prompt,
+                        token_limit=token_limit,
+                        temperature=0.0,
+                    )
+                    data = self._parse_json_response(response_text)
+                    translated_map: dict[int, str] = {}
+                    if isinstance(data, list):
+                        for item in data:
+                            try:
+                                idx = int(item.get("id"))
+                            except Exception:
+                                continue
+                            label = (item.get("label") or item.get("text") or "").strip()
+                            if label:
+                                translated_map[idx] = label
+                    if len(translated_map) == len(names):
+                        return [translated_map[idx] for idx in range(len(names))]
+                except json.JSONDecodeError as exc:
+                    if settings.DEBUG_MODE:
+                        print(f"[Scraper] Ошибка группового перевода вариантов: {exc}")
+                    token_limit = int(token_limit * 1.5) + 200
+                    continue
+                except Exception as exc:
+                    if settings.DEBUG_MODE:
+                        print(f"[Scraper] Ошибка группового перевода вариантов: {exc}")
+                    break
+
+
+        translator = getattr(self.translation_client, "translate_text", None)
+        if not callable(translator):
+            return names
+
+        batch_text = "\n".join(names)
+        translated_block = None
+        try:
+            translated_block = await translator(batch_text, target_language="ru")
+        except Exception as exc:
+            if settings.DEBUG_MODE:
+                print(f"[Scraper] Ошибка группового перевода вариантов: {exc}")
+
+        if translated_block:
+            splitted = [line.strip() for line in translated_block.split("\n")]
+            if len(splitted) == len(names):
+                return [segment or original for segment, original in zip(splitted, names)]
+
+        results = []
+        for name in names:
+            try:
+                translated = await translator(name, target_language="ru")
+            except Exception:
+                translated = None
+            results.append((translated or name).strip() or name)
+        return results
+
+    def _summarize_price_group(self, names: list[str]) -> list[str]:
+        """
+        Сокращает список названий позиций, чтобы избежать повторов в посте.
+        """
+        unique = list(dict.fromkeys(name.strip() for name in names if name.strip()))
+        if not unique:
+            return []
+        if len(unique) <= 3:
+            return unique
+
+        keywords = self._extract_keywords(unique)
+        descriptor = self._extract_shared_descriptor(unique)
+
+        summary = "варианты в ассортименте"
+        if keywords:
+            summary += f" ({', '.join(keywords[:4])})"
+        if descriptor:
+            summary += f", {descriptor}"
+        return [summary]
+
+    def _extract_keywords(self, names: list[str]) -> list[str]:
+        counter = Counter()
+        for name in names:
+            tokens = re.findall(r"[A-Za-zА-Яа-яЁё]+", name.lower())
+            filtered = [
+                token for token in tokens
+                if token not in self.COLOR_KEYWORDS
+                and token not in self.GENERIC_STOPWORDS
+                and len(token) > 2
+            ]
+            counter.update(filtered)
+
+        keywords = []
+        for token, _ in counter.most_common():
+            if token not in keywords:
+                keywords.append(token)
+            if len(keywords) >= 5:
+                break
+        return keywords
+
+    def _extract_shared_descriptor(self, names: list[str]) -> str:
+        normalized = [name.lower() for name in names]
+        if normalized and all(self._contains_keyword(name, self.BATTERY_KEYWORDS) for name in normalized):
+            return "на батарейках"
+        if normalized and all(self._contains_keyword(name, self.CHARGE_KEYWORDS) for name in normalized):
+            return "перезаряжаемые"
+        return ""
+
+    @staticmethod
+    def _contains_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+        text = text.lower()
+        return any(keyword in text for keyword in keywords)
+
+    def _is_apparel_product(self, translated_title: str | None, product_data: dict) -> bool:
+        text_parts = [
+            translated_title or "",
+            product_data.get('title') or "",
+            product_data.get('product_props') or "",
+            " ".join(product_data.get('category_path') or []),
+        ]
+        text = " ".join(text_parts).lower()
+        apparel_markers = (
+            "плать", "юбк", "джинс", "брюк", "рубаш", "футболк", "толстов",
+            "худи", "костюм", "жилет", "куртк", "пальт", "шорт", "леггинс",
+            "обув", "ботин", "кроссов", "туфл", "кеды", "носк", "бель",
+            "колгот", "пижам", "комбинез", "скинни", "sneaker", "coat", "hoodie",
+            "靴", "衣", "裙", "裤", "衫"
+        )
+        return any(marker in text for marker in apparel_markers)
+
+    @staticmethod
+    def _common_prefix(lhs: str, rhs: str) -> str:
+        limit = min(len(lhs), len(rhs))
+        idx = 0
+        while idx < limit and lhs[idx] == rhs[idx]:
+            idx += 1
+        return lhs[:idx]
+
+    def _remove_color_words(self, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = self.COLOR_REGEX.sub("", text)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        cleaned = cleaned.replace(" ,", ",").replace(" /", "/")
+        return cleaned.strip(" ,./-")
+
+    def _merge_price_labels(self, labels: list[str]) -> str | list[str]:
+        if not labels:
+            return []
+        if len(labels) == 1:
+            return labels[0]
+
+        prefix = labels[0]
+        for lbl in labels[1:]:
+            prefix = self._common_prefix(prefix, lbl)
+            if not prefix:
+                break
+
+        prefix = prefix.rstrip(" -—:,()/").strip()
+        if prefix and len(prefix) >= 12:
+            suffixes = []
+            for lbl in labels:
+                suffix = lbl[len(prefix):].lstrip(" -—:,()").strip()
+                suffix = self._remove_color_words(suffix)
+                if not suffix:
+                    suffix = "вариант"
+                suffixes.append(suffix)
+            unique_suffixes = []
+            seen = set()
+            for suf in suffixes:
+                normalized = suf.lower()
+                if normalized not in seen:
+                    seen.add(normalized)
+                    unique_suffixes.append(suf)
+            if unique_suffixes:
+                joined = ", ".join(unique_suffixes[:6])
+                if len(unique_suffixes) > 6:
+                    joined += ", и др."
+                return f"{prefix} (в ассортименте: {joined})"
+            return prefix
+
+        # Нет общего префикса — оставляем элементы отдельно
+        return labels
+
+    def _translation_supports_structured_tasks(self) -> bool:
+        return hasattr(self.translation_client, "generate_json_response")
+
+    def _parse_json_response(self, text: str):
+        cleaned = text.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+        return json.loads(cleaned)
+
+    async def _call_translation_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        token_limit: int = 1500,
+        temperature: float = 0.0,
+    ) -> str:
+        generator = getattr(self.translation_client, "generate_json_response", None)
+        if not callable(generator):
+            raise RuntimeError("Активный переводческий провайдер не поддерживает JSON-ответы.")
+
+        kwargs = {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        }
+
+        try:
+            sig = inspect.signature(generator)
+            if "max_output_tokens" in sig.parameters:
+                kwargs["max_output_tokens"] = token_limit
+            elif "max_tokens" in sig.parameters:
+                kwargs["max_tokens"] = token_limit
+            if "temperature" in sig.parameters:
+                kwargs["temperature"] = temperature
+        except (TypeError, ValueError):
+            kwargs["max_tokens"] = token_limit
+
+        return await generator(**kwargs)
+
+    async def _translate_text_generic(self, text: str, target_language: str = "ru") -> str:
+        """
+        Универсальный переводчик: использует выбранный translation_client.
+        """
+        if not text:
+            return text
+
+        translator = getattr(self.translation_client, "translate_text", None)
+        if callable(translator):
+            try:
+                translated = await translator(text, target_language=target_language)
+                if translated:
+                    return translated
+            except Exception as e:
+                if settings.DEBUG_MODE:
+                    print(f"[Scraper] Ошибка перевода: {e}")
+        return text
     
     def _format_size_range(self, sizes_str: str) -> str:
         """
@@ -926,6 +1479,81 @@ class Scraper:
                 chars[idx] = ch.lower()
                 return "".join(chars)
         return text
+
+    def _render_price_section(
+        self,
+        price_lines: list[dict],
+        fallback_price: str,
+        currency: str,
+        exchange_rate: float | None
+    ) -> str:
+        """
+        Формирует текстовую секцию с ценами.
+        """
+        if price_lines:
+            unique_prices = {entry['price'] for entry in price_lines}
+            if len(unique_prices) == 1:
+                price_value = unique_prices.pop()
+                amount = self._format_price_amount(price_value, currency, exchange_rate)
+                return f"<i>💰 <b>Цена:</b> {amount}</i>"
+
+            lines = ["<i>💰 <b>Цены:</b></i>"]
+            for entry in price_lines:
+                amount = self._format_price_amount(entry['price'], currency, exchange_rate)
+                label = self._ensure_lowercase_bullet(entry['label'])
+                lines.append(f"<i>  • {label} - {amount}</i>")
+            return "\n".join(lines)
+
+        amount = self._format_price_value_string(fallback_price, currency, exchange_rate)
+        if not amount:
+            return ""
+        return f"<i>💰 <b>Цена:</b> {amount}</i>"
+
+    def _format_price_amount(self, price_value: float, currency: str, exchange_rate: float | None) -> str:
+        """
+        Форматирует числовое значение цены с учётом валюты.
+        """
+        try:
+            numeric = float(price_value)
+        except (TypeError, ValueError):
+            numeric = None
+
+        if currency == "rub" and exchange_rate and numeric is not None:
+            rub_price = numeric * float(exchange_rate)
+            rub_price_rounded = round(rub_price / 10) * 10
+            return f"{int(rub_price_rounded)} ₽ + доставка"
+
+        if numeric is not None:
+            return f"{self._format_number(numeric)} ¥ + доставка"
+
+        return "N/A"
+
+    @staticmethod
+    def _format_number(value: float) -> str:
+        """
+        Убирает лишние нули у числовых значений.
+        """
+        if float(value).is_integer():
+            return f"{int(value)}"
+        return f"{value:.2f}".rstrip('0').rstrip('.')
+
+    def _format_price_value_string(
+        self,
+        price_value: str,
+        currency: str,
+        exchange_rate: float | None
+    ) -> str:
+        """
+        Форматирует цену, если она доступна только в текстовом виде.
+        """
+        if not price_value:
+            return ""
+        try:
+            numeric = float(str(price_value).replace(',', '.'))
+            return self._format_price_amount(numeric, currency, exchange_rate)
+        except (ValueError, TypeError):
+            suffix = "₽" if currency == "rub" and exchange_rate else "¥"
+            return f"{price_value} {suffix} + доставка"
     
     def _build_post_text(
         self, 
@@ -933,7 +1561,8 @@ class Scraper:
         product_data: dict, 
         signature: str = None,
         currency: str = "cny",
-        exchange_rate: float = None
+        exchange_rate: float = None,
+        price_lines: list | None = None
     ) -> str:
         """
         Формирует финальный текст поста из структурированных данных LLM и данных API.
@@ -1141,22 +1770,15 @@ class Scraper:
         # Проверяем, что exchange_rate не None и не 0
         has_exchange_rate = exchange_rate is not None and float(exchange_rate) > 0
         
-        if currency_lower == "rub" and has_exchange_rate:
-            # Если валюта рубль и курс установлен - показываем сразу в рублях
-            try:
-                rub_price = float(price) * float(exchange_rate)
-                # Округляем до 10 рублей (без копеек)
-                rub_price_rounded = round(rub_price / 10) * 10
-                price_text = f"<i>💰 <b>Цена:</b> {int(rub_price_rounded)} ₽ + доставка</i>"
-            except (ValueError, TypeError):
-                # Если ошибка конвертации - показываем в юанях
-                price_text = f"<i>💰 <b>Цена:</b> {price} ¥ + доставка</i>"
-        else:
-            # По умолчанию показываем в юанях
-            price_text = f"<i>💰 <b>Цена:</b> {price} ¥ + доставка</i>"
-        
-        post_parts.append(price_text)
-        post_parts.append("")
+        price_block = self._render_price_section(
+            price_lines=price_lines or [],
+            fallback_price=price,
+            currency=currency_lower,
+            exchange_rate=exchange_rate if has_exchange_rate else None
+        )
+        if price_block:
+            post_parts.append(price_block)
+            post_parts.append("")
         
         # Призыв к действию (курсивом) с подписью пользователя
         contact = user_signature.strip() if user_signature.strip() else settings.DEFAULT_SIGNATURE

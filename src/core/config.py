@@ -27,11 +27,19 @@ class Settings(BaseSettings):
         TMAPI_PINDUODUO_TOKEN (str): API ключ для TMAPI Pinduoduo (tmapi.top)
         TMAPI_RATE_LIMIT (int): Максимальное количество запросов к TMAPI в секунду
         YANDEX_GPT_API_KEY (str): API ключ YandexGPT
+        OPENAI_API_KEY (str): API ключ OpenAI для альтернативного провайдера
         YANDEX_FOLDER_ID (str): ID каталога Yandex Cloud
         EXCHANGE_RATE_API_KEY (str): API ключ для конвертации валют
         GOOGLE_CLOUD_PROJECT (str): Google Cloud Project ID (не используется)
         ADMIN_CHAT_ID (str): Telegram Chat ID админа для уведомлений об ошибках
         YANDEX_GPT_MODEL (str): Модель YandexGPT (yandexgpt-lite или yandexgpt)
+        OPENAI_MODEL (str): Основная модель OpenAI (например, gpt-4o-mini)
+        DEFAULT_LLM (str): Имя провайдера LLM (yandex или openai)
+        TRANSLATE_PROVIDER (str): Провайдер LLM для переводов и обработки цен
+        TRANSLATE_LLM (str): (deprecated) Старая переменная для совместимости
+        TRANSLATE_MODEL (str): Конкретная модель переводческого LLM
+        TRANSLATE_OPENAI_MODEL (str): (deprecated) имя модели OpenAI для переводов
+        TRANSLATE_LEGACY (bool): Использовать ли старый Yandex Translate вместо LLM
         CONVERT_CURRENCY (bool): Включить конвертацию валют
         DEBUG_MODE (bool): Режим отладки с подробными логами
         MOCK_MODE (bool): Mock режим для тестирования без API
@@ -42,11 +50,19 @@ class Settings(BaseSettings):
     TMAPI_PINDUODUO_TOKEN: str = ""  # Не используется (Pinduoduo через веб-скрапинг)
     YANDEX_GPT_API_KEY: str  # API ключ для YandexGPT
     EXCHANGE_RATE_API_KEY: str  # API ключ для ExchangeRate-API
+    OPENAI_API_KEY: str = ""  # API ключ для OpenAI (опционален)
     YANDEX_FOLDER_ID: str # ID каталога в Yandex.Cloud
     GOOGLE_CLOUD_PROJECT: str = ""  # ID проекта Google Cloud (не используется, оставлено для совместимости)
     ADMIN_CHAT_ID: str = ""  # ID чата администратора для уведомлений об ошибках (необязательно)
     TMAPI_BILLING_CHAT_ID: str = ""  # ID чата ответственного за оплату TMAPI для уведомлений об ошибке 439 (необязательно)
     YANDEX_GPT_MODEL: str = "yandexgpt-lite"  # Модель YandexGPT для использования
+    OPENAI_MODEL: str = "gpt-4o-mini"  # Модель OpenAI по умолчанию
+    DEFAULT_LLM: str = "yandex"  # Провайдер LLM по умолчанию
+    TRANSLATE_PROVIDER: str = ""  # Провайдер LLM для переводов (по умолчанию = DEFAULT_LLM)
+    TRANSLATE_LLM: str = ""  # Backward compatibility alias
+    TRANSLATE_MODEL: str = ""  # Конкретная модель для переводов
+    TRANSLATE_OPENAI_MODEL: str = "gpt-4o-mini"  # Legacy-поле для OpenAI моделей
+    TRANSLATE_LEGACY: bool = False  # True → использовать Yandex Translate вместо LLM
     TMAPI_RATE_LIMIT: int = 5  # Максимальное количество запросов к TMAPI в секунду (по умолчанию 5)
     CONVERT_CURRENCY: bool = False  # Флаг для включения/отключения конвертации валют
     DEFAULT_SIGNATURE: str = "@annabbox"  # Подпись по умолчанию для постов

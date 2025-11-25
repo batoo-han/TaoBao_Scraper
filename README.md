@@ -27,7 +27,7 @@
 ### 🎯 Основные функции
 - ✅ **парсинг товаров** с Taobao, Tmall и Pinduoduo по ссылке
 - ✅ **автоматическое определение платформы** из URL
-- ✅ **автоматическая генерация описаний** на русском через YandexGPT
+- ✅ **автоматическая генерация описаний** на русском через YandexGPT или OpenAI
 - ✅ **умная фильтрация изображений** (удаление баннеров, дубликатов)
 - ✅ **динамическое определение характеристик** товара
 - ✅ **извлечение цен** из вариантов товара
@@ -49,6 +49,7 @@
 - 🚫 **фильтрация** нерелевантной информации
 - ❌ **исключение** дат и возрастных ограничений
 - 📐 **умное форматирование** размеров (диапазоны, списки)
+- 💸 **агрегация цен по SKU**: перевод и обобщение длинных списков вариантов одной LLM-командой
 
 ---
 
@@ -59,6 +60,7 @@
 - python 3.11+ ИЛИ Docker
 - telegram Bot Token ([@BotFather](https://t.me/BotFather))
 - yandexgpt API Key ([Yandex Cloud](https://yandex.cloud))
+- openai API Key (опционально, [platform.openai.com](https://platform.openai.com) — если хотите использовать OpenAI)
 - tmapi Token ([tmapi.top](https://tmapi.top))
 
 ### Установка за 3 шага
@@ -151,6 +153,24 @@ YANDEX_GPT_API_KEY=your_yandex_gpt_key
 YANDEX_FOLDER_ID=your_folder_id
 YANDEX_GPT_MODEL=yandexgpt-lite
 
+# OpenAI (используйте при выборе провайдера openai)
+OPENAI_API_KEY=your_openai_key
+OPENAI_MODEL=gpt-4o-mini
+
+# Переключение провайдера (yandex или openai)
+DEFAULT_LLM=yandex
+
+# Отдельный провайдер для переводов и обработки цен
+TRANSLATE_PROVIDER=openai
+# (legacy) переменная для совместимости, можно оставить пустой
+TRANSLATE_LLM=
+# Модель переводческого LLM (например, gpt-4o-mini или yandexgpt-lite)
+TRANSLATE_MODEL=gpt-4o-mini
+# Legacy-поле для OpenAI (можно оставить пустым)
+TRANSLATE_OPENAI_MODEL=
+# Принудительно использовать старый Yandex Translate вместо LLM
+TRANSLATE_LEGACY=False
+
 # TMAPI
 TMAPI_TOKEN=your_tmapi_token
 
@@ -186,12 +206,21 @@ PLAYWRIGHT_TIMEZONE=Asia/Shanghai
 PLAYWRIGHT_PAGE_TIMEOUT_MS=90000
 ```
 
+#### Переключение провайдера LLM
+
+- `DEFAULT_LLM` — основной переключатель. Значение `yandex` использует YandexGPT, `openai` активирует OpenAIClient для генерации описаний.
+- `TRANSLATE_PROVIDER` — провайдер для переводов, агрегации SKU и любых подготовительных задач (значение `yandex` или `openai`). Можно выставить отдельную модель через `TRANSLATE_MODEL` (например, `TRANSLATE_PROVIDER=openai`, `TRANSLATE_MODEL=gpt-4o-mini`), чтобы ускорить обработку и снизить стоимость. Переменная `TRANSLATE_LLM` оставлена для обратной совместимости, а `TRANSLATE_LEGACY=True` позволяет вернуться к старому Yandex Translate.
+- Для OpenAI обязательно задайте `OPENAI_API_KEY`. По умолчанию используется модель `gpt-4o-mini`, но вы можете выбрать, например, `gpt-4.1-mini`, `gpt-4o`, `o4-mini`, `gpt-5-mini` или `gpt-5.1`.
+- Семейство `gpt-5.1` (включая `gpt-5.1-mini` и `gpt-5.1-nano`) использует Responses API: бот автоматически отключает temperature/top_p/max_tokens и задаёт `reasoning` + `max_output_tokens` как рекомендует OpenAI Latest Model Guide.
+- Для YandexGPT необходимо оставить заполненными `YANDEX_GPT_API_KEY`, `YANDEX_FOLDER_ID`, `YANDEX_GPT_MODEL`.
+
 ### Получение API ключей
 
 | Сервис | Где получить | Документация |
 |--------|--------------|--------------|
 | Telegram Bot | [@BotFather](https://t.me/BotFather) | [Docs](https://core.telegram.org/bots) |
 | YandexGPT | [Yandex Cloud Console](https://console.yandex.cloud) | [Docs](https://yandex.cloud/ru/docs/yandexgpt) |
+| OpenAI | [platform.openai.com](https://platform.openai.com/account/api-keys) | [Docs](https://platform.openai.com/docs/overview) |
 | TMAPI | [tmapi.top](https://tmapi.top) | [Docs](https://tmapi.top/docs) |
 | Exchange Rate | [exchangerate-api.com](https://www.exchangerate-api.com) | [Docs](https://www.exchangerate-api.com/docs) |
 
