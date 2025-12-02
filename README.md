@@ -198,6 +198,15 @@ TMAPI_NOTIFY_439=False  # Уведомлять об ошибке 439 (недос
 # Конвертация валют
 CONVERT_CURRENCY=False
 
+# Таймауты TMAPI (секунды)
+TMAPI_TIMEOUT=30.0
+
+# Mimi App (мини-приложение Telegram)
+MINI_APP_URL=https://bot.example.com/mini-app
+MINI_APP_HOST=0.0.0.0
+MINI_APP_PORT=8081
+MINI_APP_BASE_PATH=/mini-app
+
 # Playwright для Pinduoduo (рекомендуется для сервера)
 PLAYWRIGHT_USE_MOBILE=True
 PLAYWRIGHT_MOBILE_DEVICE=iPhone 12
@@ -213,6 +222,24 @@ PLAYWRIGHT_PAGE_TIMEOUT_MS=90000
 - Для OpenAI обязательно задайте `OPENAI_API_KEY`. По умолчанию используется модель `gpt-4o-mini`, но вы можете выбрать, например, `gpt-4.1-mini`, `gpt-4o`, `o4-mini`, `gpt-5-mini` или `gpt-5.1`.
 - Семейство `gpt-5.1` (включая `gpt-5.1-mini` и `gpt-5.1-nano`) использует Responses API: бот автоматически отключает temperature/top_p/max_tokens и задаёт `reasoning` + `max_output_tokens` как рекомендует OpenAI Latest Model Guide.
 - Для YandexGPT необходимо оставить заполненными `YANDEX_GPT_API_KEY`, `YANDEX_FOLDER_ID`, `YANDEX_GPT_MODEL`.
+
+Если вы используете **OpenAI Gateway** на зарубежном сервере:
+
+- на российском сервере бота можно указать:
+
+  ```env
+  OPENAI_BASE_URL=https://llm-gw.example.com/v1
+  OPENAI_GATEWAY_TOKEN=super-secret
+  ```
+
+- реальный `OPENAI_API_KEY` хранится только в `.env` шлюза (см. `docs/OPENAI_GATEWAY.md`), а в `.env` бота можно оставить безопасную заглушку (`OPENAI_API_KEY=dummy`).
+
+#### Mimi App
+
+- `MINI_APP_URL` — публичный HTTPS-адрес, который откроет Telegram (например, домен за nginx).
+- `MINI_APP_HOST` и `MINI_APP_PORT` — параметры локального сервера Mimi App. Telegram до них не ходит напрямую, но Docker пробрасывает порт наружу.
+- `MINI_APP_BASE_PATH` — URL-путь (по умолчанию `/mini-app`). Можно переопределить при релизе.
+- Подробная схема и пользовательское руководство: `docs/MINI_APP.md`.
 
 ### Получение API ключей
 

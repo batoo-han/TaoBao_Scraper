@@ -89,7 +89,9 @@ class TmapiClient:
                 # Используем certifi для корректной работы сертификатов
                 verify_ssl = ssl.create_default_context(cafile=certifi.where())
             
-            async with httpx.AsyncClient(verify=verify_ssl) as client:
+            timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+
+            async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout) as client:
                 # POST запрос с JSON телом
                 response = await client.post(self.api_url, json=payload, params=querystring)
                 response.raise_for_status()  # Вызывает исключение для ошибок HTTP статуса
@@ -141,7 +143,9 @@ class TmapiClient:
             else:
                 verify_ssl = ssl.create_default_context(cafile=certifi.where())
             
-            async with httpx.AsyncClient(verify=verify_ssl) as client:
+            timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+
+            async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout) as client:
                 # GET запрос для получения описания
                 response = await client.get(self.item_desc_api_url, params=querystring)
                 

@@ -14,9 +14,13 @@ License: MIT
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
-from src.core.config import settings
+
 from src.bot.error_handler import init_error_handler
 from src.bot.handlers import router
+from src.core.config import settings
+from src.services.admin_settings import AdminSettingsService
+from src.services.user_settings import get_user_settings_service
+from src.webapp.server import MiniAppServer
 
 # Конфигурация базового логирования (детальное логирование в error_handler.py)
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +45,19 @@ async def main():
     bot = Bot(token=settings.BOT_TOKEN)
     # Инициализация диспетчера
     dp = Dispatcher()
+
+    # Сервисы настроек (общие для бота и Mimi App)
+    user_settings_service = get_user_settings_service()
+    admin_settings_service = AdminSettingsService()
+
+    mini_app_server = MiniAppServer(
+        bot_token=settings.BOT_TOKEN,
+        host=getattr(settings, "MINI_APP_HOST", "0.0.0.0"),
+        port=getattr(settings, "MINI_APP_PORT", 8081),
+        base_path=getattr(settings, "MINI_APP_BASE_PATH", "/mini-app"),
+        user_settings_service=user_settings_service,
+        admin_settings_service=admin_settings_service,
+    )
     
     # Инициализация глобального обработчика ошибок
     admin_chat_id = settings.ADMIN_CHAT_ID if settings.ADMIN_CHAT_ID else None
@@ -54,10 +71,12 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Bot started successfully! 🚀")
     try:
+        await mini_app_server.start()
         await dp.start_polling(bot)
     except (asyncio.CancelledError, KeyboardInterrupt):
         logging.info("Остановка бота по запросу пользователя…")
     finally:
+        await mini_app_server.stop()
         # Пытаемся закрыть storage если он есть
         try:
             if hasattr(dp, 'storage') and dp.storage:

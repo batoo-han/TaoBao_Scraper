@@ -150,3 +150,13 @@ class UserSettingsService:
         self._save_settings()
         return settings_obj
 
+
+# Глобальный экземпляр сервиса, чтобы все компоненты (бот и мини-приложение) работали с одними данными
+_DEFAULT_SERVICE = UserSettingsService()
+
+
+def get_user_settings_service() -> UserSettingsService:
+    """
+    Возвращает общий экземпляр сервиса настроек пользователей для повторного использования.
+    """
+    return _DEFAULT_SERVICE

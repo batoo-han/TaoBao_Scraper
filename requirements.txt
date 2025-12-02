@@ -7,6 +7,7 @@ aiogram>=3.0.0  # Асинхронный фреймворк для Telegram бо
 
 # HTTP Client
 httpx>=0.24.0  # Асинхронный HTTP клиент для API запросов
+aiohttp>=3.9.4  # Встроенный веб-сервер для Mimi App
 
 # LLM провайдеры
 openai>=1.55.0  # Клиент для OpenAI API (async)

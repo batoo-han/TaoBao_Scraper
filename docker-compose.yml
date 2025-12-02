@@ -25,6 +25,9 @@ services:
       - TZ=Europe/Moscow
       - PYTHONUNBUFFERED=1
 
+    ports:
+      - "${MINI_APP_PORT:-8081}:${MINI_APP_PORT:-8081}"
+
     # Логирование Docker контейнера
     logging:
       driver: "json-file"

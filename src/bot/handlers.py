@@ -4,7 +4,16 @@ import logging
 import re
 from collections import deque
 from aiogram import Router, F
-from aiogram.types import Message, InputMediaPhoto, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message,
+    InputMediaPhoto,
+    CallbackQuery,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    WebAppInfo,
+)
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile
 from aiogram.fsm.context import FSMContext
@@ -13,9 +22,15 @@ import httpx
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatAction
 
+from src.core.config import settings
 from src.core.scraper import Scraper
 from src.bot.error_handler import error_handler
-from src.services.user_settings import UserSettingsService
+from src.services.user_settings import get_user_settings_service
+from src.services.access_control import (
+    access_control_service,
+    is_admin_user,
+    parse_ids_and_usernames,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +39,20 @@ router = Router()
 # Инициализация скрапера для получения информации о товарах
 scraper = Scraper()
 # Инициализация сервиса настроек пользователей
-user_settings_service = UserSettingsService()
+user_settings_service = get_user_settings_service()
 
 
 class SettingsState(StatesGroup):
     """Состояния для меню настроек"""
     waiting_signature = State()
     waiting_exchange_rate = State()
+
+
+class AccessState(StatesGroup):
+    """Состояния для меню управления доступом (белый/чёрный список)"""
+    choosing_action = State()
+    editing_whitelist = State()
+    editing_blacklist = State()
 
 
 def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -42,14 +64,25 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
-SETTINGS_MENU_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="✍️ Изменить подпись")],
-        [KeyboardButton(text="💱 Валюта"), KeyboardButton(text="ℹ️ Мои настройки")],
-        [KeyboardButton(text="🔙 В главное меню")],
-    ],
-    resize_keyboard=True,
-)
+def build_settings_menu_keyboard() -> ReplyKeyboardMarkup:
+    """
+    Создаёт меню настроек с кнопкой запуска Mimi App, если указана ссылка в настройках.
+    """
+    rows: list[list[KeyboardButton]] = []
+
+    mini_app_url = (getattr(settings, "MINI_APP_URL", "") or "").strip()
+    if mini_app_url:
+        rows.append([KeyboardButton(text="🧩 Mimi App", web_app=WebAppInfo(url=mini_app_url))])
+
+    rows.extend(
+        [
+            [KeyboardButton(text="✍️ Изменить подпись")],
+            [KeyboardButton(text="💱 Валюта"), KeyboardButton(text="ℹ️ Мои настройки")],
+            [KeyboardButton(text="🔙 В главное меню")],
+        ]
+    )
+
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def build_currency_keyboard() -> InlineKeyboardMarkup:
@@ -75,6 +108,36 @@ def format_settings_summary(user_settings) -> str:
         f"• валюта по умолчанию: <b>{currency}</b>\n"
         f"• курс для рубля: {rate_display}"
     ) 
+
+
+async def ensure_access(message: Message) -> bool:
+    """
+    Проверяет, есть ли у пользователя доступ к боту.
+    Администраторы всегда имеют доступ.
+    При отказе отправляет пользователю понятное сообщение.
+    """
+    user = message.from_user
+    user_id = user.id
+    username = user.username or ""
+
+    # Админы всегда имеют доступ, независимо от списков
+    if is_admin_user(user_id, username):
+        return True
+
+    allowed, reason = access_control_service.is_allowed(user_id, username)
+    if allowed:
+        return True
+
+    support_nick = (getattr(settings, "ACCESS_SUPPORT_USERNAME", "") or "").lstrip("@")
+    support_suffix = f" @{support_nick}" if support_nick else ""
+
+    text = (
+        "⛔ Доступ к этому боту ограничен.\n\n"
+        f"{reason or 'Вы сейчас не можете пользоваться ботом.'}\n\n"
+        f"Если вы считаете, что это ошибка, обратитесь к администратору{support_suffix}."
+    )
+    await message.answer(text)
+    return False
 
 
 MAX_TEXT_CHUNK = 2000
@@ -341,9 +404,11 @@ async def command_start_handler(message: Message, state: FSMContext) -> None:
     Обработчик команды /start.
     Отправляет приветственное сообщение пользователю.
     """
+    if not await ensure_access(message):
+        return
     await state.clear()
     await message.answer(
-        f"Привет, {message.from_user.full_name}! Отправь мне ссылку на товар с Taobao, Tmall или Pinduoduo.",
+        f"Привет, {message.from_user.full_name}! Отправь мне ссылку на товар с Taobao.",
         reply_markup=build_main_menu_keyboard()
     )
 
@@ -352,10 +417,10 @@ async def open_settings_menu(message: Message, state: FSMContext) -> None:
     """Обработчик кнопки настроек"""
     await state.clear()
     user_id = message.from_user.id
-    user_settings = user_settings_service.get_settings(user_id)
+    user_settings_service.get_settings(user_id)
     await message.answer(
         "⚙️ <b>Настройки</b>\n\nВыберите действие:",
-        reply_markup=SETTINGS_MENU_KEYBOARD,
+        reply_markup=build_settings_menu_keyboard(),
         parse_mode="HTML"
     )
 
@@ -363,6 +428,8 @@ async def open_settings_menu(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "🔙 В главное меню")
 async def back_to_main_menu(message: Message, state: FSMContext) -> None:
     """Обработчик возврата в главное меню"""
+    if not await ensure_access(message):
+        return
     await state.clear()
     await message.answer(
         "Вы вернулись в главное меню.",
@@ -373,6 +440,8 @@ async def back_to_main_menu(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "✍️ Изменить подпись")
 async def ask_for_signature(message: Message, state: FSMContext) -> None:
     """Запрашивает новую подпись у пользователя"""
+    if not await ensure_access(message):
+        return
     await state.set_state(SettingsState.waiting_signature)
     await message.answer(
         "Введите новую подпись (например @username или номер телефона)."
@@ -393,7 +462,7 @@ async def update_signature(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         f"✅ Подпись обновлена: <code>{new_signature}</code>",
-        reply_markup=SETTINGS_MENU_KEYBOARD,
+        reply_markup=build_settings_menu_keyboard(),
         parse_mode="HTML"
     )
 
@@ -401,6 +470,8 @@ async def update_signature(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "💱 Валюта")
 async def choose_currency(message: Message, state: FSMContext) -> None:
     """Показывает выбор валюты"""
+    if not await ensure_access(message):
+        return
     await state.clear()
     await message.answer(
         "Выберите валюту по умолчанию:",
@@ -419,7 +490,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         await callback.message.edit_reply_markup()
         await callback.message.answer(
             "Настройки не изменены.",
-            reply_markup=SETTINGS_MENU_KEYBOARD,
+            reply_markup=build_settings_menu_keyboard(),
         )
         return
 
@@ -432,7 +503,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         await callback.message.edit_reply_markup()
         await callback.message.answer(
             "✅ Валюта по умолчанию: юань. Конвертация отключена.",
-            reply_markup=SETTINGS_MENU_KEYBOARD,
+            reply_markup=build_settings_menu_keyboard(),
         )
     elif choice == "rub":
         user_settings = user_settings_service.update_currency(user_id, "rub")
@@ -447,7 +518,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         else:
             await callback.message.answer(
                 f"✅ Валюта по умолчанию: рубль. Текущий курс: {float(user_settings.exchange_rate):.4f} ₽ за 1 ¥.",
-                reply_markup=SETTINGS_MENU_KEYBOARD,
+                reply_markup=build_settings_menu_keyboard(),
             )
     else:
         await callback.answer("Неизвестный выбор", show_alert=True)
@@ -471,22 +542,175 @@ async def set_exchange_rate(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         f"✅ Курс обновлён: 1 ¥ = {rate:.4f} ₽.",
-        reply_markup=SETTINGS_MENU_KEYBOARD,
+        reply_markup=build_settings_menu_keyboard(),
     )
 
 
 @router.message(F.text == "ℹ️ Мои настройки")
 async def show_settings(message: Message, state: FSMContext) -> None:
     """Показывает текущие настройки пользователя"""
+    if not await ensure_access(message):
+        return
     await state.clear()
     user_id = message.from_user.id
     user_settings = user_settings_service.get_settings(user_id)
     summary = format_settings_summary(user_settings)
     await message.answer(
         summary,
-        reply_markup=SETTINGS_MENU_KEYBOARD,
+        reply_markup=build_settings_menu_keyboard(),
         parse_mode="HTML"
     )
+
+
+@router.message(Command("access"))
+async def access_menu_entry(message: Message, state: FSMContext) -> None:
+    """
+    Точка входа в меню управления доступом.
+    Доступно только для админов (ADMIN_CHAT_ID и ADMIN_GROUP_BOT).
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        return
+
+    await state.set_state(AccessState.choosing_action)
+    summary = access_control_service.get_summary()
+    help_text = (
+        "🔐 <b>Управление доступом к боту</b>\n\n"
+        f"{summary}\n\n"
+        "Доступные команды:\n"
+        "• <code>white on</code> / <code>white off</code> — включить/выключить белый список\n"
+        "• <code>black on</code> / <code>black off</code> — включить/выключить чёрный список\n"
+        "• <code>add white</code> — добавить пользователей в белый список\n"
+        "• <code>add black</code> — добавить пользователей в чёрный список\n"
+        "• <code>del white</code> — удалить пользователей из белого списка\n"
+        "• <code>del black</code> — удалить пользователей из чёрного списка\n"
+        "• <code>show</code> — показать текущие списки\n\n"
+        "После команды <code>add ...</code> или <code>del ...</code> бот попросит ввести "
+        "ID и username через запятую, например:\n"
+        "<code>123456, @user1, 987654321, user2</code>"
+    )
+    await message.answer(help_text, parse_mode="HTML")
+
+
+@router.message(AccessState.choosing_action)
+async def access_choose_action(message: Message, state: FSMContext) -> None:
+    """
+    Обрабатывает базовые команды управления списками в состоянии выбора действия.
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+
+    raw = (message.text or "").strip().lower()
+
+    if raw in {"white on", "white off", "black on", "black off"}:
+        enable = raw.endswith("on")
+        if raw.startswith("white"):
+            access_control_service.set_whitelist_enabled(enable)
+            await message.answer(
+                f"✅ Белый список {'включён' if enable else 'выключен'}.",
+                parse_mode="HTML",
+            )
+        else:
+            access_control_service.set_blacklist_enabled(enable)
+            await message.answer(
+                f"✅ Чёрный список {'включён' if enable else 'выключен'}.",
+                parse_mode="HTML",
+            )
+        # остаёмся в режиме выбора действия
+        summary = access_control_service.get_summary()
+        await message.answer(summary)
+        return
+
+    if raw == "show":
+        dump = access_control_service.dump_lists()
+        await message.answer(dump, parse_mode="HTML")
+        return
+
+    if raw in {"add white", "add black"}:
+        await state.update_data(mode=raw.replace("add ", ""), op="add")
+        await state.set_state(AccessState.editing_whitelist if "white" in raw else AccessState.editing_blacklist)
+        await message.answer(
+            "Отправьте список пользователей для добавления в формате:\n"
+            "<code>123456, @user1, 987654321, user2</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if raw in {"del white", "del white ", "del black", "del black "}:
+        await state.update_data(mode=raw.replace("del ", "").strip(), op="del")
+        await state.set_state(AccessState.editing_whitelist if "white" in raw else AccessState.editing_blacklist)
+        await message.answer(
+            "Отправьте список пользователей для удаления в формате:\n"
+            "<code>123456, @user1, 987654321, user2</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    await message.answer(
+        "Неизвестная команда. Используйте:\n"
+        "<code>white on</code>, <code>white off</code>, <code>black on</code>, <code>black off</code>,\n"
+        "<code>add white</code>, <code>add black</code>, <code>del white</code>, <code>del black</code>,\n"
+        "или <code>show</code>.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(AccessState.editing_whitelist)
+async def access_edit_whitelist(message: Message, state: FSMContext) -> None:
+    """
+    Добавление/удаление пользователей из белого списка.
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    op = data.get("op", "add")
+
+    ids, names = parse_ids_and_usernames(message.text or "")
+    if not ids and not names:
+        await message.answer("Не удалось распознать ни один ID или username. Попробуйте ещё раз.")
+        return
+
+    if op == "add":
+        access_control_service.add_to_whitelist(ids, names)
+        await message.answer("✅ Пользователи добавлены в белый список.")
+    else:
+        access_control_service.remove_from_whitelist(ids, names)
+        await message.answer("✅ Пользователи удалены из белого списка (если были).")
+
+    await state.set_state(AccessState.choosing_action)
+    summary = access_control_service.get_summary()
+    await message.answer(summary)
+
+
+@router.message(AccessState.editing_blacklist)
+async def access_edit_blacklist(message: Message, state: FSMContext) -> None:
+    """
+    Добавление/удаление пользователей из чёрного списка.
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    op = data.get("op", "add")
+
+    ids, names = parse_ids_and_usernames(message.text or "")
+    if not ids and not names:
+        await message.answer("Не удалось распознать ни один ID или username. Попробуйте ещё раз.")
+        return
+
+    if op == "add":
+        access_control_service.add_to_blacklist(ids, names)
+        await message.answer("✅ Пользователи добавлены в чёрный список.")
+    else:
+        access_control_service.remove_from_blacklist(ids, names)
+        await message.answer("✅ Пользователи удалены из чёрного списка (если были).")
+
+    await state.set_state(AccessState.choosing_action)
+    summary = access_control_service.get_summary()
+    await message.answer(summary)
 
 
 @router.message(F.text.regexp(r"(https?://)?(www\.)?(m\.)?(e\.)?(detail\.tmall\.com|item\.taobao\.com|a\.m\.taobao\.com|market\.m\.taobao\.com|h5\.m\.taobao\.com|s\.click\.taobao\.com|uland\.taobao\.com|tb\.cn|mobile\.yangkeduo\.com|yangkeduo\.com|pinduoduo\.com|pdd\.com)/.*"))
@@ -496,6 +720,10 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     Автоматически определяет платформу, извлекает информацию о товаре,
     генерирует пост и отправляет его пользователю.
     """
+    # Проверяем право доступа
+    if not await ensure_access(message):
+        return
+
     # Отправляем начальное сообщение
     await message.answer("Обрабатываю вашу ссылку, пожалуйста, подождите...")
     
@@ -510,7 +738,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     if current_state:
         await message.answer(
             "Сначала завершите настройку, затем отправьте ссылку.",
-            reply_markup=SETTINGS_MENU_KEYBOARD,
+            reply_markup=build_settings_menu_keyboard(),
         )
         return
 
@@ -524,7 +752,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     if user_settings.default_currency.lower() == "rub" and not user_settings.exchange_rate:
         await message.answer(
             "⚠️ Сначала укажите курс рубля в настройках.",
-            reply_markup=SETTINGS_MENU_KEYBOARD,
+            reply_markup=build_settings_menu_keyboard(),
         )
         return
     
@@ -578,23 +806,27 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     except Exception as e:
         # Логируем ошибку перед обработкой
         logger.error(f"Ошибка при обработке ссылки {product_url}: {e}", exc_info=True)
-        # Профессиональная обработка ошибок
-        if error_handler:
-            # Определяем тип ошибки и контекст
-            error_type = error_handler.classify_error(e, context=f"scraping {product_url}")
-            await error_handler.handle_error(
-                error=e,
-                user_message=message,
-                context=f"Product URL: {product_url}",
-                error_type=error_type
-            )
-        else:
-            # Fallback на случай если error_handler не инициализирован
-            logger.warning("error_handler не инициализирован, используем fallback")
-            await message.answer(
-                "😔 Извините, произошла ошибка при обработке вашего запроса. "
-                "Пожалуйста, попробуйте повторить через несколько минут."
-            )
+        # Профессиональная обработка ошибок (с защитой на случай, если error_handler ещё не успел инициализироваться)
+        try:
+            if error_handler is not None:
+                # Определяем тип ошибки и контекст
+                error_type = error_handler.classify_error(e, context=f"scraping {product_url}")
+                await error_handler.handle_error(
+                    error=e,
+                    user_message=message,
+                    context=f"Product URL: {product_url}",
+                    error_type=error_type,
+                )
+                return
+        except Exception as handler_exc:  # защита от падения внутри самого обработчика
+            logger.error(f"Ошибка внутри error_handler: {handler_exc}", exc_info=True)
+
+        # Fallback на случай если error_handler не инициализирован или сломался
+        logger.warning("error_handler недоступен, используем fallback-поведение")
+        await message.answer(
+            "😔 Извините, произошла ошибка при обработке вашего запроса. "
+            "Пожалуйста, попробуйте повторить через несколько минут."
+        )
     finally:
         # Останавливаем индикатор "печатает"
         stop_typing.set()
@@ -609,6 +841,8 @@ async def echo_message(message: Message, state: FSMContext):
     """
     Обработчик для всех остальных сообщений, которые не были обработаны другими хэндлерами.
     """
+    if not await ensure_access(message):
+        return
     await state.clear()
     await message.answer(
         "Пожалуйста, отправьте мне ссылку на товар Taobao/Tmall или используйте команду /start.",

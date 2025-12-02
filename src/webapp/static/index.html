@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mimi App — Настройки бота</title>
+    <link rel="stylesheet" href="assets/styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="header">
+        <h1>Mimi App</h1>
+        <p>Управление настройками Telegram-бота</p>
+      </header>
+
+      <div id="status" class="status hidden"></div>
+
+      <div id="loader" class="loader">Загружаем данные…</div>
+
+      <div id="content" class="hidden">
+        <section class="card">
+          <h2>Личные настройки</h2>
+          <form id="user-form">
+            <label for="signature">Подпись под постом</label>
+            <input id="signature" type="text" maxlength="64" placeholder="@annabbox" />
+
+            <label for="currency">Предпочитаемая валюта</label>
+            <select id="currency">
+              <option value="cny">Юань (CNY)</option>
+              <option value="rub">Рубль (RUB)</option>
+            </select>
+
+            <label for="exchange-rate">Курс для пересчёта (₽ за 1 ¥)</label>
+            <input id="exchange-rate" type="number" min="0" step="0.0001" placeholder="12.4500" />
+
+            <button type="submit">Сохранить</button>
+          </form>
+        </section>
+
+        <section id="admin-card" class="card hidden">
+          <h2>Админ-панель Mimi App</h2>
+
+          <form id="llm-form">
+            <h3>Провайдеры и модели</h3>
+            <label for="default-llm">Провайдер по умолчанию</label>
+            <select id="default-llm">
+              <option value="yandex">YandexGPT</option>
+              <option value="openai">OpenAI</option>
+            </select>
+
+            <label for="yandex-model">Модель YandexGPT</label>
+            <input id="yandex-model" type="text" placeholder="yandexgpt-lite" />
+
+            <label for="openai-model">Модель OpenAI</label>
+            <input id="openai-model" type="text" placeholder="gpt-4o-mini" />
+
+            <label for="translate-provider">Провайдер для переводов</label>
+            <select id="translate-provider">
+              <option value="yandex">YandexGPT</option>
+              <option value="openai">OpenAI</option>
+            </select>
+
+            <label for="translate-model">Модель для переводов/SKU</label>
+            <input id="translate-model" type="text" placeholder="облегчённая модель" />
+
+            <div class="switch">
+              <input type="checkbox" id="translate-legacy" />
+              <label for="translate-legacy">Использовать legacy-переводчик (Yandex Translate)</label>
+            </div>
+
+            <button type="submit">Сохранить LLM блок</button>
+          </form>
+
+          <form id="flags-form">
+            <h3>Опции работы бота</h3>
+            <div class="switch-group">
+              <label class="switch">
+                <input type="checkbox" id="convert-currency" />
+                <span>Конвертировать цены в рубли</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" id="tmapi-notify" />
+                <span>Уведомлять об ошибке TMAPI 439</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" id="debug-mode" />
+                <span>Включить DEBUG-логи</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" id="mock-mode" />
+                <span>Включить MOCK-режим</span>
+              </label>
+            </div>
+
+            <button type="submit">Сохранить опции</button>
+          </form>
+
+          <section id="access-card" class="card hidden">
+            <h3>Доступ к боту</h3>
+            <p id="access-summary" class="access-summary"></p>
+            <div id="access-details" class="access-details"></div>
+
+            <form id="access-form">
+              <h4>Режимы списков</h4>
+              <div class="switch-group">
+                <label class="switch">
+                  <input type="checkbox" id="whitelist-enabled" />
+                  <span>Включить белый список (доступ только по списку)</span>
+                </label>
+                <label class="switch">
+                  <input type="checkbox" id="blacklist-enabled" />
+                  <span>Включить чёрный список (запрет только по списку)</span>
+                </label>
+              </div>
+
+              <h4>Белый список</h4>
+              <label for="add-whitelist">Добавить (ID/username через запятую)</label>
+              <input
+                id="add-whitelist"
+                type="text"
+                placeholder="123456, @user1, 987654321, user2"
+              />
+
+              <label for="remove-whitelist">Удалить (ID/username через запятую)</label>
+              <input
+                id="remove-whitelist"
+                type="text"
+                placeholder="123456, @user1"
+              />
+
+              <h4>Чёрный список</h4>
+              <label for="add-blacklist">Добавить (ID/username через запятую)</label>
+              <input
+                id="add-blacklist"
+                type="text"
+                placeholder="123456, @user1, 987654321, user2"
+              />
+
+              <label for="remove-blacklist">Удалить (ID/username через запятую)</label>
+              <input
+                id="remove-blacklist"
+                type="text"
+                placeholder="123456, @user1"
+              />
+
+              <button type="submit">Сохранить правила доступа</button>
+            </form>
+          </section>
+        </section>
+      </div>
+    </div>
+
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>
+

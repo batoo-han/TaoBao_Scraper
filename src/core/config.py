@@ -28,10 +28,12 @@ class Settings(BaseSettings):
         TMAPI_RATE_LIMIT (int): Максимальное количество запросов к TMAPI в секунду
         YANDEX_GPT_API_KEY (str): API ключ YandexGPT
         OPENAI_API_KEY (str): API ключ OpenAI для альтернативного провайдера
+        OPENAI_BASE_URL (str): Базовый URL для OpenAI или кастомного шлюза
         YANDEX_FOLDER_ID (str): ID каталога Yandex Cloud
         EXCHANGE_RATE_API_KEY (str): API ключ для конвертации валют
         GOOGLE_CLOUD_PROJECT (str): Google Cloud Project ID (не используется)
         ADMIN_CHAT_ID (str): Telegram Chat ID админа для уведомлений об ошибках
+        ADMIN_GROUP_BOT (str): Дополнительные админские Telegram ID через запятую
         YANDEX_GPT_MODEL (str): Модель YandexGPT (yandexgpt-lite или yandexgpt)
         OPENAI_MODEL (str): Основная модель OpenAI (например, gpt-4o-mini)
         DEFAULT_LLM (str): Имя провайдера LLM (yandex или openai)
@@ -44,16 +46,19 @@ class Settings(BaseSettings):
         DEBUG_MODE (bool): Режим отладки с подробными логами
         MOCK_MODE (bool): Mock режим для тестирования без API
         DISABLE_SSL_VERIFY (bool): Отключить проверку SSL (не рекомендуется)
+        TMAPI_TIMEOUT (float): Таймаут HTTP-запросов к TMAPI в секундах
     """
     BOT_TOKEN: str  # Токен Telegram бота
     TMAPI_TOKEN: str  # API ключ для tmapi.top (Taobao/Tmall)
     TMAPI_PINDUODUO_TOKEN: str = ""  # Не используется (Pinduoduo через веб-скрапинг)
     YANDEX_GPT_API_KEY: str  # API ключ для YandexGPT
     EXCHANGE_RATE_API_KEY: str  # API ключ для ExchangeRate-API
-    OPENAI_API_KEY: str = ""  # API ключ для OpenAI (опционален)
+    OPENAI_API_KEY: str = ""  # API ключ для OpenAI (опционален, может быть dummy при использовании шлюза)
+    OPENAI_BASE_URL: str = ""  # Кастомный base URL (например, https://llm-gw.example.com/v1)
     YANDEX_FOLDER_ID: str # ID каталога в Yandex.Cloud
     GOOGLE_CLOUD_PROJECT: str = ""  # ID проекта Google Cloud (не используется, оставлено для совместимости)
     ADMIN_CHAT_ID: str = ""  # ID чата администратора для уведомлений об ошибках (необязательно)
+    ADMIN_GROUP_BOT: str = ""  # Дополнительные админы бота (список Telegram ID через запятую)
     TMAPI_BILLING_CHAT_ID: str = ""  # ID чата ответственного за оплату TMAPI для уведомлений об ошибке 439 (необязательно)
     YANDEX_GPT_MODEL: str = "yandexgpt-lite"  # Модель YandexGPT для использования
     OPENAI_MODEL: str = "gpt-4o-mini"  # Модель OpenAI по умолчанию
@@ -90,6 +95,18 @@ class Settings(BaseSettings):
     PLAYWRIGHT_TIMEZONE: str = "Asia/Shanghai"  # Таймзона для мобильного профиля
     # Debug вспомогательные опции для Playwright
     PLAYWRIGHT_KEEP_BROWSER_OPEN: bool = False  # Не закрывать браузер в DEBUG_MODE
+
+    # Таймауты внешних API
+    TMAPI_TIMEOUT: float = 30.0  # Таймаут запросов к TMAPI (секунды)
+
+    # Mimi App
+    MINI_APP_URL: str = ""  # Публичная ссылка на Mimi App для кнопки в Telegram
+    MINI_APP_HOST: str = "0.0.0.0"  # Хост локального сервера Mimi App
+    MINI_APP_PORT: int = 8081  # Порт сервера Mimi App
+    MINI_APP_BASE_PATH: str = "/mini-app"  # URL-путь Mimi App (используется и для статических файлов)
+
+    # Сообщения по доступу к боту
+    ACCESS_SUPPORT_USERNAME: str = ""  # Ник в Telegram (без @), к которому можно обратиться по поводу доступа
 
     model_config = SettingsConfigDict(
         env_file=".env",

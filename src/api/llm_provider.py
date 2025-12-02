@@ -82,3 +82,16 @@ def get_translation_client():
     """
     return _build_translation_client()
 
+
+def reset_llm_cache() -> None:
+    """
+    Сбрасывает кэши клиентов LLM, чтобы подхватить новые настройки во время работы бота.
+    """
+    _build_client.cache_clear()
+
+
+def reset_translation_cache() -> None:
+    """
+    Сбрасывает кэш переводческого клиента после переключения провайдера или модели.
+    """
+    _build_translation_client.cache_clear()

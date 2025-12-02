@@ -1,0 +1,13 @@
+{
+  "whitelist_enabled": true,
+  "blacklist_enabled": false,
+  "whitelist_ids": [
+    6623120824,
+    7796502257
+  ],
+  "whitelist_usernames": [
+    "batoohan"
+  ],
+  "blacklist_ids": [],
+  "blacklist_usernames": []
+}

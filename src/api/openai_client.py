@@ -34,7 +34,19 @@ class OpenAIClient:
         model_raw = source_model.strip()
         self.model = model_raw or "gpt-4o-mini"
         self.use_responses_api = self._requires_responses_api(self.model)
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+        # Поддержка внешнего шлюза (OpenAI Gateway)
+        base_url = (getattr(settings, "OPENAI_BASE_URL", "") or "").strip() or None
+        extra_headers: dict[str, str] = {}
+        gateway_token = (getattr(settings, "OPENAI_GATEWAY_TOKEN", "") or "").strip()
+        if gateway_token:
+            extra_headers["X-Gateway-Token"] = gateway_token
+
+        self.client = AsyncOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            base_url=base_url,
+            default_headers=extra_headers or None,
+        )
         self.supports_temperature = not self.use_responses_api
         self.supports_max_tokens = not self.use_responses_api
 
@@ -111,7 +123,8 @@ class OpenAIClient:
         system_prompt: str | None = None,
         expect_json: bool = True,
         max_tokens: int | None = None,
-        temperature: float | None = None
+        temperature: float | None = None,
+        model_override: str | None = None,
     ) -> str:
         """
         Вызов Chat Completions API (gpt-4o, gpt-4o-mini, gpt-4.1-mini и т.п.).
@@ -120,8 +133,9 @@ class OpenAIClient:
             {"role": "system", "content": system_prompt or self.SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
+        model_name = model_override or self.model
         kwargs = {
-            "model": self.model,
+            "model": model_name,
             "messages": messages,
         }
         if expect_json:
@@ -195,10 +209,17 @@ class OpenAIClient:
         )
 
         if self.use_responses_api:
-            translated = await self._call_responses_api(
+            # ВАЖНО: для простого перевода нам не нужны reasoning‑модели.
+            # Responses API (семейство gpt‑5.x) иногда тратит все токены на рассуждения
+            # и помечает ответ как `status=incomplete, reason=max_output_tokens` без текста.
+            # Поэтому для перевода всегда используем лёгкую chat‑модель.
+            translated = await self._call_chat_completions(
                 user_prompt,
                 system_prompt="Ты профессиональный переводчик.",
-                max_output_tokens=self.RESPONSES_TRANSLATE_TOKENS
+                expect_json=False,
+                max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
+                temperature=0.1,
+                model_override="gpt-4o-mini",
             )
         else:
             translated = await self._call_chat_completions(
@@ -206,7 +227,7 @@ class OpenAIClient:
                 system_prompt="Ты профессиональный переводчик.",
                 expect_json=False,
                 max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
-                temperature=0.1
+                temperature=0.1,
             )
 
         return translated.strip() or text
