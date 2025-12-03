@@ -10,8 +10,9 @@ from src.core.config import settings
 from src.api.yandex_gpt import YandexGPTClient
 from src.api.yandex_translate import YandexTranslateClient
 from src.api.openai_client import OpenAIClient
+from src.api.proxyapi_client import ProxyAPIClient
 
-ProviderName = Literal["yandex", "openai"]
+ProviderName = Literal["yandex", "openai", "proxyapi"]
 
 
 def _normalize_provider(provider_raw: str | None) -> ProviderName:
@@ -19,7 +20,7 @@ def _normalize_provider(provider_raw: str | None) -> ProviderName:
     Приводит значение DEFAULT_LLM к поддерживаемому виду.
     """
     provider = (provider_raw or "yandex").strip().lower()
-    if provider not in {"yandex", "openai"}:
+    if provider not in {"yandex", "openai", "proxyapi"}:
         if settings.DEBUG_MODE:
             print(f"[LLM] Неизвестный провайдер '{provider}'. Используем YandexGPT.")
         provider = "yandex"
@@ -35,6 +36,8 @@ def _build_client():
 
     if provider == "openai":
         return OpenAIClient()
+    if provider == "proxyapi":
+        return ProxyAPIClient()
     return YandexGPTClient()
 
 
@@ -65,6 +68,9 @@ def _build_translation_client():
             or ""
         ).strip()
         return OpenAIClient(model_name=model_name or None)
+    if provider == "proxyapi":
+        model_name = (settings.TRANSLATE_MODEL or settings.OPENAI_MODEL or "").strip()
+        return ProxyAPIClient(model_name=model_name or None)
 
     # Yandex-провайдер по умолчанию использует YandexGPT; при необходимости можно
     # переключиться на старый переводчик через TRANSLATE_LEGACY=1 (см. ниже).

@@ -24,7 +24,7 @@ from aiogram.enums import ChatAction
 
 from src.core.config import settings
 from src.core.scraper import Scraper
-from src.bot.error_handler import error_handler
+from src.bot import error_handler as error_handler_module
 from src.services.user_settings import get_user_settings_service
 from src.services.access_control import (
     access_control_service,
@@ -808,10 +808,11 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         logger.error(f"Ошибка при обработке ссылки {product_url}: {e}", exc_info=True)
         # Профессиональная обработка ошибок (с защитой на случай, если error_handler ещё не успел инициализироваться)
         try:
-            if error_handler is not None:
+            handler = getattr(error_handler_module, "error_handler", None)
+            if handler is not None:
                 # Определяем тип ошибки и контекст
-                error_type = error_handler.classify_error(e, context=f"scraping {product_url}")
-                await error_handler.handle_error(
+                error_type = handler.classify_error(e, context=f"scraping {product_url}")
+                await handler.handle_error(
                     error=e,
                     user_message=message,
                     context=f"Product URL: {product_url}",

@@ -157,7 +157,12 @@ YANDEX_GPT_MODEL=yandexgpt-lite
 OPENAI_API_KEY=your_openai_key
 OPENAI_MODEL=gpt-4o-mini
 
-# Переключение провайдера (yandex или openai)
+# ProxyAPI (опционально, OpenAI-совместимый провайдер для РФ)
+PROXYAPI_API_KEY=your_proxyapi_key
+# Можно оставить по умолчанию:
+# PROXYAPI_BASE_URL=https://api.proxyapi.ru/openai/v1
+
+# Переключение провайдера (yandex, openai или proxyapi)
 DEFAULT_LLM=yandex
 
 # Отдельный провайдер для переводов и обработки цен
@@ -217,8 +222,11 @@ PLAYWRIGHT_PAGE_TIMEOUT_MS=90000
 
 #### Переключение провайдера LLM
 
-- `DEFAULT_LLM` — основной переключатель. Значение `yandex` использует YandexGPT, `openai` активирует OpenAIClient для генерации описаний.
-- `TRANSLATE_PROVIDER` — провайдер для переводов, агрегации SKU и любых подготовительных задач (значение `yandex` или `openai`). Можно выставить отдельную модель через `TRANSLATE_MODEL` (например, `TRANSLATE_PROVIDER=openai`, `TRANSLATE_MODEL=gpt-4o-mini`), чтобы ускорить обработку и снизить стоимость. Переменная `TRANSLATE_LLM` оставлена для обратной совместимости, а `TRANSLATE_LEGACY=True` позволяет вернуться к старому Yandex Translate.
+- `DEFAULT_LLM` — основной переключатель. Значение:
+  - `yandex` — используется YandexGPT;
+  - `openai` — используется прямой клиент OpenAI;
+  - `proxyapi` — используется OpenAI-совместимый клиент через ProxyAPI (`https://api.proxyapi.ru/openai/v1`).
+- `TRANSLATE_PROVIDER` — провайдер для переводов, агрегации SKU и любых подготовительных задач (значение `yandex`, `openai` или `proxyapi`). Можно выставить отдельную модель через `TRANSLATE_MODEL` (например, `TRANSLATE_PROVIDER=openai`, `TRANSLATE_MODEL=gpt-4o-mini`), чтобы ускорить обработку и снизить стоимость. Переменная `TRANSLATE_LLM` оставлена для обратной совместимости, а `TRANSLATE_LEGACY=True` позволяет вернуться к старому Yandex Translate.
 - Для OpenAI обязательно задайте `OPENAI_API_KEY`. По умолчанию используется модель `gpt-4o-mini`, но вы можете выбрать, например, `gpt-4.1-mini`, `gpt-4o`, `o4-mini`, `gpt-5-mini` или `gpt-5.1`.
 - Семейство `gpt-5.1` (включая `gpt-5.1-mini` и `gpt-5.1-nano`) использует Responses API: бот автоматически отключает temperature/top_p/max_tokens и задаёт `reasoning` + `max_output_tokens` как рекомендует OpenAI Latest Model Guide.
 - Для YandexGPT необходимо оставить заполненными `YANDEX_GPT_API_KEY`, `YANDEX_FOLDER_ID`, `YANDEX_GPT_MODEL`.

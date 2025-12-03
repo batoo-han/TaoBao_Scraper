@@ -18,9 +18,10 @@ from src.core.config import settings
 def _normalize_provider(raw: str | None) -> str:
     """
     Приводит название провайдера к допустимому виду.
+    Допустимые значения: yandex, openai, proxyapi.
     """
     value = (raw or "yandex").strip().lower()
-    return value if value in {"yandex", "openai"} else "yandex"
+    return value if value in {"yandex", "openai", "proxyapi"} else "yandex"
 
 
 @dataclass

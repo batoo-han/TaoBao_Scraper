@@ -29,6 +29,8 @@ class Settings(BaseSettings):
         YANDEX_GPT_API_KEY (str): API ключ YandexGPT
         OPENAI_API_KEY (str): API ключ OpenAI для альтернативного провайдера
         OPENAI_BASE_URL (str): Базовый URL для OpenAI или кастомного шлюза
+        PROXYAPI_API_KEY (str): API ключ ProxyAPI (openai-совместимый провайдер)
+        PROXYAPI_BASE_URL (str): Базовый URL OpenAI-совместимого API ProxyAPI
         YANDEX_FOLDER_ID (str): ID каталога Yandex Cloud
         EXCHANGE_RATE_API_KEY (str): API ключ для конвертации валют
         GOOGLE_CLOUD_PROJECT (str): Google Cloud Project ID (не используется)
@@ -55,6 +57,8 @@ class Settings(BaseSettings):
     EXCHANGE_RATE_API_KEY: str  # API ключ для ExchangeRate-API
     OPENAI_API_KEY: str = ""  # API ключ для OpenAI (опционален, может быть dummy при использовании шлюза)
     OPENAI_BASE_URL: str = ""  # Кастомный base URL (например, https://llm-gw.example.com/v1)
+    PROXYAPI_API_KEY: str = ""  # API ключ ProxyAPI (https://proxyapi.ru)
+    PROXYAPI_BASE_URL: str = "https://api.proxyapi.ru/openai/v1"  # OpenAI-совместимый endpoint ProxyAPI
     YANDEX_FOLDER_ID: str # ID каталога в Yandex.Cloud
     GOOGLE_CLOUD_PROJECT: str = ""  # ID проекта Google Cloud (не используется, оставлено для совместимости)
     ADMIN_CHAT_ID: str = ""  # ID чата администратора для уведомлений об ошибках (необязательно)

@@ -7,6 +7,7 @@ from collections import Counter, OrderedDict, defaultdict
 from src.api.tmapi import TmapiClient
 from src.api.llm_provider import get_llm_client, get_translation_client
 from src.api.exchange_rate import ExchangeRateClient
+from src.api.proxyapi_client import ProxyAPIClient
 from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
 from src.scrapers.pinduoduo_web import PinduoduoWebScraper
@@ -52,7 +53,12 @@ class Scraper:
         self.llm_client = get_llm_client()  # Унифицированный LLM клиент (YandexGPT или OpenAI)
         self.exchange_rate_client = ExchangeRateClient()  # Клиент для ExchangeRate-API
         self.translation_client = get_translation_client()  # Отдельный LLM для переводов/предобработки цен
-        self.translation_supports_structured = hasattr(self.translation_client, "generate_json_response")
+        # Для ProxyAPI отключаем режим структурированных (JSON) батч-переводов, чтобы не тратить лишний бюджет
+        # и не получать нестабильные ответы через прокси.
+        if isinstance(self.translation_client, ProxyAPIClient):
+            self.translation_supports_structured = False
+        else:
+            self.translation_supports_structured = hasattr(self.translation_client, "generate_json_response")
 
     async def scrape_product(
         self, 
@@ -1350,6 +1356,23 @@ class Scraper:
         return labels
 
     def _translation_supports_structured_tasks(self) -> bool:
+        """
+        Проверяет, поддерживает ли активный переводческий провайдер
+        сложные JSON-задачи (перевод и агрегация цен через LLM).
+
+        Для ProxyAPI мы сознательно отключаем этот режим, чтобы:
+        - избежать цепочек медленных запросов при работе с моделями gpt-5.x;
+        - использовать ProxyAPI только как быстрый переводчик через chat.completions.
+        """
+        try:
+            from src.api.proxyapi_client import ProxyAPIClient  # локальный импорт, чтобы избежать циклов
+
+            if isinstance(self.translation_client, ProxyAPIClient):
+                return False
+        except Exception:
+            # если по какой-то причине импорт не удался, не ломаемся
+            pass
+
         return hasattr(self.translation_client, "generate_json_response")
 
     def _parse_json_response(self, text: str):
