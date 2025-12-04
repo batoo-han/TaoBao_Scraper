@@ -24,7 +24,7 @@ from aiogram.enums import ChatAction
 
 from src.core.config import settings
 from src.core.scraper import Scraper
-from src.bot import error_handler as error_handler_module
+import src.bot.error_handler as error_handler_module
 from src.services.user_settings import get_user_settings_service
 from src.services.access_control import (
     access_control_service,
