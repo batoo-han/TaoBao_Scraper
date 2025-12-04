@@ -131,11 +131,11 @@ class AccessControlService:
 
         # Если включён белый список, но пользователь не найден в белом — запрещаем
         if cfg.whitelist_enabled and not in_white:
-            return False, "Ваш аккаунт не добавлен в белый список."
+            return False, "Вашему аккаунту не предоставлен доступ."
 
         # Если включён чёрный список и пользователь в нём — запрещаем (приоритет выше)
         if cfg.blacklist_enabled and in_black:
-            return False, "Ваш аккаунт внесён в чёрный список."
+            return False, "Вашему аккаунту запрещён доступ."
 
         return True, None
 
