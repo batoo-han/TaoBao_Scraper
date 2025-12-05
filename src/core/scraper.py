@@ -184,13 +184,38 @@ class Scraper:
         # Подготавливаем компактные данные для LLM (без огромного массива skus!)
         compact_data = self._prepare_compact_data_for_llm(product_data)
 
-        # Заготавливаем переведённый заголовок и ценовые варианты, чтобы отдать их основной LLM сразу
+        # Заготавливаем переведённый заголовок и описание для контекста цен
         raw_title = product_data.get('title', '') or ''
         translated_title_hint = await self._translate_text_generic(raw_title, target_language="ru")
         if translated_title_hint:
             compact_data["title_hint"] = translated_title_hint
+        
+        # Извлекаем и переводим описание товара для контекста
+        raw_description = ''
+        platform = product_data.get('_platform')
+        if platform == 'pinduoduo':
+            pdd_min = product_data.get('pdd_minimal', {}) if isinstance(product_data, dict) else {}
+            raw_description = (
+                (pdd_min.get('description') or '').strip() or
+                (product_data.get('details') or '').strip()
+            )
+        else:
+            raw_description = (product_data.get('details') or '').strip()
+        
+        # Переводим описание (ограничиваем длину для скорости)
+        translated_description = ''
+        if raw_description:
+            # Берём первые 500 символов описания для контекста
+            description_sample = raw_description[:500]
+            translated_description = await self._translate_text_generic(description_sample, target_language="ru")
+        
+        # Формируем контекст для перевода цен
+        product_context = {
+            'title': translated_title_hint or raw_title,
+            'description': translated_description
+        }
 
-        price_lines = await self._prepare_price_entries(product_data, translated_title_hint)
+        price_lines = await self._prepare_price_entries(product_data, product_context)
         if price_lines:
             compact_data["translated_sku_prices"] = price_lines
         
@@ -201,6 +226,10 @@ class Scraper:
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] LLM контент получен: {llm_content.get('title', 'N/A')}")
+        
+        # Пост-обработка: исправляем общие термины в ценах на конкретные из описания
+        if price_lines and llm_content:
+            price_lines = self._fix_price_labels_with_context(price_lines, llm_content)
         
         # Санитация ответа LLM: убираем выдуманные «Цвета», добавляем/фиксируем «Состав»
         try:
@@ -918,48 +947,167 @@ class Scraper:
         # Fallback на price_info
         return product_data.get('price_info', {}).get('price', 'N/A')
 
-    async def _prepare_price_entries(self, product_data: dict, product_title: str | None) -> list[dict]:
+    def _fix_price_labels_with_context(self, price_lines: list[dict], llm_content: dict) -> list[dict]:
+        """
+        Исправляет общие термины в названиях цен на конкретные типы товаров из описания LLM.
+        
+        Например, заменяет "верхняя одежда" на "рубашка", если в описании упоминается "рубашка".
+        """
+        if not price_lines or not llm_content:
+            return price_lines
+        
+        # Извлекаем текст описания и заголовок
+        description = llm_content.get('description', '')
+        title = llm_content.get('title', '')
+        context_text = f"{title} {description}".lower()
+        
+        # Список общих терминов, которые нужно заменить на конкретные
+        generic_terms = {
+            'верхняя одежда': ['рубашка', 'куртка', 'свитер', 'кофта', 'пиджак', 'жилет', 'худи', 'толстовка'],
+            'одежда': ['рубашка', 'брюки', 'куртка', 'свитер', 'футболка', 'платье', 'юбка'],
+            'изделие': ['рубашка', 'брюки', 'куртка', 'свитер', 'футболка', 'платье', 'юбка'],
+            'нижнее белье': ['трусы', 'майка', 'бюстгальтер'],
+            'обувь': ['кроссовки', 'ботинки', 'туфли', 'сапоги', 'босоножки'],
+        }
+        
+        # Извлекаем названия из price_lines
+        price_labels = [item['label'].lower() for item in price_lines]
+        
+        # Для каждого общего термина в ценах ищем конкретный в описании
+        fixed_lines = []
+        for item in price_lines:
+            label = item['label']
+            label_lower = label.lower()
+            
+            # Проверяем, является ли это общим термином
+            replacement = None
+            for generic, concrete_options in generic_terms.items():
+                if generic in label_lower:
+                    # Ищем конкретные типы товаров в описании
+                    for concrete in concrete_options:
+                        # Проверяем, что:
+                        # 1. Конкретный тип упоминается в описании
+                        # 2. Этот конкретный тип ещё не используется в других ценах
+                        if concrete in context_text and concrete not in price_labels:
+                            replacement = label_lower.replace(generic, concrete)
+                            break
+                    if replacement:
+                        break
+            
+            if replacement:
+                fixed_lines.append({"label": replacement, "price": item['price']})
+            else:
+                fixed_lines.append(item)
+        
+        return fixed_lines
+    
+    async def _prepare_price_entries(self, product_data: dict, product_context: dict | str | None) -> list[dict]:
         """
         Готовит список цен по уникальным SKU для отображения в посте.
         Возвращает только если найдено несколько ценовых групп.
+        
+        Args:
+            product_data: Данные о товаре
+            product_context: Контекст товара (dict с title и description) или просто title (str) для обратной совместимости
         """
         entries = self._get_unique_sku_price_items(product_data)
         if len(entries) <= 1:
             return []
+        
+        # Обеспечиваем обратную совместимость: если передана строка, преобразуем в dict
+        if isinstance(product_context, str):
+            product_context = {'title': product_context, 'description': ''}
+        elif not product_context:
+            product_context = {'title': '', 'description': ''}
 
         if self._translation_supports_structured_tasks():
-            structured = await self._process_prices_with_llm(entries, product_title or "")
+            if settings.DEBUG_MODE:
+                print("[Scraper] Используется LLM-ветка для обработки цен")
+            structured = await self._process_prices_with_llm(entries, product_context)
             if structured:
                 return structured
 
+        if settings.DEBUG_MODE:
+            print("[Scraper] Используется fallback-ветка для обработки цен (без LLM)")
         return await self._prepare_price_entries_fallback(entries)
 
-    async def _process_prices_with_llm(self, entries: list[dict], product_title: str) -> list[dict]:
+    async def _process_prices_with_llm(self, entries: list[dict], product_context: dict) -> list[dict]:
         """
         Использует translation LLM для перевода и сжатия списка цен.
+        
+        Args:
+            entries: Список вариантов с ценами
+            product_context: Контекст товара (title, description)
         """
         try:
-            translated = await self._translate_price_entries_with_llm(entries)
+            translated = await self._translate_price_entries_with_llm(entries, product_context)
             if not translated:
                 return []
-            summarized = await self._summarize_price_entries_with_llm(product_title, translated)
+            summarized = await self._summarize_price_entries_with_llm(product_context, translated)
             return summarized
         except Exception as e:
             if settings.DEBUG_MODE:
                 print(f"[Scraper] Ошибка обработки цен через LLM: {e}")
             return []
 
-    async def _translate_price_entries_with_llm(self, entries: list[dict]) -> list[dict]:
+    async def _translate_price_entries_with_llm(self, entries: list[dict], product_context: dict) -> list[dict]:
         payload = json.dumps(entries, ensure_ascii=False, indent=2)
+        
+        # Извлекаем контекст
+        title = product_context.get('title', '')
+        description = product_context.get('description', '')
+        
         system_prompt = (
-            "Ты профессиональный переводчик. Переводи товарные позиции на русский язык максимально кратко, "
-            "сохраняя смысл и тип товара."
+            "Ты профессиональный переводчик и эксперт по товарным каталогам маркетплейсов. "
+            "Переводи товарные позиции на русский язык максимально кратко и точно, "
+            "используя контекст описания товара для определения КОНКРЕТНЫХ типов товара."
         )
+        
+        # Формируем контекст товара для промпта
+        context_lines = []
+        if title:
+            context_lines.append(f"Название товара: {title}")
+        if description:
+            context_lines.append(f"Описание товара: {description}")
+        
+        context_hint = "\n".join(context_lines) + "\n\n" if context_lines else ""
+        
         user_prompt = (
+            f"{context_hint}"
             "Ниже передан JSON-массив позиций с оригинальными названиями и ценами в юанях.\n"
-            "Переведи каждое название на русский язык и верни JSON-массив вида:\n"
-            "[{\"label\": \"переведённое название\", \"price\": число}].\n"
-            "Цены не изменяй.\n\n"
+            "Переведи каждое название на русский язык ЧЕСТНО и ПОЛНОСТЬЮ, сохраняя всю информацию.\n"
+            "Верни JSON-массив вида: [{\"label\": \"переведённое название\", \"price\": число}].\n\n"
+            "⚠️ КРИТИЧЕСКИ ВАЖНО - ЧЕСТНЫЙ ПОЛНЫЙ ПЕРЕВОД:\n\n"
+            "1. СОХРАНЯЙ структуру: [ТИП ТОВАРА], [описание цвета/принта]\n"
+            "   - 'XS, 长袖套装, MARBLE MUSHROOM PRINT' → 'майка, принт мраморный грибной'\n"
+            "   - 'M, 短裤, BLACK' → 'шорты, чёрные'\n"
+            "   - 'L, 长裤, RED PRINT' → 'брюки, принт красный'\n\n"
+            "2. ОПРЕДЕЛИ ТИП товара из китайских слов:\n"
+            "   - '长袖' / '长袖套装' → 'майка' или 'футболка' (длинный рукав)\n"
+            "   - '短裤' → 'шорты' (короткие штаны)\n"
+            "   - '长裤' → 'брюки' (длинные штаны)\n"
+            "   - '衬衫' → 'рубашка'\n"
+            "   - '裤子' → 'брюки'\n\n"
+            "3. ПЕРЕВОДИ принты/цвета, но ставь ИХ ПОСЛЕ типа товара:\n"
+            "   - 'MARBLE MUSHROOM PRINT, 甜奶油红蘑菇, 长袖' → 'майка, принт мраморный грибной'\n"
+            "   - 'CARAMEL GINGERBREAD PRINT, 焦糖小人儿姜饼干, 短裤' → 'шорты, принт карамельный имбирный пряник'\n"
+            "   - 'BLACK, 黑色, 长裤' → 'брюки, чёрные'\n\n"
+            "4. ИСПОЛЬЗУЙ контекст описания для УТОЧНЕНИЯ типа:\n"
+            "   - Если в описании: 'Комплект: майка, шорты, брюки'\n"
+            "   - И в варианте: '长袖' → переводи как 'майка' (из контекста)\n"
+            "   - И в варианте: '短裤' → переводи как 'шорты' (из контекста)\n\n"
+            "5. НЕ УДАЛЯЙ информацию:\n"
+            "   - Переводи ВСЁ: размеры, принты, цвета (суммаризация будет позже)\n"
+            "   - Формат: 'ТИП ТОВАРА, атрибуты'\n"
+            "   - Пример: 'майка, принт мраморный грибной' (НЕ просто 'майка')\n\n"
+            "ПРИМЕРЫ:\n\n"
+            "Вход: {\"name\": \"XS, 长袖套装, MARBLE MUSHROOM PRINT 甜奶油红蘑菇\", \"price\": 158}\n"
+            "Выход: {\"label\": \"майка, принт мраморный грибной\", \"price\": 158}\n\n"
+            "Вход: {\"name\": \"M, 短裤, WASHED ONYX SKI PRINT 水洗黑\", \"price\": 118}\n"
+            "Выход: {\"label\": \"шорты, принт стираный чёрный лыжный\", \"price\": 118}\n\n"
+            "Вход: {\"name\": \"L, 长裤, CARAMEL GINGERBREAD\", \"price\": 188}\n"
+            "Выход: {\"label\": \"брюки, принт карамельный имбирный пряник\", \"price\": 188}\n\n"
+            "Цены НЕ изменяй. Переводи ЧЕСТНО и ПОЛНОСТЬЮ.\n\n"
             f"Исходный JSON:\n{payload}"
         )
         token_limit = max(2000, len(entries) * 80)
@@ -996,25 +1144,98 @@ class Scraper:
             raise last_error
         return []
 
-    async def _summarize_price_entries_with_llm(self, product_title: str, items: list[dict]) -> list[dict]:
+    async def _summarize_price_entries_with_llm(self, product_context: dict, items: list[dict]) -> list[dict]:
         if not items:
             return []
+        
         payload = json.dumps(items, ensure_ascii=False, indent=2)
+        
+        # Извлекаем контекст
+        title = product_context.get('title', '')
+        description = product_context.get('description', '')
+        
         system_prompt = (
-            "Ты специалист по товарным каталогам. Обобщай вариации товаров, если различия несущественны "
-            "(цвет, мелкие аксессуары). Если различия влияют на комплектность или тип, оставляй отдельными."
+            "Ты эксперт по товарным каталогам маркетплейсов. Создавай краткие и точные описания цен, "
+            "как на Wildberries или Ozon. Обобщай вариации, если различия несущественны (размер, цвет, принт). "
+            "Если различия влияют на тип товара или комплектность - оставляй отдельно."
         )
+        
+        # Формируем контекст
+        context_lines = []
+        if title:
+            context_lines.append(f"Название товара: {title}")
+        if description:
+            context_lines.append(f"Описание: {description}")
+        
+        context_hint = "\n".join(context_lines) + "\n\n" if context_lines else ""
+        
         user_prompt = (
-            f"Краткое название товара: {product_title or 'не указано'}\n\n"
+            f"{context_hint}"
             "Ниже приведён JSON-массив позиций с переводами и ценами:\n"
             f"{payload}\n\n"
-            "Объедини элементы с одинаковой ценой в более краткие описания. "
-            "Игнорируй различия только в цвете/оттенке — цвета упоминать не нужно. "
-            "Если отличаются только модели/животные, перечисли их в скобках через косую черту "
-            "(например, «коляска для питомца (кот/такса), на аккумуляторе»). "
-            "Верни JSON-массив в формате [{\"label\": \"описание\", \"price\": число}], "
-            "где label написан на русском и отражает суть позиции. "
-            "Не добавляй новых цен и не повторяй одну и ту же цену более одного раза."
+            "⚠️ КРИТИЧЕСКИ ВАЖНО - ГРУППИРОВКА ПО ТИПУ ТОВАРА, НЕ ПО ПРИНТУ!\n\n"
+            "ПРАВИЛА СУММАРИЗАЦИИ (стиль маркетплейса Wildberries/Ozon):\n\n"
+            "1. ОПРЕДЕЛИ ТИП ТОВАРА из названия (майка, футболка, шорты, брюки, штаны, рубашка и т.д.)\n"
+            "   - 'длинная футболка, принт X' → ТИП = 'футболка' или 'майка'\n"
+            "   - 'короткие штаны, цвет Y' → ТИП = 'шорты'\n"
+            "   - 'длинные штаны, принт Z' → ТИП = 'брюки'\n"
+            "   - 'рубашка с пайетками' → ТИП = 'рубашка'\n\n"
+            "2. ГРУППИРУЙ по ТИПУ товара + ЦЕНЕ (игнорируй принты, цвета, размеры!):\n"
+            "   - Все 'футболка [любой принт]' с ценой 158 ¥ → 'майка с принтом в ассортименте'\n"
+            "   - Все 'короткие штаны [любой цвет]' с ценой 118 ¥ → 'шорты в ассортименте'\n"
+            "   - НЕ группируй по принтам! 'марморный принт' - НЕ тип товара!\n\n"
+            "3. НОРМАЛИЗУЙ названия типов товара:\n"
+            "   - 'длинная футболка' / 'длинный рукав' → 'майка'\n"
+            "   - 'короткие штаны' / 'короткие брюки' → 'шорты'\n"
+            "   - 'длинные штаны' / 'длинные брюки' → 'брюки'\n"
+            "   - 'футболка' / 'топ' → 'футболка'\n\n"
+            "4. ФОРМАТ описания (2-4 слова):\n"
+            "   - Если разные принты: 'майка с принтом в ассортименте'\n"
+            "   - Если один цвет: 'шорты чёрные'\n"
+            "   - Если один тип без вариаций: 'брюки'\n\n"
+            "⚠️⚠️⚠️ ПРИМЕРЫ С ПРИНТАМИ (как в вашем случае) ⚠️⚠️⚠️\n\n"
+            "Пример 1 - ПРАВИЛЬНАЯ группировка комплекта с принтами SKIMS:\n"
+            "Вход: [\n"
+            "  {\"label\": \"Принт MARBLE MUSHROOM, цвет нежно-розовый с красным грибком, длинная футболка\", \"price\": 158},\n"
+            "  {\"label\": \"Принт CARAMEL GINGERBREAD, цвет карамельный имбирный пряник, длинная футболка\", \"price\": 158},\n"
+            "  {\"label\": \"Принт WASHED ONYX SKI, цвет вымытый чёрный, длинная футболка\", \"price\": 158},\n"
+            "  {\"label\": \"Принт MARBLE MUSHROOM, цвет нежно-розовый с красным грибком, короткие штаны\", \"price\": 118},\n"
+            "  {\"label\": \"Принт WASHED ONYX SKI, цвет вымытый чёрный, короткие штаны\", \"price\": 118},\n"
+            "  {\"label\": \"Принт CARAMEL GINGERBREAD, цвет карамельный, короткие штаны\", \"price\": 118},\n"
+            "  {\"label\": \"Принт MARBLE MUSHROOM, цвет нежно-розовый, длинные штаны\", \"price\": 188},\n"
+            "  {\"label\": \"Принт WASHED ONYX SKI, длинные штаны\", \"price\": 188}\n"
+            "]\n"
+            "Выход: [\n"
+            "  {\"label\": \"майка с принтом в ассортименте\", \"price\": 158},\n"
+            "  {\"label\": \"шорты с принтом в ассортименте\", \"price\": 118},\n"
+            "  {\"label\": \"брюки с принтом в ассортименте\", \"price\": 188}\n"
+            "]\n"
+            "Логика: Группировка по ТИПУ товара (майка, шорты, брюки), НЕ по принту!\n\n"
+            "Пример 2 - НЕПРАВИЛЬНАЯ группировка (так делать НЕЛЬЗЯ):\n"
+            "Выход НЕПРАВИЛЬНЫЙ: [\n"
+            "  {\"label\": \"марморный грибной принт\", \"price\": 158},  ← ОШИБКА! Принт - не тип товара!\n"
+            "  {\"label\": \"карамельный имбирный печенье\", \"price\": 158},  ← ОШИБКА!\n"
+            "  {\"label\": \"принт ски оникса в ассортименте\", \"price\": 118}  ← ОШИБКА!\n"
+            "]\n\n"
+            "Пример 3 - Рубашка и брюки:\n"
+            "Вход: [\n"
+            "  {\"label\": \"XS брюки чёрные\", \"price\": 128},\n"
+            "  {\"label\": \"S брюки чёрные\", \"price\": 128},\n"
+            "  {\"label\": \"XS рубашка с пайетками белая\", \"price\": 148},\n"
+            "  {\"label\": \"S рубашка с пайетками белая\", \"price\": 148}\n"
+            "]\n"
+            "Выход: [\n"
+            "  {\"label\": \"брюки\", \"price\": 128},\n"
+            "  {\"label\": \"рубашка с пайетками\", \"price\": 148}\n"
+            "]\n\n"
+            "АЛГОРИТМ:\n"
+            "Шаг 1: Для каждого элемента извлеки ТИП товара (майка/шорты/брюки/рубашка)\n"
+            "Шаг 2: Сгруппируй по (ТИП товара, ЦЕНА)\n"
+            "Шаг 3: Для каждой группы создай краткое описание БЕЗ принтов/цветов/размеров\n"
+            "Шаг 4: Если в группе >1 вариант с разными принтами/цветами → добавь 'в ассортименте'\n\n"
+            "Верни JSON-массив [{\"label\": \"описание\", \"price\": число}]. "
+            "Описание: 2-4 слова, ТИП товара + (опционально) 'с принтом в ассортименте'. "
+            "Группируй ТОЛЬКО по типу товара и цене!"
         )
         token_limit = max(2000, len(items) * 40)
         last_error = None
@@ -1098,12 +1319,46 @@ class Scraper:
             summaries = self._summarize_price_group(translated_group)
             for label in summaries:
                 cleaned_label = (label or "").strip()
-                if cleaned_label:
+                # Фильтруем маркеры невалидных товаров
+                if cleaned_label and "__INVALID__" not in cleaned_label.upper():
                     summarized_lines.append({"label": cleaned_label, "price": price_value})
+
+        # Фильтруем невалидные варианты: если для одной цены есть несколько вариантов,
+        # и один из них выглядит как мусор - удаляем мусорный
+        price_groups: dict[float, list[dict]] = {}
+        for item in summarized_lines:
+            price = item['price']
+            if price not in price_groups:
+                price_groups[price] = []
+            price_groups[price].append(item)
+        
+        filtered_lines = []
+        for price, items in price_groups.items():
+            if len(items) > 1:
+                # Есть несколько вариантов с одинаковой ценой
+                # Фильтруем подозрительные (очень короткие или содержащие мусорные слова)
+                valid_items = []
+                suspicious_keywords = ['товар', 'отправляется', 'доставка', 'без']
+                
+                for item in items:
+                    label_lower = item['label'].lower()
+                    # Проверяем, не является ли это мусором
+                    is_suspicious = (
+                        len(item['label']) < 5 or  # Слишком короткое название
+                        sum(1 for kw in suspicious_keywords if kw in label_lower) >= 2  # Много мусорных слов
+                    )
+                    if not is_suspicious:
+                        valid_items.append(item)
+                
+                # Если после фильтрации остались валидные - используем их, иначе - все
+                filtered_lines.extend(valid_items if valid_items else items)
+            else:
+                # Один вариант с этой ценой - оставляем как есть
+                filtered_lines.extend(items)
 
         unique = []
         seen = set()
-        for item in summarized_lines:
+        for item in filtered_lines:
             key = (item['label'], item['price'])
             if key in seen:
                 continue
@@ -1231,25 +1486,261 @@ class Scraper:
             results.append((translated or name).strip() or name)
         return results
 
+    def _extract_product_type(self, name: str) -> str:
+        """
+        Извлекает тип товара из названия, убирая размеры, цвета, принты и другие описательные слова.
+        Возвращает нормализованное название типа товара.
+        
+        Фокусируется на извлечении ТИПА одежды (майка, шорты, брюки), игнорируя принты и цвета.
+        """
+        if not name:
+            return ""
+        
+        name_lower = name.lower()
+        
+        # Список "мусорных" фраз, которые НЕ являются типами товара
+        garbage_phrases = [
+            'товар отправляется',
+            'товар отправляется без',
+            'без фирменного лейбла',
+            'без брендовой маркировки',
+            'без бренда',
+            'отправка без',
+            'доставка',
+            'в наличии',
+            'под заказ',
+            'предзаказ',
+            'новинка',
+            'распродажа',
+            'скидка',
+            'акция',
+        ]
+        
+        # Проверяем на мусорные фразы
+        for garbage in garbage_phrases:
+            if garbage in name_lower:
+                # Если название содержит мусорную фразу и не содержит явного типа товара - возвращаем маркер
+                # Проверим ниже, есть ли явный тип
+                has_product_type = False
+                for markers in [
+                    ['майка', 'футболка', 'топ', 'блуза'],
+                    ['шорты', 'брюки', 'штаны'],
+                    ['рубашка', 'сорочка'],
+                    ['куртка', 'пиджак'],
+                    ['свитер', 'джемпер', 'кофта', 'худи'],
+                    ['платье', 'юбка'],
+                ]:
+                    if any(marker in name_lower for marker in markers):
+                        has_product_type = True
+                        break
+                
+                if not has_product_type:
+                    # Мусорная фраза без явного типа товара - помечаем как невалидный
+                    return "__INVALID__"
+        
+        # Словарь маркеров типов товара (важнее всего!)
+        type_markers = {
+            'майка': ['майка', 'футболка', 'длинная футболка', 'длинный рукав', 'топ', 'блуза'],
+            'шорты': ['шорты', 'короткие штаны', 'короткие брюки'],
+            'брюки': ['брюки', 'длинные штаны', 'длинные брюки', 'штаны'],
+            'рубашка': ['рубашка', 'сорочка'],
+            'куртка': ['куртка', 'пиджак', 'жакет'],
+            'свитер': ['свитер', 'джемпер', 'кофта', 'худи', 'толстовка'],
+            'платье': ['платье'],
+            'юбка': ['юбка'],
+        }
+        
+        # Ищем тип товара в названии
+        for product_type, markers in type_markers.items():
+            for marker in markers:
+                if marker in name_lower:
+                    return product_type
+        
+        # Если не нашли явного маркера типа товара - используем fallback-логику
+        # Но помним, что результат должен быть валидирован в конце
+        # Список размеров для удаления (регистронезависимо)
+        size_patterns = [
+            r'\b(xs|s|m|l|xl|xxl|xxxl)\b',  # Буквенные размеры
+            r'\b(\d{1,3})\b',  # Числовые размеры (35, 36, 37, ...)
+            r'\b(one\s*size|free\s*size|универсальный)\b',  # Универсальный размер
+        ]
+        
+        # Убираем размеры из названия
+        cleaned = name_lower
+        for pattern in size_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        # Убираем слова, связанные с принтами и цветами
+        print_keywords = ['принт', 'print', 'рисунок', 'узор', 'pattern']
+        for keyword in print_keywords:
+            # Убираем фразы типа "принт мраморный", "print marble"
+            cleaned = re.sub(rf'\b{keyword}\b[^,\.]*', '', cleaned, flags=re.IGNORECASE)
+        
+        # Убираем запятые и лишние пробелы
+        cleaned = re.sub(r'^[,\s]+', '', cleaned)
+        cleaned = re.sub(r'[,\s]+$', '', cleaned)
+        cleaned = re.sub(r'\s*,\s*', ' ', cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        
+        # Убираем цвета
+        cleaned = self._remove_color_words(cleaned)
+        
+        # Убираем стоп-слова
+        tokens = re.findall(r"[A-Za-zА-Яа-яЁё]+", cleaned.lower())
+        filtered = [
+            token for token in tokens
+            if token not in self.GENERIC_STOPWORDS
+            and len(token) > 2
+        ]
+        
+        # Возвращаем первые значимые слова как тип товара
+        if filtered:
+            candidate = " ".join(filtered[:2])
+            
+            # Проверяем, не является ли это просто цветом/принтом без типа товара
+            # Список прилагательных, которые обычно описывают цвет/принт, но не тип товара
+            color_adjectives = [
+                'карамельный', 'мраморный', 'имбирный', 'стираный', 'вымытый',
+                'чёрный', 'белый', 'красный', 'синий', 'зелёный', 'жёлтый',
+                'коричневый', 'серый', 'розовый', 'фиолетовый', 'оранжевый',
+                'нежный', 'яркий', 'тёмный', 'светлый', 'пастельный',
+                'печенье', 'пряник', 'грибной', 'лыжный', 'оникс'
+            ]
+            
+            # Если результат состоит только из цветовых прилагательных - это не тип товара
+            candidate_words = candidate.lower().split()
+            all_colors = all(word in color_adjectives for word in candidate_words)
+            
+            if all_colors:
+                # Это цвет/принт, а не тип товара - помечаем как невалидный
+                return "__INVALID__"
+            
+            return candidate
+        
+        # Если ничего не осталось после фильтрации - проверяем исходное название
+        # Если оно содержит только цвета/принты без типа - невалидный
+        final_candidate = cleaned.strip() or name.strip()
+        
+        # Проверяем, что это не просто цвет/принт
+        if final_candidate and len(final_candidate) > 0:
+            # Если название слишком короткое или содержит только прилагательные - невалидно
+            words = final_candidate.lower().split()
+            if len(words) <= 2 and all(
+                any(color_word in word for color_word in ['карамель', 'мрамор', 'имбир', 'принт', 'print'])
+                for word in words
+            ):
+                return "__INVALID__"
+        
+        # ФИНАЛЬНАЯ ВАЛИДАЦИЯ: проверяем, является ли результат известным типом товара
+        # Список всех известных типов товара
+        known_types = {
+            'майка', 'футболка', 'топ', 'блуза',
+            'шорты', 'брюки', 'штаны',
+            'рубашка', 'сорочка',
+            'куртка', 'пиджак', 'жакет',
+            'свитер', 'джемпер', 'кофта', 'худи', 'толстовка',
+            'платье', 'юбка',
+            'носки', 'колготки', 'гольфы',
+            'трусы', 'белье',
+            'пижама', 'халат',
+            'комбинезон',
+        }
+        
+        # Если результат НЕ содержит ни одного известного типа - это не товар
+        if final_candidate:
+            final_lower = final_candidate.lower()
+            has_known_type = any(known_type in final_lower for known_type in known_types)
+            if not has_known_type:
+                # Результат не содержит известных типов товара - это мусор (цвет/принт)
+                return "__INVALID__"
+        
+        return final_candidate
+    
     def _summarize_price_group(self, names: list[str]) -> list[str]:
         """
         Сокращает список названий позиций, чтобы избежать повторов в посте.
+        
+        Логика:
+        1. Удаляет размеры из всех названий
+        2. Группирует по типу товара
+        3. Если все варианты одного типа (только размеры/цвета отличаются) → возвращает один тип товара
+        4. Если варианты разных типов → перечисляет типы, для повторяющихся типов → "в ассортименте"
         """
-        unique = list(dict.fromkeys(name.strip() for name in names if name.strip()))
-        if not unique:
+        if not names:
             return []
-        if len(unique) <= 3:
-            return unique
-
-        keywords = self._extract_keywords(unique)
-        descriptor = self._extract_shared_descriptor(unique)
-
-        summary = "варианты в ассортименте"
-        if keywords:
-            summary += f" ({', '.join(keywords[:4])})"
-        if descriptor:
-            summary += f", {descriptor}"
-        return [summary]
+        
+        # Шаг 1: Удаляем размеры и цвета из всех названий, получаем тип товара
+        type_to_originals: dict[str, list[str]] = {}
+        for name in names:
+            name = name.strip()
+            if not name:
+                continue
+            
+            product_type = self._extract_product_type(name)
+            
+            # Пропускаем невалидные типы
+            if product_type == "__INVALID__":
+                continue
+            
+            if not product_type:
+                # Если не удалось определить тип, используем оригинальное название
+                product_type = name
+            
+            if product_type not in type_to_originals:
+                type_to_originals[product_type] = []
+            type_to_originals[product_type].append(name)
+        
+        if not type_to_originals:
+            return []
+        
+        # Шаг 2: Если все варианты одного типа - возвращаем один элемент
+        if len(type_to_originals) == 1:
+            product_type = list(type_to_originals.keys())[0]
+            originals = type_to_originals[product_type]
+            
+            # Если это действительно разные варианты (а не просто дубликаты)
+            unique_originals = list(dict.fromkeys(originals))
+            if len(unique_originals) > 1:
+                # Проверяем, отличаются ли они только размерами
+                # Если да - возвращаем просто тип товара
+                return [product_type]
+            else:
+                # Один вариант - возвращаем как есть
+                return unique_originals
+        
+        # Шаг 3: Несколько типов товаров - обрабатываем каждый
+        result = []
+        for product_type, originals in type_to_originals.items():
+            unique_originals = list(dict.fromkeys(originals))
+            
+            if len(unique_originals) == 1:
+                # Один вариант этого типа - возвращаем тип товара
+                result.append(product_type)
+            else:
+                # Несколько вариантов одного типа (разные размеры/цвета)
+                # Проверяем, отличаются ли они только размерами
+                # Если варианты отличаются только размерами - указываем тип товара
+                # Если отличаются цветами/другими характеристиками - указываем "в ассортименте"
+                
+                # Простая эвристика: если все оригинальные названия содержат тип товара и отличаются только префиксом
+                all_contain_type = all(product_type in orig.lower() for orig in unique_originals)
+                if all_contain_type:
+                    # Все варианты содержат тип товара - скорее всего отличаются только размерами
+                    result.append(product_type)
+                else:
+                    # Варианты отличаются не только размерами
+                    result.append(f"{product_type} в ассортименте")
+        
+        # Убираем дубликаты, сохраняя порядок
+        unique_result = []
+        seen = set()
+        for item in result:
+            item_lower = item.lower()
+            if item_lower not in seen:
+                seen.add(item_lower)
+                unique_result.append(item)
+        
+        return unique_result
 
     def _extract_keywords(self, names: list[str]) -> list[str]:
         counter = Counter()
@@ -1809,10 +2300,14 @@ class Scraper:
         post_parts.append("")
         
         # Хэштеги (курсивом)
+        # Очищаем хэштеги от пробелов (программная проверка на случай, если LLM добавил пробелы)
+        # Удаляем все пробелы из хэштегов, включая пробелы в начале и конце
         if hashtags:
-            hashtag_text = " ".join([f"#{tag}" for tag in hashtags])
-            post_parts.append(f"<i>{hashtag_text}</i>")
-            post_parts.append("")
+            cleaned_hashtags = [tag.strip().replace(" ", "") for tag in hashtags if tag and tag.strip()]
+            hashtag_text = " ".join([f"#{tag}" for tag in cleaned_hashtags if tag])
+            if hashtag_text:  # Добавляем только если есть хотя бы один хэштег
+                post_parts.append(f"<i>{hashtag_text}</i>")
+                post_parts.append("")
         
         # Ссылка на товар
         if product_url:
