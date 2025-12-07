@@ -1,5 +1,5 @@
 {
-  "whitelist_enabled": true,
+  "whitelist_enabled": false,
   "blacklist_enabled": false,
   "whitelist_ids": [
   ],
