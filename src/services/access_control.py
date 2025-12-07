@@ -54,6 +54,8 @@ class AccessControlService:
 
     def __init__(self, storage_file: str = "data/access_control.json") -> None:
         self.storage_path = Path(storage_file)
+        # Резервная копия на случай сброса файла при обновлениях/развёртываниях
+        self.backup_path = self.storage_path.with_suffix(".backup.json")
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         self._config = AccessControlConfig()
         self._load()
@@ -63,10 +65,16 @@ class AccessControlService:
         """
         Загружает конфигурацию из JSON-файла, если он существует.
         """
-        if not self.storage_path.exists():
+        target = self.storage_path
+        # Если основной файл отсутствует, пробуем восстановиться из бэкапа
+        if not target.exists() and self.backup_path.exists():
+            target = self.backup_path
+
+        if not target.exists():
             return
+
         try:
-            with self.storage_path.open("r", encoding="utf-8") as fh:
+            with target.open("r", encoding="utf-8") as fh:
                 raw = json.load(fh)
         except Exception:
             # При ошибке загрузки начинаем с дефолтов
@@ -101,7 +109,11 @@ class AccessControlService:
         """
         data = asdict(self._config)
         try:
+            # Сохраняем основной файл
             with self.storage_path.open("w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            # Дублируем в резервную копию
+            with self.backup_path.open("w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
         except Exception:
             # Ошибку сохранения не пробрасываем пользователю, но в DEBUG можно логировать
