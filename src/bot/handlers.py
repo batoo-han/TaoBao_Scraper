@@ -38,6 +38,22 @@ from src.services.access_control import (
 logger = logging.getLogger(__name__)
 
 
+async def _safe_clear_markup(message: Message | None) -> None:
+    """Безопасно убираем inline-клавиатуру, игнорируя ошибку 'message is not modified'."""
+    if not message:
+        return
+    # Если клавиатура уже убрана — ничего не делаем
+    if message.reply_markup is None:
+        return
+    try:
+        await message.edit_reply_markup()
+    except TelegramBadRequest as e:
+        # Игнорируем стандартную ошибку Telegram, если разметка не изменилась
+        if "message is not modified" in str(e):
+            return
+        raise
+
+
 def _log_json(level: str, **payload):
     """Структурированное логирование в JSON."""
     msg = json.dumps(payload, ensure_ascii=False)
@@ -503,7 +519,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
 
     if choice == "cancel":
         await callback.answer("Выбор отменён")
-        await callback.message.edit_reply_markup()
+        await _safe_clear_markup(callback.message)
         await callback.message.answer(
             "Настройки не изменены.",
             reply_markup=build_settings_menu_keyboard(callback.from_user.id),
@@ -516,7 +532,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
     if choice == "cny":
         user_settings_service.update_currency(user_id, "cny")
         await callback.answer("Валюта: юань")
-        await callback.message.edit_reply_markup()
+        await _safe_clear_markup(callback.message)
         await callback.message.answer(
             "✅ Валюта по умолчанию: юань. Конвертация отключена.",
             reply_markup=build_settings_menu_keyboard(user_id),
@@ -524,7 +540,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
     elif choice == "rub":
         user_settings = user_settings_service.update_currency(user_id, "rub")
         await callback.answer("Валюта: рубль")
-        await callback.message.edit_reply_markup()
+        await _safe_clear_markup(callback.message)
 
         if not user_settings.exchange_rate:
             await callback.message.answer(
