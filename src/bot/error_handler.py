@@ -5,6 +5,7 @@
 
 import logging
 import traceback
+import os
 from datetime import datetime
 from typing import Optional
 from logging.handlers import RotatingFileHandler
@@ -15,8 +16,10 @@ from src.core.config import settings
 
 # Настройка логирования с ротацией
 # Максимум 100 МБ на файл, храним 3 файла (итого ~300 МБ / ~3 месяца)
+LOG_DIR = os.path.join(os.getcwd(), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
 file_handler = RotatingFileHandler(
-    'bot_errors.log',
+    os.path.join(LOG_DIR, 'bot_errors.log'),
     maxBytes=100 * 1024 * 1024,  # 100 МБ
     backupCount=2,  # Храним текущий + 2 старых файла
     encoding='utf-8'
@@ -49,6 +52,10 @@ class ErrorHandler:
             "1️⃣ Проверить, что ссылка ведёт на доступный товар\n"
             "2️⃣ Повторить попытку через несколько минут\n\n"
             "Наша команда уже уведомлена о проблеме и работает над её устранением. 🛠️"
+        ),
+        'proxyapi_balance': (
+            "⚠️ Баланс ProxyAPI исчерпан.\n\n"
+            "Пожалуйста, пополните счёт в личном кабинете ProxyAPI и повторите запрос."
         ),
         'network_error': (
             "😔 Извините, возникли проблемы с подключением к сервису.\n\n"
@@ -105,13 +112,22 @@ class ErrorHandler:
                 self.admin_chat_id = None
         else:
             self.admin_chat_id = None
+        # Канал для уведомлений о балансе ProxyAPI (аналог TMAPI billing chat)
+        raw_proxy_chat = getattr(settings, "PROXYAPI_BILLING_CHAT_ID", "") or ""
+        try:
+            self.proxy_billing_chat_id = int(raw_proxy_chat) if raw_proxy_chat else None
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid PROXYAPI_BILLING_CHAT_ID format: {raw_proxy_chat}. Expected numeric string or int.")
+            self.proxy_billing_chat_id = None
+        self.proxy_notify_402 = bool(getattr(settings, "PROXYAPI_NOTIFY_402", False))
         
     async def handle_error(
         self,
         error: Exception,
         user_message: Message,
         context: str = "",
-        error_type: str = "unknown_error"
+        error_type: str = "unknown_error",
+        request_id: str | None = None,
     ) -> None:
         """
         Обрабатывает ошибку: логирует, уведомляет админа, отправляет дружественное сообщение пользователю.
@@ -136,21 +152,32 @@ class ErrorHandler:
             'error_class': error.__class__.__name__,
             'error_message': str(error),
             'context': context,
+            'request_id': request_id,
             'traceback': tb
         }
         
         # Логируем ошибку
         logger.error(
-            f"Error occurred: {error_type}\n"
-            f"User: {user_message.from_user.id} (@{user_message.from_user.username})\n"
-            f"Message: {user_message.text}\n"
-            f"Context: {context}\n"
-            f"Error: {error.__class__.__name__}: {str(error)}\n"
-            f"Traceback:\n{tb}"
+            json.dumps(
+                {
+                    "event": "error",
+                    "user_id": user_message.from_user.id,
+                    "chat_id": user_message.chat.id,
+                    "username": user_message.from_user.username or "unknown",
+                    "error_type": error_type,
+                    "error_class": error.__class__.__name__,
+                    "error_message": str(error),
+                    "context": context,
+                    "request_id": request_id,
+                },
+                ensure_ascii=False,
+            )
         )
         
         # Отправляем дружественное сообщение пользователю
         user_friendly_message = self.USER_MESSAGES.get(error_type, self.USER_MESSAGES['unknown_error'])
+        if request_id:
+            user_friendly_message += f"\n\nID запроса: <code>{request_id}</code>"
         try:
             await user_message.answer(user_friendly_message)
         except Exception as send_error:
@@ -170,9 +197,10 @@ class ErrorHandler:
             logger.warning("Admin chat ID not configured, skipping admin notification")
             return
         
-        # Проверяем, является ли это ошибкой TMAPI для дополнительных пояснений
+        # Проверяем, является ли это ошибкой TMAPI или ProxyAPI для дополнительных пояснений
         error_message = error_info['error_message']
         tmapi_explanation = self._get_tmapi_error_explanation(error_message)
+        proxyapi_explanation = self._get_proxyapi_error_explanation(error_message)
         
         # Формируем красивое сообщение для админа
         admin_message = (
@@ -186,10 +214,14 @@ class ErrorHandler:
             f"🐛 <b>Класс:</b> <code>{error_info['error_class']}</code>\n"
             f"📄 <b>Описание:</b> <code>{error_info['error_message'][:200]}</code>\n"
         )
+        if error_info.get('request_id'):
+            admin_message += f"\n🪪 <b>Request ID:</b> <code>{error_info['request_id']}</code>\n"
         
         # Добавляем пояснения для ошибок TMAPI
         if tmapi_explanation:
             admin_message += f"\n💡 <b>Пояснение TMAPI:</b> {tmapi_explanation}\n"
+        if proxyapi_explanation:
+            admin_message += f"\n💡 <b>Пояснение ProxyAPI:</b> {proxyapi_explanation}\n"
         
         if error_info['context']:
             admin_message += f"\n🔗 <b>Контекст:</b> <code>{error_info['context'][:100]}</code>\n"
@@ -226,6 +258,17 @@ class ErrorHandler:
                 )
             else:
                 logger.error(f"Failed to send admin notification: {e}")
+
+        # Дополнительное уведомление ответственному за ProxyAPI (если включено)
+        if proxyapi_explanation and self.proxy_notify_402 and self.proxy_billing_chat_id:
+            try:
+                await self.bot.send_message(
+                    chat_id=self.proxy_billing_chat_id,
+                    text=f"⚠️ ProxyAPI: {proxyapi_explanation}",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отправить уведомление о балансе ProxyAPI: {e}")
     
     @staticmethod
     def _get_tmapi_error_explanation(error_message: str) -> str:
@@ -260,6 +303,16 @@ class ErrorHandler:
         return ""
     
     @staticmethod
+    def _get_proxyapi_error_explanation(error_message: str) -> str:
+        """
+        Возвращает пояснение об ошибке ProxyAPI (например, 402 insufficient balance).
+        """
+        error_lower = (error_message or "").lower()
+        if "insufficient balance" in error_lower or "error code: 402" in error_lower or "402" in error_lower:
+            return "HTTP 402: недостаточно средств на счёте ProxyAPI. Пополните баланс в личном кабинете."
+        return ""
+    
+    @staticmethod
     def classify_error(error: Exception, context: str = "") -> str:
         """
         Классифицирует ошибку для выбора подходящего сообщения пользователю.
@@ -274,8 +327,12 @@ class ErrorHandler:
         error_class = error.__class__.__name__
         error_message = str(error).lower()
         
+        # Специальный кейс: ProxyAPI закончился баланс
+        if "insufficient balance" in error_message or "error code: 402" in error_message or "proxyapi" in error_message:
+            return 'proxyapi_balance'
+        
         # API ошибки
-        if any(keyword in error_message for keyword in ['api', 'tmapi', '400', '401', '403', '404', '417', '422', '439', '499', '500', '502', '503']):
+        if any(keyword in error_message for keyword in ['api', 'tmapi', 'proxyapi', '400', '401', '402', '403', '404', '417', '422', '439', '499', '500', '502', '503']):
             return 'api_error'
         
         # Сетевые ошибки

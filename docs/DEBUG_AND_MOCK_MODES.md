@@ -162,7 +162,7 @@ python -m autoparse
 | API метод | Файл |
 |-----------|------|
 | `get_product_info()` | `result.txt` |
-| `get_item_description()` | `result55.txt` |
+| `get_item_description(item_id, platform)` | `result55.txt` |
 
 ### Формат файлов
 

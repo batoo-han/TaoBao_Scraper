@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class TmapiClient:
     """
     Клиент для взаимодействия с API tmapi.top.
-    Поддерживает Taobao, Tmall и Pinduoduo.
+    Поддерживает Taobao, Tmall, 1688 и Pinduoduo.
     Автоматически определяет платформу по URL.
     Реализует rate limiting для контроля частоты запросов.
     В MOCK режиме читает данные из файлов вместо реальных API запросов.
@@ -24,12 +24,18 @@ class TmapiClient:
         # URL API для Taobao/Tmall
         self.api_url = "http://api.tmapi.top/taobao/item_detail_by_url"
         self.item_desc_api_url = "http://api.tmapi.top/taobao/item_desc"
+
+        # URL API для 1688
+        self.ali_api_url = "http://api.tmapi.top/ali/item_detail_by_url"
+        self.ali_item_api_url = "http://api.tmapi.top/ali/item_detail"
+        self.ali_item_desc_api_url = "http://api.tmapi.top/ali/item_desc"
         
         # URL API для Pinduoduo
         self.pinduoduo_api_url = "http://api.tmapi.top/pdd/item_detail"
         
         # API токены
         self.api_token = settings.TMAPI_TOKEN  # Токен для Taobao/Tmall
+        self.ali_api_token = settings.TMAPI_ALI_TOKEN or settings.TMAPI_TOKEN  # Отдельный токен для 1688 (fallback на основной)
         self.pinduoduo_token = settings.TMAPI_PINDUODUO_TOKEN  # Токен для Pinduoduo
         
         # Настройки режимов
@@ -42,7 +48,7 @@ class TmapiClient:
         self.request_lock = asyncio.Lock()  # Для синхронизации запросов
         # Для Pinduoduo используем веб-скрапинг (см. core.scraper)
 
-    async def get_product_info(self, url: str):
+    async def get_product_info(self, url: str, request_id: str | None = None):
         """
         Отправляет запрос к tmapi.top для получения информации о товаре.
         В MOCK режиме возвращает данные из result.txt.
@@ -91,7 +97,9 @@ class TmapiClient:
             
             timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
 
-            async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout) as client:
+            headers = {"X-Request-ID": request_id} if request_id else None
+
+            async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout, headers=headers) as client:
                 # POST запрос с JSON телом
                 response = await client.post(self.api_url, json=payload, params=querystring)
                 response.raise_for_status()  # Вызывает исключение для ошибок HTTP статуса
@@ -99,12 +107,13 @@ class TmapiClient:
                 logger.debug(f"TMAPI raw response: {response.text[:500]}...")  # Показываем первые 500 символов
                 return response.json()  # Возвращает JSON ответ
 
-    async def get_item_description(self, item_id: int):
+    async def get_item_description(self, item_id: int, platform: str = Platform.TAOBAO, request_id: str | None = None):
         """
         Получает детальное описание товара с дополнительными изображениями.
         
         Args:
             item_id (int): ID товара
+            platform (str): Платформа (taobao/tmall/1688)
             
         Returns:
             dict: Словарь с описанием товара, включая detail_html с изображениями
@@ -124,17 +133,22 @@ class TmapiClient:
                 # result55.txt contains Python dict with single quotes, use ast.literal_eval
                 return ast.literal_eval(content)
         else:
-            logger.info(f"Fetching item description from TMAPI for item_id: {item_id}")
+            logger.info(f"Fetching item description from TMAPI for item_id: {item_id} (platform={platform})")
             
             # Параметры запроса
             querystring = {
-                "apiToken": self.api_token,
+                "apiToken": self.api_token if platform != Platform.ALI1688 else self.ali_api_token,
                 "item_id": item_id
             }
+
+            # Выбираем нужный endpoint в зависимости от платформы
+            desc_url = self.item_desc_api_url
+            if platform == Platform.ALI1688:
+                desc_url = self.ali_item_desc_api_url
             
             if settings.DEBUG_MODE:
-                print(f"[TMAPI] GET {self.item_desc_api_url}")
-                print(f"[TMAPI] Параметры: item_id={item_id}")
+                print(f"[TMAPI] GET {desc_url}")
+                print(f"[TMAPI] Параметры: item_id={item_id}, platform={platform}")
             
             # Настраиваем SSL проверку
             if settings.DISABLE_SSL_VERIFY:
@@ -145,26 +159,45 @@ class TmapiClient:
             
             timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
 
-            async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout) as client:
-                # GET запрос для получения описания
-                response = await client.get(self.item_desc_api_url, params=querystring)
-                
-                if settings.DEBUG_MODE:
-                    print(f"[TMAPI] Статус ответа: {response.status_code}")
-                    print(f"[TMAPI] Первые 500 символов ответа: {response.text[:500]}")
-                
-                response.raise_for_status()
-                logger.debug(f"TMAPI item_desc response status: {response.status_code}")
-                
-                result = response.json()
-                
-                if settings.DEBUG_MODE:
-                    print(f"[TMAPI] JSON ответ: code={result.get('code')}, msg={result.get('msg')}")
-                    if result.get('data'):
-                        data_keys = list(result.get('data', {}).keys())
-                        print(f"[TMAPI] Ключи в data: {data_keys}")
-                
-                return result
+            attempts = getattr(settings, "TMAPI_RETRY_ATTEMPTS", 3) or 3
+            backoff_base = getattr(settings, "TMAPI_RETRY_BACKOFF", 0.5) or 0.5
+
+            headers = {"X-Request-ID": request_id} if request_id else None
+
+            async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout, headers=headers) as client:
+                for attempt in range(1, attempts + 1):
+                    await self._apply_rate_limit()
+                    try:
+                        response = await client.get(desc_url, params=querystring)
+                        
+                        if settings.DEBUG_MODE:
+                            print(f"[TMAPI] Статус ответа: {response.status_code}")
+                            print(f"[TMAPI] Первые 500 символов ответа: {response.text[:500]}")
+                        
+                        response.raise_for_status()
+                        logger.debug(f"TMAPI item_desc response status: {response.status_code}")
+                        
+                        result = response.json()
+                        
+                        if settings.DEBUG_MODE:
+                            print(f"[TMAPI] JSON ответ: code={result.get('code')}, msg={result.get('msg')}")
+                            if result.get('data'):
+                                data_keys = list(result.get('data', {}).keys())
+                                print(f"[TMAPI] Ключи в data: {data_keys}")
+                        
+                        return result
+                    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                        is_last = attempt == attempts
+                        logger.warning(
+                            f"TMAPI item_desc attempt {attempt}/{attempts} failed for item_id={item_id} "
+                            f"(platform={platform}): {type(e).__name__}: {e}"
+                        )
+                        if is_last:
+                            raise
+                        sleep_time = backoff_base * (2 ** (attempt - 1))
+                        if settings.DEBUG_MODE:
+                            print(f"[TMAPI] Retry {attempt}/{attempts}, ждём {sleep_time:.2f} сек...")
+                        await asyncio.sleep(sleep_time)
     
     async def _apply_rate_limit(self):
         """
@@ -197,7 +230,7 @@ class TmapiClient:
     async def _resolve_pdd_goods_id_from_url(self, url: str) -> None:
         return None
     
-    async def get_product_info_auto(self, url: str):
+    async def get_product_info_auto(self, url: str, request_id: str | None = None):
         """
         Универсальный метод для получения информации о товаре.
         Автоматически определяет платформу (Taobao/Tmall/Pinduoduo) и вызывает нужный API.
@@ -227,9 +260,14 @@ class TmapiClient:
             result = await self.get_pinduoduo_product(url)
             result['_platform'] = Platform.PINDUODUO  # Добавляем метку платформы
             return result
+
+        elif platform == Platform.ALI1688:
+            result = await self.get_ali_product_by_url(url, request_id=request_id)
+            result['_platform'] = Platform.ALI1688
+            return result
         
         elif platform in [Platform.TAOBAO, Platform.TMALL]:
-            result = await self.get_product_info(url)
+            result = await self.get_product_info(url, request_id=request_id)
             result['_platform'] = platform  # Добавляем метку платформы
             return result
         
@@ -237,3 +275,58 @@ class TmapiClient:
             error_msg = f"Неподдерживаемая платформа: {url}"
             logger.error(error_msg)
             raise ValueError(error_msg)
+
+    async def get_ali_product_by_url(self, url: str, request_id: str | None = None):
+        """
+        Получает информацию о товаре 1688 по URL.
+        Используется тот же токен TMAPI.
+        """
+        logger.info(f"Fetching 1688 product info by URL: {url}")
+
+        querystring = {"apiToken": self.api_token}
+        payload = {"url": url}
+
+        if settings.DISABLE_SSL_VERIFY:
+            logger.warning("SSL verification is DISABLED. This is not recommended for production!")
+            verify_ssl = False
+        else:
+            verify_ssl = ssl.create_default_context(cafile=certifi.where())
+
+        timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+
+        headers = {"X-Request-ID": request_id} if request_id else None
+
+        async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout, headers=headers) as client:
+            response = await client.post(self.ali_api_url, json=payload, params=querystring)
+            response.raise_for_status()
+            logger.debug(f"1688 TMAPI response status: {response.status_code}")
+            logger.debug(f"1688 TMAPI raw response: {response.text[:500]}...")
+            return response.json()
+
+    async def get_ali_product_by_id(self, item_id: int, request_id: str | None = None):
+        """
+        Получает информацию о товаре 1688 по item_id (без URL).
+        """
+        logger.info(f"Fetching 1688 product info by item_id: {item_id}")
+
+        querystring = {
+            "apiToken": self.ali_api_token,
+            "item_id": item_id
+        }
+
+        if settings.DISABLE_SSL_VERIFY:
+            logger.warning("SSL verification is DISABLED. This is not recommended for production!")
+            verify_ssl = False
+        else:
+            verify_ssl = ssl.create_default_context(cafile=certifi.where())
+
+        timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+
+        headers = {"X-Request-ID": request_id} if request_id else None
+
+        async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout, headers=headers) as client:
+            response = await client.get(self.ali_item_api_url, params=querystring)
+            response.raise_for_status()
+            logger.debug(f"1688 TMAPI (by id) response status: {response.status_code}")
+            logger.debug(f"1688 TMAPI (by id) raw response: {response.text[:500]}...")
+            return response.json()

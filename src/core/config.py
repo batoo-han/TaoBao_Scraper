@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     """
     BOT_TOKEN: str  # Токен Telegram бота
     TMAPI_TOKEN: str  # API ключ для tmapi.top (Taobao/Tmall)
+    TMAPI_ALI_TOKEN: str = ""  # API ключ TMAPI для 1688 (ali/item_detail*)
     TMAPI_PINDUODUO_TOKEN: str = ""  # Не используется (Pinduoduo через веб-скрапинг)
     YANDEX_GPT_API_KEY: str  # API ключ для YandexGPT
     EXCHANGE_RATE_API_KEY: str  # API ключ для ExchangeRate-API
@@ -59,6 +60,8 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = ""  # Кастомный base URL (например, https://llm-gw.example.com/v1)
     PROXYAPI_API_KEY: str = ""  # API ключ ProxyAPI (https://proxyapi.ru)
     PROXYAPI_BASE_URL: str = "https://api.proxyapi.ru/openai/v1"  # OpenAI-совместимый endpoint ProxyAPI
+    PROXYAPI_BILLING_CHAT_ID: str = ""  # Чат для уведомлений о балансе ProxyAPI
+    PROXYAPI_NOTIFY_402: bool = False  # Уведомлять о 402 (исчерпан баланс) ProxyAPI
     YANDEX_FOLDER_ID: str # ID каталога в Yandex.Cloud
     GOOGLE_CLOUD_PROJECT: str = ""  # ID проекта Google Cloud (не используется, оставлено для совместимости)
     ADMIN_CHAT_ID: str = ""  # ID чата администратора для уведомлений об ошибках (необязательно)
@@ -73,6 +76,8 @@ class Settings(BaseSettings):
     TRANSLATE_OPENAI_MODEL: str = "gpt-4o-mini"  # Legacy-поле для OpenAI моделей
     TRANSLATE_LEGACY: bool = False  # True → использовать Yandex Translate вместо LLM
     TMAPI_RATE_LIMIT: int = 5  # Максимальное количество запросов к TMAPI в секунду (по умолчанию 5)
+    TMAPI_RETRY_ATTEMPTS: int = 3  # Количество повторов для TMAPI при ошибках сети/429/5xx
+    TMAPI_RETRY_BACKOFF: float = 0.5  # Базовая задержка перед повтором (сек), экспоненциальный рост
     CONVERT_CURRENCY: bool = False  # Флаг для включения/отключения конвертации валют
     DEFAULT_SIGNATURE: str = "@annabbox"  # Подпись по умолчанию для постов
     DEFAULT_CURRENCY: str = "cny"  # Валюта по умолчанию (cny или rub)

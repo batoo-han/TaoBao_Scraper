@@ -20,6 +20,7 @@ class Platform:
     """Константы для платформ электронной коммерции"""
     TAOBAO = "taobao"
     TMALL = "tmall"
+    ALI1688 = "1688"
     PINDUODUO = "pinduoduo"
     UNKNOWN = "unknown"
 
@@ -48,6 +49,13 @@ class URLParser:
     TMALL_DOMAINS = [
         "detail.tmall.com",
         "detail.m.tmall.com"
+    ]
+
+    ALI1688_DOMAINS = [
+        "1688.com",
+        "detail.1688.com",
+        "m.1688.com",
+        "winport.m.1688.com"
     ]
     
     PINDUODUO_DOMAINS = [
@@ -85,6 +93,11 @@ class URLParser:
             for tmall_domain in URLParser.TMALL_DOMAINS:
                 if tmall_domain in domain or domain_clean.endswith('.tmall.com'):
                     return Platform.TMALL
+
+            # Проверяем 1688
+            for ali_domain in URLParser.ALI1688_DOMAINS:
+                if ali_domain in domain or domain_clean.endswith('.1688.com'):
+                    return Platform.ALI1688
             
             # Проверяем Pinduoduo
             for pdd_domain in URLParser.PINDUODUO_DOMAINS:
@@ -160,6 +173,6 @@ class URLParser:
             item_id = URLParser.extract_pinduoduo_id(url)
             return platform, item_id
         
-        # Для Taobao/Tmall ID не нужен (передаём весь URL в API)
+        # Для Taobao/Tmall/1688 ID не нужен (передаём весь URL в API)
         return platform, None
 

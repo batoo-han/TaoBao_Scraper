@@ -142,19 +142,21 @@ if ratio > 3.0:  # Слишком большое
 
 ## Код реализации
 
-### 1. Новый метод в `tmapi.py`
+### 1. Метод в `tmapi.py` с учётом платформы
 
 ```python
-async def get_item_description(self, item_id: int):
+async def get_item_description(self, item_id: int, platform: str = Platform.TAOBAO):
     """
     Получает детальное описание товара с дополнительными изображениями.
+    Платформа taobao/tmall/1688 выбирается автоматически.
     """
     querystring = {
         "apiToken": self.api_token,
         "item_id": item_id
     }
     
-    response = await client.get(self.item_desc_api_url, params=querystring)
+    desc_url = self.item_desc_api_url if platform != Platform.ALI1688 else self.ali_item_desc_api_url
+    response = await client.get(desc_url, params=querystring)
     return response.json()
 ```
 
@@ -199,12 +201,12 @@ def _parse_detail_html(self, detail_html: str) -> list:
 ### 3. Фильтрация в `scraper.py`
 
 ```python
-async def _get_filtered_detail_images(self, item_id: int) -> list:
+async def _get_filtered_detail_images(self, item_id: int, platform: str = Platform.TAOBAO) -> list:
     """
     Получает дополнительные изображения из item_desc и фильтрует их.
     """
     # 1. Получаем данные
-    desc_data = await self.tmapi_client.get_item_description(item_id)
+    desc_data = await self.tmapi_client.get_item_description(item_id, platform=platform)
     detail_html = desc_data.get('data', {}).get('detail_html', '')  # ← STRING!
     
     # 2. Парсим HTML и извлекаем изображения с размерами

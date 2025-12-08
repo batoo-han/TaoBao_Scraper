@@ -65,7 +65,8 @@ class Scraper:
         url: str,
         user_signature: str = None,
         user_currency: str = None,
-        exchange_rate: float = None
+        exchange_rate: float = None,
+        request_id: str | None = None,
     ):
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
@@ -98,7 +99,7 @@ class Scraper:
         else:
             # Получаем данные о товаре через tmapi.top (автоопределение платформы)
             logger.info("Обработка через TMAPI")
-            api_response = await self.tmapi_client.get_product_info_auto(url)
+            api_response = await self.tmapi_client.get_product_info_auto(url, request_id=request_id)
         
         # Извлекаем платформу (добавлено методом get_product_info_auto)
         platform = api_response.get('_platform', 'unknown')
@@ -312,7 +313,7 @@ class Scraper:
                 print(f"[Scraper] Извлечен item_id: {item_id}")
             
             if item_id:
-                detail_images = await self._get_filtered_detail_images(item_id)
+                detail_images = await self._get_filtered_detail_images(item_id, platform=platform, request_id=request_id)
                 if settings.DEBUG_MODE:
                     print(f"[Scraper] Получено detail изображений: {len(detail_images)}")
             else:
@@ -455,13 +456,14 @@ class Scraper:
                 print(f"[Scraper] main_imgs: {main_imgs_count} = sku_props: {sku_props_count} → используем main_imgs (приоритет)")
             return main_imgs if main_imgs else sku_unique_images
     
-    async def _get_filtered_detail_images(self, item_id: int) -> list:
+    async def _get_filtered_detail_images(self, item_id: int, platform: str = Platform.TAOBAO, request_id: str | None = None) -> list:
         """
         Получает дополнительные изображения из item_desc и фильтрует их по размерам.
         Убирает баннеры и изображения, которые сильно отличаются от основной группы.
         
         Args:
             item_id: ID товара
+            platform: Платформа товара (taobao/tmall/1688)
             
         Returns:
             list: Отфильтрованный список URL изображений
@@ -471,7 +473,7 @@ class Scraper:
                 print(f"[Scraper] Запрашиваем item_desc для item_id={item_id}")
             
             # Получаем описание товара
-            desc_data = await self.tmapi_client.get_item_description(item_id)
+            desc_data = await self.tmapi_client.get_item_description(item_id, platform=platform, request_id=request_id)
             
             if settings.DEBUG_MODE:
                 print(f"[Scraper] item_desc ответ: code={desc_data.get('code')}, data keys={list(desc_data.get('data', {}).keys()) if desc_data.get('data') else 'None'}")

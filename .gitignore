@@ -66,3 +66,4 @@ pdd_cookies.json
 scripts/*.json
 data/user_settings.json
 data/*.json
+logs/

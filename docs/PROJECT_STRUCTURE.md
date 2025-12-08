@@ -88,16 +88,18 @@ TaoBao_Scraper_2/
 **Назначение:** Взаимодействие с внешними сервисами
 
 #### `tmapi.py`
-- клиент для TMAPI (tmapi.top)
-- поддержка Taobao, Tmall, Pinduoduo
+- клиент для tmapi.top
+- поддержка Taobao, Tmall, 1688 и Pinduoduo
 - автоматическое определение платформы
 - rate limiting (контроль частоты запросов)
 
 **Методы:**
 - `get_product_info_auto(url)` - универсальный метод с автоопределением платформы
 - `get_product_info(url)` - taobao/Tmall
+- `get_ali_product_by_url(url)` - 1688 по url
+- `get_ali_product_by_id(item_id)` - 1688 по id
 - `get_pinduoduo_product(url)` - pinduoduo
-- `get_item_description(item_id)` - детальные изображения taobao/Tmall
+- `get_item_description(item_id, platform)` - детальные изображения taobao/Tmall/1688
 
 **Зависимости:**
 - `src.core.config` - настройки (api токены, rate limit)
@@ -193,10 +195,10 @@ TaoBao_Scraper_2/
 **Назначение:** Общие функции и хелперы
 
 #### `url_parser.py`
-- определение платформы по URL (Taobao/Tmall/Pinduoduo)
+- определение платформы по URL (Taobao/Tmall/1688/Pinduoduo)
 - извлечение item_id из URL Pinduoduo
 - класс `URLParser` с статическими методами
-- константы платформ (`Platform.TAOBAO`, `Platform.PINDUODUO`, etc.)
+- константы платформ (`Platform.TAOBAO`, `Platform.ALI1688`, `Platform.PINDUODUO`, etc.)
 
 **Методы:**
 - `detect_platform(url)` - определяет платформу

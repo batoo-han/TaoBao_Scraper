@@ -2,6 +2,9 @@ import asyncio
 import random
 import logging
 import re
+import time
+import uuid
+import json
 from collections import deque
 from aiogram import Router, F
 from aiogram.types import (
@@ -34,6 +37,12 @@ from src.services.access_control import (
 
 logger = logging.getLogger(__name__)
 
+
+def _log_json(level: str, **payload):
+    """Структурированное логирование в JSON."""
+    msg = json.dumps(payload, ensure_ascii=False)
+    getattr(logger, level, logger.info)(msg)
+
 # Инициализация роутера для обработки сообщений
 router = Router()
 # Инициализация скрапера для получения информации о товарах
@@ -64,9 +73,10 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
-def build_settings_menu_keyboard() -> ReplyKeyboardMarkup:
+def build_settings_menu_keyboard(user_id: int | None = None) -> ReplyKeyboardMarkup:
     """
     Создаёт меню настроек с кнопкой запуска Mimi App, если указана ссылка в настройках.
+    Для пользователей с валютой RUB добавляет кнопку смены курса.
     """
     rows: list[list[KeyboardButton]] = []
 
@@ -74,13 +84,19 @@ def build_settings_menu_keyboard() -> ReplyKeyboardMarkup:
     if mini_app_url:
         rows.append([KeyboardButton(text="🧩 Mimi App", web_app=WebAppInfo(url=mini_app_url))])
 
-    rows.extend(
-        [
-            [KeyboardButton(text="✍️ Изменить подпись")],
-            [KeyboardButton(text="💱 Валюта"), KeyboardButton(text="ℹ️ Мои настройки")],
-            [KeyboardButton(text="🔙 В главное меню")],
-        ]
-    )
+    rows.append([KeyboardButton(text="✍️ Изменить подпись")])
+    rows.append([KeyboardButton(text="💱 Валюта"), KeyboardButton(text="ℹ️ Мои настройки")])
+
+    try:
+        if user_id is not None:
+            settings_obj = user_settings_service.get_settings(user_id)
+            if settings_obj.default_currency.lower() == "rub":
+                rows.append([KeyboardButton(text="📈 Сменить курс")])
+    except Exception:
+        # В случае ошибки не блокируем построение клавиатуры
+        pass
+
+    rows.append([KeyboardButton(text="🔙 В главное меню")])
 
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
@@ -420,7 +436,7 @@ async def open_settings_menu(message: Message, state: FSMContext) -> None:
     user_settings_service.get_settings(user_id)
     await message.answer(
         "⚙️ <b>Настройки</b>\n\nВыберите действие:",
-        reply_markup=build_settings_menu_keyboard(),
+        reply_markup=build_settings_menu_keyboard(user_id),
         parse_mode="HTML"
     )
 
@@ -462,7 +478,7 @@ async def update_signature(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         f"✅ Подпись обновлена: <code>{new_signature}</code>",
-        reply_markup=build_settings_menu_keyboard(),
+        reply_markup=build_settings_menu_keyboard(message.from_user.id),
         parse_mode="HTML"
     )
 
@@ -490,7 +506,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         await callback.message.edit_reply_markup()
         await callback.message.answer(
             "Настройки не изменены.",
-            reply_markup=build_settings_menu_keyboard(),
+            reply_markup=build_settings_menu_keyboard(callback.from_user.id),
         )
         return
 
@@ -503,7 +519,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         await callback.message.edit_reply_markup()
         await callback.message.answer(
             "✅ Валюта по умолчанию: юань. Конвертация отключена.",
-            reply_markup=build_settings_menu_keyboard(),
+            reply_markup=build_settings_menu_keyboard(user_id),
         )
     elif choice == "rub":
         user_settings = user_settings_service.update_currency(user_id, "rub")
@@ -518,10 +534,29 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         else:
             await callback.message.answer(
                 f"✅ Валюта по умолчанию: рубль. Текущий курс: {float(user_settings.exchange_rate):.4f} ₽ за 1 ¥.",
-                reply_markup=build_settings_menu_keyboard(),
+                reply_markup=build_settings_menu_keyboard(callback.from_user.id),
             )
     else:
         await callback.answer("Неизвестный выбор", show_alert=True)
+
+
+@router.message(F.text == "📈 Сменить курс")
+async def prompt_change_rate(message: Message, state: FSMContext) -> None:
+    """Запрашивает новый курс, если валюта = рубль."""
+    if not await ensure_access(message):
+        return
+    user_id = message.from_user.id
+    user_settings = user_settings_service.get_settings(user_id)
+    if user_settings.default_currency.lower() != "rub":
+        await state.clear()
+        await message.answer(
+            "Сначала выберите валюту: рубль. Откройте «💱 Валюта» и установите рубль.",
+            reply_markup=build_settings_menu_keyboard(user_id),
+        )
+        return
+
+    await state.set_state(SettingsState.waiting_exchange_rate)
+    await message.answer("Введите новый курс рубля (например 12.35).")
 
 
 @router.message(SettingsState.waiting_exchange_rate)
@@ -542,7 +577,7 @@ async def set_exchange_rate(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         f"✅ Курс обновлён: 1 ¥ = {rate:.4f} ₽.",
-        reply_markup=build_settings_menu_keyboard(),
+        reply_markup=build_settings_menu_keyboard(message.from_user.id),
     )
 
 
@@ -557,7 +592,7 @@ async def show_settings(message: Message, state: FSMContext) -> None:
     summary = format_settings_summary(user_settings)
     await message.answer(
         summary,
-        reply_markup=build_settings_menu_keyboard(),
+        reply_markup=build_settings_menu_keyboard(user_id),
         parse_mode="HTML"
     )
 
@@ -724,6 +759,9 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     if not await ensure_access(message):
         return
 
+    request_id = str(uuid.uuid4())
+    started_at = time.monotonic()
+
     # Отправляем начальное сообщение
     await message.answer("Обрабатываю вашу ссылку, пожалуйста, подождите...")
     
@@ -738,7 +776,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     if current_state:
         await message.answer(
             "Сначала завершите настройку, затем отправьте ссылку.",
-            reply_markup=build_settings_menu_keyboard(),
+            reply_markup=build_settings_menu_keyboard(message.from_user.id),
         )
         return
 
@@ -746,27 +784,69 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     
     # Получаем настройки пользователя
     user_id = message.from_user.id
+    username = message.from_user.username or ""
     user_settings = user_settings_service.get_settings(user_id)
     
     # Проверяем, что если валюта рубль, то курс установлен
     if user_settings.default_currency.lower() == "rub" and not user_settings.exchange_rate:
         await message.answer(
             "⚠️ Сначала укажите курс рубля в настройках.",
-            reply_markup=build_settings_menu_keyboard(),
+            reply_markup=build_settings_menu_keyboard(user_id),
         )
         return
     
     try:
-        logger.info(f"Обработка ссылки: {product_url}")
-        logger.info(f"Настройки пользователя: валюта={user_settings.default_currency}, курс={user_settings.exchange_rate}, подпись={user_settings.signature}")
+        _log_json(
+            "info",
+            event="scrape_start",
+            request_id=request_id,
+            chat_id=message.chat.id,
+            user_id=user_id,
+            username=username or "unknown",
+            url=product_url,
+        )
+        _log_json(
+            "info",
+            event="user_settings",
+            request_id=request_id,
+            chat_id=message.chat.id,
+            user_id=user_id,
+            username=username or "unknown",
+            currency=user_settings.default_currency,
+            exchange_rate=user_settings.exchange_rate,
+            signature=user_settings.signature,
+        )
         # Скрапинг информации о товаре и генерация текста поста с учётом настроек пользователя
         post_text, image_urls = await scraper.scrape_product(
             product_url,
             user_signature=user_settings.signature,
             user_currency=user_settings.default_currency,
-            exchange_rate=user_settings.exchange_rate
+            exchange_rate=user_settings.exchange_rate,
+            request_id=request_id,
         )
-        logger.info(f"Скрапинг завершён. Длина текста: {len(post_text) if post_text else 0}, изображений: {len(image_urls) if image_urls else 0}")
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        _log_json(
+            "info",
+            event="scrape_done",
+            request_id=request_id,
+            chat_id=message.chat.id,
+            user_id=user_id,
+            username=username or "unknown",
+            text_len=len(post_text) if post_text else 0,
+            images=len(image_urls) if image_urls else 0,
+            duration_ms=duration_ms,
+        )
+        _log_json(
+            "info",
+            event="metric_scrape",
+            status="success",
+            request_id=request_id,
+            chat_id=message.chat.id,
+            user_id=user_id,
+            username=username or "unknown",
+            duration_ms=duration_ms,
+            url=product_url,
+        )
         
         # Проверяем, что результат не пустой
         if not post_text:
@@ -805,7 +885,28 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
 
     except Exception as e:
         # Логируем ошибку перед обработкой
-        logger.error(f"Ошибка при обработке ссылки {product_url}: {e}", exc_info=True)
+        _log_json(
+            "error",
+            event="scrape_error",
+            request_id=request_id,
+            chat_id=message.chat.id,
+            user_id=user_id,
+            username=username or "unknown",
+            url=product_url,
+            error=str(e),
+        )
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        _log_json(
+            "info",
+            event="metric_scrape",
+            status="error",
+            request_id=request_id,
+            chat_id=message.chat.id,
+            user_id=user_id,
+            username=username or "unknown",
+            duration_ms=duration_ms,
+            url=product_url,
+        )
         # Профессиональная обработка ошибок (с защитой на случай, если error_handler ещё не успел инициализироваться)
         try:
             handler = getattr(error_handler_module, "error_handler", None)
@@ -815,12 +916,22 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                 await handler.handle_error(
                     error=e,
                     user_message=message,
-                    context=f"Product URL: {product_url}",
+                    context=f"Product URL: {product_url}, request_id={request_id}",
                     error_type=error_type,
+                    request_id=request_id,
                 )
                 return
         except Exception as handler_exc:  # защита от падения внутри самого обработчика
-            logger.error(f"Ошибка внутри error_handler: {handler_exc}", exc_info=True)
+            _log_json(
+                "error",
+                event="error_handler_failure",
+                request_id=request_id,
+                chat_id=message.chat.id,
+                user_id=user_id,
+                username=username or "unknown",
+                url=product_url,
+                error=str(handler_exc),
+            )
 
         # Fallback на случай если error_handler не инициализирован или сломался
         logger.warning("error_handler недоступен, используем fallback-поведение")
