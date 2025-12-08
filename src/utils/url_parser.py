@@ -154,6 +154,64 @@ class URLParser:
             return None
     
     @staticmethod
+    def extract_1688_id(url: str) -> Optional[str]:
+        """
+        Извлекает offer_id из URL 1688.
+        
+        Поддерживаемые форматы:
+        - https://detail.1688.com/offer/978544643627.html?offerId=978544643627&hotSaleSkuId=...
+        - https://detail.1688.com/offer/978544643627.html
+        - https://m.1688.com/offer/978544643627.html
+        
+        Args:
+            url: URL товара 1688
+            
+        Returns:
+            Optional[str]: ID товара (offer_id) или None если не найден
+        """
+        try:
+            # Парсим URL
+            parsed = urlparse(url if url.startswith('http') else f'https://{url}')
+            
+            # Ищем паттерн /offer/{id}.html в пути
+            # Пример: /offer/978544643627.html
+            match = re.search(r'/offer/(\d+)\.html', parsed.path)
+            if match:
+                offer_id = match.group(1)
+                if offer_id.isdigit():
+                    return offer_id
+            
+            # Если не нашли в пути, проверяем query параметры
+            query_params = parse_qs(parsed.query)
+            if 'offerId' in query_params:
+                offer_id = query_params['offerId'][0]
+                if offer_id.isdigit():
+                    return offer_id
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    @staticmethod
+    def normalize_1688_url(url: str) -> Optional[str]:
+        """
+        Нормализует URL 1688 до формата: https://detail.1688.com/offer/{id}.html
+        
+        Извлекает ID товара из любого формата URL 1688 и формирует правильный URL.
+        
+        Args:
+            url: URL товара 1688 (любой формат)
+            
+        Returns:
+            Optional[str]: Нормализованный URL или None если ID не найден
+        """
+        offer_id = URLParser.extract_1688_id(url)
+        if offer_id:
+            return f"https://detail.1688.com/offer/{offer_id}.html"
+        return None
+    
+    @staticmethod
     def parse_url(url: str) -> Tuple[str, Optional[str]]:
         """
         Комплексный анализ URL - определяет платформу и извлекает ID.
@@ -163,8 +221,8 @@ class URLParser:
             
         Returns:
             Tuple[str, Optional[str]]: (platform, item_id)
-            - platform: название платформы (taobao/tmall/pinduoduo/unknown)
-            - item_id: ID товара (только для Pinduoduo, для Taobao/Tmall None)
+            - platform: название платформы (taobao/tmall/1688/pinduoduo/unknown)
+            - item_id: ID товара (для Pinduoduo и 1688), None для Taobao/Tmall
         """
         platform = URLParser.detect_platform(url)
         
@@ -173,6 +231,11 @@ class URLParser:
             item_id = URLParser.extract_pinduoduo_id(url)
             return platform, item_id
         
-        # Для Taobao/Tmall/1688 ID не нужен (передаём весь URL в API)
+        # Для 1688 извлекаем ID для нормализации URL
+        if platform == Platform.ALI1688:
+            item_id = URLParser.extract_1688_id(url)
+            return platform, item_id
+        
+        # Для Taobao/Tmall ID не нужен (передаём весь URL в API)
         return platform, None
 

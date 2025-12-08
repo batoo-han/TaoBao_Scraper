@@ -764,10 +764,10 @@ async def access_edit_blacklist(message: Message, state: FSMContext) -> None:
     await message.answer(summary)
 
 
-@router.message(F.text.regexp(r"(https?://)?(www\.)?(m\.)?(e\.)?(detail\.tmall\.com|item\.taobao\.com|a\.m\.taobao\.com|market\.m\.taobao\.com|h5\.m\.taobao\.com|s\.click\.taobao\.com|uland\.taobao\.com|tb\.cn|mobile\.yangkeduo\.com|yangkeduo\.com|pinduoduo\.com|pdd\.com)/.*"))
+@router.message(F.text.regexp(r"(https?://)?(www\.)?(m\.)?(e\.)?(detail\.tmall\.com|item\.taobao\.com|a\.m\.taobao\.com|market\.m\.taobao\.com|h5\.m\.taobao\.com|s\.click\.taobao\.com|uland\.taobao\.com|tb\.cn|detail\.1688\.com|1688\.com|m\.1688\.com|winport\.m\.1688\.com|mobile\.yangkeduo\.com|yangkeduo\.com|pinduoduo\.com|pdd\.com)/.*"))
 async def handle_product_link(message: Message, state: FSMContext) -> None:
     """
-    Обработчик сообщений, содержащих ссылки на товары Taobao/Tmall/Pinduoduo.
+    Обработчик сообщений, содержащих ссылки на товары Taobao/Tmall/1688/Pinduoduo.
     Автоматически определяет платформу, извлекает информацию о товаре,
     генерирует пост и отправляет его пользователю.
     """

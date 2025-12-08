@@ -87,8 +87,17 @@ class Scraper:
         # Сохраняем переданный курс пользователя (если есть)
         user_exchange_rate = exchange_rate if exchange_rate is not None else None
         # Определяем платформу заранее, чтобы Pinduoduo обрабатывать веб-скрапингом
-        platform, _ = URLParser.parse_url(url)
+        platform, item_id = URLParser.parse_url(url)
         logger.info(f"Определена платформа: {platform} для URL: {url}")
+        
+        # Нормализуем URL для 1688: извлекаем ID и формируем правильный формат
+        if platform == Platform.ALI1688:
+            normalized_url = URLParser.normalize_1688_url(url)
+            if normalized_url:
+                logger.info(f"Нормализован URL 1688: {url} -> {normalized_url}")
+                url = normalized_url
+            else:
+                logger.warning(f"Не удалось нормализовать URL 1688: {url}, используем исходный")
         
         if platform == Platform.PINDUODUO:
             logger.info("Обработка Pinduoduo через веб-скрапинг")

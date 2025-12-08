@@ -26,9 +26,9 @@ class TmapiClient:
         self.item_desc_api_url = "http://api.tmapi.top/taobao/item_desc"
 
         # URL API для 1688
-        self.ali_api_url = "http://api.tmapi.top/ali/item_detail_by_url"
-        self.ali_item_api_url = "http://api.tmapi.top/ali/item_detail"
-        self.ali_item_desc_api_url = "http://api.tmapi.top/ali/item_desc"
+        self.ali_api_url = "http://api.tmapi.top/1688/item_detail_by_url"
+        self.ali_item_api_url = "http://api.tmapi.top/1688/item_detail"
+        self.ali_item_desc_api_url = "http://api.tmapi.top/1688/item_desc"
         
         # URL API для Pinduoduo
         self.pinduoduo_api_url = "http://api.tmapi.top/pdd/item_detail"
@@ -279,11 +279,11 @@ class TmapiClient:
     async def get_ali_product_by_url(self, url: str, request_id: str | None = None):
         """
         Получает информацию о товаре 1688 по URL.
-        Используется тот же токен TMAPI.
+        Используется токен для 1688 (TMAPI_ALI_TOKEN или основной TMAPI_TOKEN).
         """
         logger.info(f"Fetching 1688 product info by URL: {url}")
 
-        querystring = {"apiToken": self.api_token}
+        querystring = {"apiToken": self.ali_api_token}
         payload = {"url": url}
 
         if settings.DISABLE_SSL_VERIFY:

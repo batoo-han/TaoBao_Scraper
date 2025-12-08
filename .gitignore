@@ -67,3 +67,4 @@ scripts/*.json
 data/user_settings.json
 data/*.json
 logs/
+other/
