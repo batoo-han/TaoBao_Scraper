@@ -47,9 +47,49 @@ class MiniAppServer:
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
+        # Отключаем access-логирование для healthcheck запросов
+        self._setup_logging_filter()
         self._register_routes()
 
     # region web server bootstrap ------------------------------------------------
+    def _setup_logging_filter(self) -> None:
+        """
+        Настраивает фильтрацию access-логов для healthcheck запросов.
+        Healthcheck запросы не должны засорять логи.
+        """
+        access_logger = logging.getLogger("aiohttp.access")
+        
+        # Создаём фильтр, который исключает healthcheck запросы
+        class HealthCheckFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                """
+                Исключает healthcheck запросы из access-логов.
+                Проверяет путь запроса в различных форматах логов aiohttp.
+                
+                aiohttp форматирует логи как:
+                "127.0.0.1 [09/Dec/2025:16:04:32 +0300] "GET /mini-app/health HTTP/1.1" 200 194"
+                """
+                try:
+                    # Получаем отформатированное сообщение
+                    if hasattr(record, "getMessage"):
+                        msg_str = record.getMessage()
+                    else:
+                        msg_str = str(record.msg)
+                        if record.args:
+                            msg_str = msg_str % record.args
+                    
+                    # Исключаем записи, содержащие /health в пути запроса
+                    if "/health" in msg_str:
+                        return False
+                except Exception:
+                    # В случае ошибки не фильтруем запись
+                    pass
+                
+                return True
+        
+        # Применяем фильтр к access logger
+        access_logger.addFilter(HealthCheckFilter())
+    
     def _register_routes(self) -> None:
         """
         Настраивает эндпоинты сервера.
