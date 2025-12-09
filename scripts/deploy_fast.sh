@@ -5,12 +5,21 @@ set -euo pipefail
 # Требования: Docker Compose v2, заранее сконфигурированный .env и собранный образ.
 #
 # Поведение:
-# 1) Опционально тянем свежую базу (docker compose pull) — отключено по умолчанию
+# 1) Опционально тянем свежую базу (docker compose pull) — отключено по умолчанию (DO_PULL=1)
 # 2) Собираем образ (если нужно) — можно отключить SKIP_BUILD=1
+#    По умолчанию используется локальный образ (без --pull) для избежания проблем с сетью
+#    Для принудительного обновления базового образа используйте DO_PULL=1
 # 3) Перезапускаем только сервис бота (--no-deps) с уже собранным образом
 # 4) Ждём healthcheck контейнера
 #
 # Простой = время пересоздания контейнера + прогрев, обычно 2–10 секунд при тёплой машине.
+#
+# Переменные окружения:
+#   DO_PULL=1        - принудительно обновить базовый образ из Docker Hub (может вызвать проблемы с сетью)
+#   SKIP_BUILD=1     - пропустить сборку образа (использовать уже готовый)
+#   SERVICE          - имя сервиса (по умолчанию: taobao-bot)
+#   COMPOSE_FILE     - путь к compose файлу (по умолчанию: docker-compose.yml)
+#   HEALTH_TIMEOUT   - таймаут ожидания healthcheck в секундах (по умолчанию: 90)
 
 SERVICE=${SERVICE:-taobao-bot}
 COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml}
@@ -27,8 +36,15 @@ if [[ "${PULL}" == "1" ]]; then
 fi
 
 if [[ "${BUILD}" != "1" ]]; then
-  echo "==> docker compose build --pull ${SERVICE}"
-  docker compose -f "${COMPOSE_FILE}" build --pull "${SERVICE}"
+  # Используем --pull только если явно указано DO_PULL=1
+  # По умолчанию используем локальный образ для избежания проблем с сетью
+  if [[ "${PULL}" == "1" ]]; then
+    echo "==> docker compose build --pull ${SERVICE}"
+    docker compose -f "${COMPOSE_FILE}" build --pull "${SERVICE}"
+  else
+    echo "==> docker compose build ${SERVICE} (без --pull, используем локальный образ)"
+    docker compose -f "${COMPOSE_FILE}" build "${SERVICE}"
+  fi
 else
   echo "==> SKIP_BUILD=1 — пропускаем сборку (используем уже готовый образ)"
 fi

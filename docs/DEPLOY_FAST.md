@@ -25,22 +25,43 @@ bash scripts/deploy_fast.sh
 
 ## Переменные управления
 - `SKIP_BUILD=1` — пропустить сборку, использовать уже готовый образ.
-- `DO_PULL=1` — перед сборкой подтянуть свежие слои/образ из реестра.
+- `DO_PULL=1` — перед сборкой подтянуть свежие слои/образ из реестра (может вызвать проблемы с сетью/Docker Hub).
 - `COMPOSE_FILE=...` — путь к compose-файлу (по умолчанию `docker-compose.yml`).
 - `SERVICE=taobao-bot` — имя сервиса (по умолчанию `taobao-bot`).
 - `HEALTH_TIMEOUT=90` — таймаут ожидания healthcheck в секундах.
 
+**Важно:** По умолчанию скрипт использует локальный базовый образ (без `--pull`), чтобы избежать проблем с сетью и доступом к Docker Hub. Используйте `DO_PULL=1` только если уверены в стабильном подключении к Docker Hub.
+
 Примеры:
 ```bash
-# 1) Полный цикл (pull+build+up) — минимальный простой, но дольше готовим образ
+# 1) Стандартный деплой (локальный образ, без обновления базового слоя)
+bash scripts/deploy_fast.sh
+
+# 2) С обновлением базового образа из Docker Hub (требует стабильного подключения)
 DO_PULL=1 bash scripts/deploy_fast.sh
 
-# 2) Образ уже собран/запушен — быстрый перезапуск
-SKIP_BUILD=1 DO_PULL=1 bash scripts/deploy_fast.sh
+# 3) Образ уже собран — быстрый перезапуск без сборки
+SKIP_BUILD=1 bash scripts/deploy_fast.sh
 
-# 3) Кастомный compose-файл
+# 4) Кастомный compose-файл
 COMPOSE_FILE=docker-compose.prod.yml bash scripts/deploy_fast.sh
 ```
+
+## Решение проблем с сетью
+
+Если возникает ошибка подключения к Docker Hub (например, `network is unreachable` при IPv6):
+1. **Используйте стандартный режим** (без `DO_PULL=1`) — скрипт использует локально кэшированный образ
+2. Если нужно обновить базовый образ, проверьте подключение к Docker Hub:
+   ```bash
+   docker pull python:3.11-slim
+   ```
+3. Для принудительного использования IPv4 добавьте в `/etc/docker/daemon.json`:
+   ```json
+   {
+     "ipv6": false
+   }
+   ```
+   Затем перезапустите Docker: `systemctl restart docker`
 
 ## Что добавлено в docker-compose
 - `stop_grace_period: 10s` — корректное завершение при рестарте.
