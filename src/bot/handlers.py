@@ -953,6 +953,97 @@ async def access_menu_entry(message: Message, state: FSMContext) -> None:
     await message.answer(help_text, parse_mode="HTML")
 
 
+@router.message(Command("dump_data"))
+async def dump_data_command(message: Message, state: FSMContext) -> None:
+    """
+    Команда для аварийного экспорта всех настроек пользователей и списков доступа.
+    Доступно только для админов.
+    Выводит JSON-дампы в чат для сохранения данных.
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        await message.answer("❌ Эта команда доступна только администраторам.")
+        return
+
+    await state.clear()
+
+    try:
+        await message.answer("📦 Подготавливаю дамп данных...")
+
+        # Дамп настроек пользователей
+        user_settings_service = get_user_settings_service()
+        user_data = {
+            str(user_id): {
+                "signature": settings_obj.signature,
+                "default_currency": settings_obj.default_currency,
+                "exchange_rate": settings_obj.exchange_rate,
+            }
+            for user_id, settings_obj in user_settings_service._settings_cache.items()
+        }
+
+        user_json = json.dumps(user_data, ensure_ascii=False, indent=2)
+        user_info = (
+            f"👥 <b>Настройки пользователей</b>\n"
+            f"Всего пользователей: {len(user_data)}\n"
+            f"Размер JSON: {len(user_json)} символов\n\n"
+            f"<code>user_settings.json</code>:"
+        )
+
+        await message.answer(user_info, parse_mode="HTML")
+
+        # Разбиваем большой JSON на части (лимит Telegram ~4000 символов, с запасом 3500)
+        user_chunks = split_text_chunks(user_json, 3500)
+        for i, chunk in enumerate(user_chunks, 1):
+            header = f"<b>Часть {i}/{len(user_chunks)}:</b>\n\n" if len(user_chunks) > 1 else ""
+            await message.answer(f"{header}<code>{chunk}</code>", parse_mode="HTML")
+            # Небольшая задержка, чтобы не превысить rate limits
+            await asyncio.sleep(0.5)
+
+        # Дамп списков доступа
+        from dataclasses import asdict
+        access_data = asdict(access_control_service._config)
+        access_json = json.dumps(access_data, ensure_ascii=False, indent=2)
+
+        access_info = (
+            f"\n🔐 <b>Списки доступа</b>\n"
+            f"Размер JSON: {len(access_json)} символов\n\n"
+            f"<code>access_control.json</code>:"
+        )
+
+        await message.answer(access_info, parse_mode="HTML")
+
+        access_chunks = split_text_chunks(access_json, 3500)
+        for i, chunk in enumerate(access_chunks, 1):
+            header = f"<b>Часть {i}/{len(access_chunks)}:</b>\n\n" if len(access_chunks) > 1 else ""
+            await message.answer(f"{header}<code>{chunk}</code>", parse_mode="HTML")
+            await asyncio.sleep(0.5)
+
+        summary_msg = (
+            f"\n✅ <b>Дамп завершён</b>\n\n"
+            f"• Настроек пользователей: {len(user_data)}\n"
+            f"• Белый список: {len(access_data.get('whitelist_ids', []))} ID, "
+            f"{len(access_data.get('whitelist_usernames', []))} username\n"
+            f"• Чёрный список: {len(access_data.get('blacklist_ids', []))} ID, "
+            f"{len(access_data.get('blacklist_usernames', []))} username\n\n"
+            f"Скопируйте JSON данные и сохраните их в файлы для восстановления."
+        )
+        await message.answer(summary_msg, parse_mode="HTML")
+
+        _log_json(
+            "info",
+            event="admin_dump_data",
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            users_count=len(user_data),
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при создании дампа данных: {e}", exc_info=True)
+        await message.answer(
+            f"❌ Ошибка при создании дампа данных:\n<code>{str(e)}</code>",
+            parse_mode="HTML",
+        )
+
+
 @router.message(AccessState.choosing_action)
 async def access_choose_action(message: Message, state: FSMContext) -> None:
     """
