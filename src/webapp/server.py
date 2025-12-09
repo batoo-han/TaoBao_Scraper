@@ -280,11 +280,16 @@ class MiniAppServer:
         except Exception:
             return web.json_response({"error": "Неверный JSON"}, status=400)
 
+        forward_channel_id = (payload.get("forward_channel_id") or "").strip()
+        if len(forward_channel_id) > 128:
+            return web.json_response({"error": "ID канала не должен превышать 128 символов"}, status=400)
+
         updated = self.admin_settings_service.update_feature_flags(
             convert_currency=bool(payload.get("convert_currency")),
             tmapi_notify_439=bool(payload.get("tmapi_notify_439")),
             debug_mode=bool(payload.get("debug_mode")),
             mock_mode=bool(payload.get("mock_mode")),
+            forward_channel_id=forward_channel_id,
         )
 
         logger.info(

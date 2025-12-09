@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     # Сообщения по доступу к боту
     ACCESS_SUPPORT_USERNAME: str = ""  # Ник в Telegram (без @), к которому можно обратиться по поводу доступа
 
+    # Канал для дублирования всех постов
+    FORWARD_CHANNEL_ID: str = ""  # ID или @username канала, куда дублировать посты
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

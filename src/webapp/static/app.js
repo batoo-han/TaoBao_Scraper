@@ -33,6 +33,7 @@ const elements = {
   notify439: document.getElementById("tmapi-notify"),
   debugMode: document.getElementById("debug-mode"),
   mockMode: document.getElementById("mock-mode"),
+  forwardChannel: document.getElementById("forward-channel"),
   accessCard: document.getElementById("access-card"),
   accessSummary: document.getElementById("access-summary"),
   accessDetails: document.getElementById("access-details"),
@@ -101,6 +102,7 @@ function renderAdminSettings() {
     tmapi_notify_439,
     debug_mode,
     mock_mode,
+    forward_channel_id,
   } = state.admin;
 
   elements.defaultProvider.value = default_llm || "yandex";
@@ -114,6 +116,7 @@ function renderAdminSettings() {
   elements.notify439.checked = Boolean(tmapi_notify_439);
   elements.debugMode.checked = Boolean(debug_mode);
   elements.mockMode.checked = Boolean(mock_mode);
+  elements.forwardChannel.value = forward_channel_id || "";
 }
 
 async function loadAccessRules() {
@@ -223,6 +226,7 @@ elements.flagsForm.addEventListener("submit", async (event) => {
       tmapi_notify_439: elements.notify439.checked,
       debug_mode: elements.debugMode.checked,
       mock_mode: elements.mockMode.checked,
+      forward_channel_id: elements.forwardChannel.value.trim(),
     };
     const result = await apiRequest("/admin/options", { method: "POST", body });
     state.admin = result.admin_settings;

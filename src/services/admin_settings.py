@@ -24,6 +24,27 @@ def _normalize_provider(raw: str | None) -> str:
     return value if value in {"yandex", "openai", "proxyapi"} else "yandex"
 
 
+def _normalize_channel_id(raw: str | int | None) -> str:
+    """
+    Нормализует идентификатор канала (ID или @username).
+    Пустая строка означает отключённую рассылку.
+    """
+    if raw is None:
+        return ""
+    value = str(raw).strip()
+    if not value:
+        return ""
+    # Разрешаем числовые ID (включая -100...) и username с @
+    if value.startswith("@"):
+        return value
+    if value.lstrip("-").isdigit():
+        try:
+            return str(int(value))
+        except Exception:
+            return value
+    return value
+
+
 @dataclass
 class AdminSettings:
     """
@@ -40,6 +61,7 @@ class AdminSettings:
     tmapi_notify_439: bool = False
     debug_mode: bool = False
     mock_mode: bool = False
+    forward_channel_id: str = ""
 
 
 class AdminSettingsService:
@@ -67,6 +89,7 @@ class AdminSettingsService:
             tmapi_notify_439=getattr(settings, "TMAPI_NOTIFY_439", False),
             debug_mode=getattr(settings, "DEBUG_MODE", False),
             mock_mode=getattr(settings, "MOCK_MODE", False),
+            forward_channel_id=_normalize_channel_id(getattr(settings, "FORWARD_CHANNEL_ID", "")),
         )
         self._load_from_disk()
         self.apply_to_runtime()
@@ -110,6 +133,7 @@ class AdminSettingsService:
         settings.TMAPI_NOTIFY_439 = self._data.tmapi_notify_439
         settings.DEBUG_MODE = self._data.debug_mode
         settings.MOCK_MODE = self._data.mock_mode
+        settings.FORWARD_CHANNEL_ID = self._data.forward_channel_id
 
         # Сбрасываем кэши, чтобы новые настройки вступили в силу немедленно
         llm_provider.reset_llm_cache()
@@ -161,6 +185,7 @@ class AdminSettingsService:
         tmapi_notify_439: bool,
         debug_mode: bool,
         mock_mode: bool,
+        forward_channel_id: str | int | None,
     ) -> AdminSettings:
         """
         Переключает рабочие опции бота.
@@ -170,6 +195,7 @@ class AdminSettingsService:
             self._data.tmapi_notify_439 = bool(tmapi_notify_439)
             self._data.debug_mode = bool(debug_mode)
             self._data.mock_mode = bool(mock_mode)
+            self._data.forward_channel_id = _normalize_channel_id(forward_channel_id)
             self._save_to_disk()
             self.apply_to_runtime()
             return replace(self._data)

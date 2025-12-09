@@ -359,6 +359,317 @@ async def send_media_block(message: Message, urls: list[str], caption: str | Non
     return await _send_media_group(message, urls, caption)
 
 
+def _normalize_broadcast_chat_id(raw: str | int | None) -> int | str | None:
+    """
+    Приводит идентификатор канала/группы к формату, который понимает Telegram Bot API.
+    
+    Правила нормализации:
+    - @username остаётся как есть
+    - Отрицательные числа (для групп/супергрупп) остаются как есть
+    - Удаляет пробелы из числовых ID (например, "3 018 683 678" -> "3018683678")
+    - Положительные числа > 1e9 считаются ID группы и преобразуются в отрицательные
+    
+    Возвращает None, если канал не указан.
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    # Удаляем пробелы из числовых ID (ID могут отображаться с пробелами в интерфейсе)
+    value = value.replace(" ", "").replace("_", "")
+    if not value:
+        return None
+    if value.startswith("@"):
+        return value
+    if value.lstrip("-").isdigit():
+        try:
+            num_value = int(value)
+            return num_value
+        except Exception:
+            return value
+    return value
+
+
+def _get_chat_id_variants(raw_channel_id: str | int | None, normalized_chat_id: int | str | None) -> list[int | str]:
+    """
+    Генерирует список вариантов ID чата для попытки отправки.
+    
+    Telegram может использовать разные форматы ID в зависимости от типа группы:
+    - Обычная группа: отрицательное число (-ID)
+    - Супергруппа: -100 + ID (например, -1001234567890)
+    
+    Возвращает список вариантов ID, которые стоит попробовать.
+    """
+    variants: list[int | str] = []
+
+    # 1) Если есть сырой ID (@username остаётся приоритетным)
+    if isinstance(raw_channel_id, str):
+        raw_clean = raw_channel_id.replace(" ", "").replace("_", "")
+        if raw_clean.startswith("@"):
+            variants.append(raw_clean)
+        if raw_clean.lstrip("-").isdigit():
+            try:
+                raw_num = int(raw_clean)
+                variants.append(raw_num)
+                variants.append(-raw_num)
+                variants.append(-int(f"100{abs(raw_num)}"))
+            except Exception:
+                variants.append(raw_clean)
+
+    # 2) Варианты из нормализованного значения
+    if isinstance(normalized_chat_id, str):
+        norm_clean = normalized_chat_id.replace(" ", "").replace("_", "")
+        if norm_clean.startswith("@"):
+            variants.append(norm_clean)
+        if norm_clean.lstrip("-").isdigit():
+            try:
+                norm_num = int(norm_clean)
+                variants.append(norm_num)
+                variants.append(-norm_num)
+                variants.append(-int(f"100{abs(norm_num)}"))
+            except Exception:
+                variants.append(norm_clean)
+
+    if isinstance(normalized_chat_id, int):
+        variants.append(normalized_chat_id)
+        variants.append(-normalized_chat_id)
+        variants.append(-int(f"100{abs(normalized_chat_id)}"))
+    
+    # Убираем дубликаты, сохраняя порядок
+    seen = set()
+    unique_variants = []
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            unique_variants.append(v)
+    
+    return unique_variants
+
+
+async def _send_single_photo_to_chat(bot, chat_id: int | str, url: str, caption: str | None) -> bool:
+    """
+    Отправляет одиночное фото в указанный чат (канал) с fallback на загрузку файла.
+    """
+    parse_mode = "HTML" if caption else None
+    try:
+        await bot.send_photo(chat_id=chat_id, photo=url, caption=caption or None, parse_mode=parse_mode)
+        return True
+    except TelegramBadRequest:
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+                response = await client.get(url)
+                if response.status_code == 200 and response.content:
+                    buffer = BufferedInputFile(response.content, filename="photo.jpg")
+                    await bot.send_photo(chat_id=chat_id, photo=buffer, caption=caption or None, parse_mode=parse_mode)
+                    return True
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return False
+
+
+async def _send_media_block_to_chat(bot, chat_id: int | str, urls: list[str], caption: str | None) -> bool:
+    """
+    Универсальная отправка фотоблока в указанный чат: одиночное фото или альбом.
+    """
+    if not urls:
+        return False
+
+    if len(urls) == 1:
+        return await _send_single_photo_to_chat(bot, chat_id, urls[0], caption)
+
+    media = []
+    for idx, url in enumerate(urls):
+        if idx == 0 and caption:
+            media.append(InputMediaPhoto(media=url, caption=caption, parse_mode="HTML"))
+        else:
+            media.append(InputMediaPhoto(media=url))
+
+    try:
+        await bot.send_media_group(chat_id=chat_id, media=media)
+        return True
+    except TelegramBadRequest:
+        pass
+    except Exception:
+        pass
+
+    files: list[InputMediaPhoto] = []
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+            for idx, url in enumerate(urls):
+                try:
+                    response = await client.get(url)
+                    if response.status_code != 200 or not response.content:
+                        continue
+                    buffer = BufferedInputFile(response.content, filename=f"album_{idx+1}.jpg")
+                    if not files and caption:
+                        files.append(InputMediaPhoto(media=buffer, caption=caption, parse_mode="HTML"))
+                    else:
+                        files.append(InputMediaPhoto(media=buffer))
+                except Exception:
+                    continue
+        if files:
+            await bot.send_media_group(chat_id=chat_id, media=files)
+            return True
+    except TelegramBadRequest:
+        pass
+    except Exception:
+        pass
+
+    return False
+
+
+async def _send_text_sequence_to_chat(bot, chat_id: int | str, chunks: list[str]) -> None:
+    """
+    Отправляет последовательность текстов в указанный чат (канал).
+    """
+    for chunk in chunks:
+        if not chunk or not chunk.strip():
+            continue
+        await bot.send_message(chat_id=chat_id, text=chunk.strip(), parse_mode="HTML")
+
+
+async def broadcast_post_to_channel(
+    *,
+    bot,
+    channel_id: int | str | None,
+    caption_text: str,
+    text_chunks: list[str],
+    image_urls: list[str] | None,
+    request_id: str | None,
+    user_id: int,
+) -> None:
+    """
+    Дублирует готовый пост в дополнительный канал/группу, если он указан.
+    
+    Перед отправкой проверяет доступность чата и права бота.
+    Пробует несколько вариантов форматов ID для групп (обычная группа, супергруппа).
+    """
+    normalized_chat = _normalize_broadcast_chat_id(channel_id)
+    if not normalized_chat:
+        return
+
+    # Получаем варианты ID для попытки
+    chat_id_variants = _get_chat_id_variants(channel_id, normalized_chat)
+    
+    # Проверяем доступность чата перед отправкой, пробуя разные варианты
+    working_chat_id = None
+    last_error = None
+    
+    for variant_id in chat_id_variants:
+        try:
+            chat = await bot.get_chat(variant_id)
+            working_chat_id = variant_id
+            _log_json(
+                "info",
+                event="broadcast_chat_check",
+                request_id=request_id,
+                user_id=user_id,
+                channel_id=str(variant_id),
+                original_id=str(channel_id),
+                normalized_id=str(normalized_chat),
+                chat_type=chat.type,
+                chat_title=getattr(chat, "title", None),
+            )
+            break
+        except TelegramBadRequest as e:
+            last_error = str(e)
+            # Пробуем следующий вариант
+            continue
+        except Exception as e:
+            last_error = str(e)
+            # Пробуем следующий вариант
+            continue
+    
+    if not working_chat_id:
+        logger.error(
+            "Не удалось найти чат ни с одним из вариантов ID %s (исходный: %s). "
+            "Попробованные варианты: %s. "
+            "Последняя ошибка: %s. "
+            "Убедитесь, что:\n"
+            "1. Бот добавлен в группу/канал как администратор\n"
+            "2. Бот имеет права на отправку сообщений\n"
+            "3. ID указан правильно (попробуйте добавить бота @RawDataBot для получения точного ID)",
+            normalized_chat,
+            channel_id,
+            [str(v) for v in chat_id_variants],
+            last_error,
+        )
+        _log_json(
+            "error",
+            event="broadcast_chat_not_found",
+            request_id=request_id,
+            user_id=user_id,
+            channel_id=str(normalized_chat),
+            original_id=str(channel_id),
+            tried_variants=[str(v) for v in chat_id_variants],
+            error=last_error or "All variants failed",
+        )
+        return
+
+    # Отправляем пост используя рабочий ID
+    try:
+        main_images = (image_urls or [])[:4]
+        if main_images:
+            album_sent = await _send_media_block_to_chat(bot, working_chat_id, main_images, caption_text)
+            if not album_sent:
+                await _send_text_sequence_to_chat(bot, working_chat_id, text_chunks)
+                return
+
+            remaining_text = text_chunks[1:] if len(text_chunks) > 1 else []
+            if remaining_text:
+                await _send_text_sequence_to_chat(bot, working_chat_id, remaining_text)
+
+            remaining_images = (image_urls or [])[len(main_images):]
+            for i in range(0, len(remaining_images), 10):
+                batch = remaining_images[i:i + 10]
+                sent = await _send_media_block_to_chat(bot, working_chat_id, batch, None)
+                if not sent:
+                    break
+        else:
+            await _send_text_sequence_to_chat(bot, working_chat_id, text_chunks)
+
+        _log_json(
+            "info",
+            event="broadcast_success",
+            request_id=request_id,
+            user_id=user_id,
+            channel_id=str(working_chat_id),
+            original_id=str(channel_id),
+            images=len(image_urls or []),
+        )
+    except TelegramBadRequest as exc:
+        error_msg = str(exc)
+        logger.error(
+            "Не удалось отправить пост в чат %s (исходный ID: %s): %s\n"
+            "Возможные причины:\n"
+            "1. Бот не имеет прав на отправку сообщений/медиа\n"
+            "2. Группа/канал ограничивает отправку сообщений ботами",
+            working_chat_id,
+            channel_id,
+            error_msg,
+        )
+        _log_json(
+            "error",
+            event="broadcast_failed",
+            request_id=request_id,
+            user_id=user_id,
+            channel_id=str(working_chat_id),
+            original_id=str(channel_id),
+            error=error_msg,
+        )
+    except Exception as exc:
+        logger.warning("Не удалось отправить пост в канал %s: %s", working_chat_id, exc)
+        _log_json(
+            "error",
+            event="broadcast_failed",
+            request_id=request_id,
+            user_id=user_id,
+            channel_id=str(working_chat_id),
+            original_id=str(channel_id),
+            error=str(exc),
+        )
+
 def _extend_chunk_to_close_tags(text: str, start: int, end: int) -> tuple[str, int]:
     """
     Расширяет срез текста до тех пор, пока внутри него не останется незакрытых HTML-тегов.
@@ -777,6 +1088,8 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
 
     request_id = str(uuid.uuid4())
     started_at = time.monotonic()
+    broadcast_task: asyncio.Task | None = None
+    forward_channel_id = (getattr(settings, "FORWARD_CHANNEL_ID", "") or "").strip()
 
     # Отправляем начальное сообщение
     await message.answer("Обрабатываю вашу ссылку, пожалуйста, подождите...")
@@ -878,26 +1191,39 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             caption_text = post_text.strip()
             caption_queue = deque()
         full_text_chunks = [caption_text] + list(caption_queue)
+        broadcast_text_chunks = list(full_text_chunks)
 
         if image_urls:
             main_images = image_urls[:4]
             album_sent = await send_media_block(message, main_images, caption_text)
             if not album_sent:
                 await send_text_sequence(message, full_text_chunks)
-                return
+            else:
+                if caption_queue:
+                    await send_text_sequence(message, list(caption_queue))
+                    caption_queue.clear()
 
-            if caption_queue:
-                await send_text_sequence(message, list(caption_queue))
-                caption_queue.clear()
-
-            remaining_images = image_urls[len(main_images):]
-            for i in range(0, len(remaining_images), 10):
-                batch = remaining_images[i:i+10]
-                sent = await send_media_block(message, batch, None)
-                if not sent:
-                    break
+                remaining_images = image_urls[len(main_images):]
+                for i in range(0, len(remaining_images), 10):
+                    batch = remaining_images[i:i+10]
+                    sent = await send_media_block(message, batch, None)
+                    if not sent:
+                        break
         else:
             await send_text_sequence(message, full_text_chunks)
+
+        if forward_channel_id:
+            broadcast_task = asyncio.create_task(
+                broadcast_post_to_channel(
+                    bot=message.bot,
+                    channel_id=forward_channel_id,
+                    caption_text=caption_text,
+                    text_chunks=broadcast_text_chunks,
+                    image_urls=image_urls,
+                    request_id=request_id,
+                    user_id=user_id,
+                )
+            )
 
     except Exception as e:
         # Логируем ошибку перед обработкой
