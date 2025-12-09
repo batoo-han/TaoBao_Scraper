@@ -63,13 +63,19 @@ USER botuser
 
 # Устанавливаем браузер Chromium для Playwright ОТ ПОЛЬЗОВАТЕЛЯ botuser
 # Это важно, т.к. браузер устанавливается в домашнюю директорию пользователя
-RUN playwright install chromium || \
-    (playwright install chromium --with-deps || \
-     (playwright install chromium && playwright install-deps chromium))
+RUN python -m playwright install chromium || \
+    (python -m playwright install chromium --with-deps || \
+     (python -m playwright install chromium && python -m playwright install-deps chromium))
 
-# Проверяем, что Chromium установлен
-RUN test -f /home/botuser/.cache/ms-playwright/chromium-*/chrome-linux/chrome || \
-    (echo "ERROR: Chromium not found after installation" && exit 1)
+# Проверяем, что Chromium установлен (более гибкая проверка пути)
+RUN if [ ! -d /home/botuser/.cache/ms-playwright ]; then \
+        echo "ERROR: Playwright cache directory not found" && exit 1; \
+    fi && \
+    if ! find /home/botuser/.cache/ms-playwright -name "chrome" -type f 2>/dev/null | grep -q .; then \
+        echo "ERROR: Chromium binary not found after installation" && \
+        echo "Cache contents:" && ls -la /home/botuser/.cache/ms-playwright/ && exit 1; \
+    fi && \
+    echo "Chromium installation verified successfully"
 
 # Healthcheck (опционально)
 # HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
