@@ -44,10 +44,18 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # Healthcheck (опционально)
-    # healthcheck:
-    #   test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
-    #   interval: 30s
-    #   timeout: 10s
-    #   retries: 3
-    #   start_period: 5s
+    # Корректное завершение для fast-restart
+    stop_grace_period: 10s
+
+    # Healthcheck для минимального простоя (используется в deploy-скрипте)
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >
+          python -c "import os,sys,urllib.request;
+          url='http://127.0.0.1:%s%s/health' % (os.getenv('MINI_APP_PORT','8081'), os.getenv('MINI_APP_BASE_PATH','/mini-app'));
+          sys.exit(0 if urllib.request.urlopen(url,timeout=5).status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
