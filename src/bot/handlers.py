@@ -538,13 +538,22 @@ async def broadcast_post_to_channel(
     image_urls: list[str] | None,
     request_id: str | None,
     user_id: int,
+    username: str | None = None,
+    product_url: str | None = None,
+    platform: str | None = None,
+    duration_ms: int | None = None,
+    request_time: float | None = None,
+    text_length: int | None = None,
 ) -> None:
     """
     Дублирует готовый пост в дополнительный канал/группу, если он указан.
     
     Перед отправкой проверяет доступность чата и права бота.
     Пробует несколько вариантов форматов ID для групп (обычная группа, супергруппа).
+    Перед основным постом отправляет сообщение со статистикой запроса.
     """
+    from datetime import datetime
+    
     normalized_chat = _normalize_broadcast_chat_id(channel_id)
     if not normalized_chat:
         return
@@ -607,6 +616,92 @@ async def broadcast_post_to_channel(
         )
         return
 
+    # Отправляем статистику перед основным постом
+    try:
+        # Формируем сообщение со статистикой
+        stats_lines = ["📊 <b>Статистика запроса</b>\n"]
+        
+        # Кто делал запрос
+        user_info = f"👤 <b>Пользователь:</b> {user_id}"
+        if username:
+            user_info += f" (@{username})"
+        stats_lines.append(user_info)
+        
+        # Время запроса
+        if request_time:
+            request_dt = datetime.fromtimestamp(request_time)
+            time_str = request_dt.strftime("%Y-%m-%d %H:%M:%S")
+            stats_lines.append(f"🕐 <b>Время:</b> {time_str}")
+        
+        # Ссылка
+        if product_url:
+            stats_lines.append(f"🔗 <b>Ссылка:</b> <code>{product_url}</code>")
+        
+        # Платформа
+        if platform:
+            platform_names = {
+                "taobao": "Taobao",
+                "tmall": "Tmall",
+                "pinduoduo": "Pinduoduo",
+                "1688": "1688",
+                "ali1688": "1688",
+            }
+            platform_display = platform_names.get(platform.lower(), platform.upper())
+            stats_lines.append(f"🏪 <b>Платформа:</b> {platform_display}")
+        
+        # Длина сообщения
+        if text_length is not None:
+            stats_lines.append(f"📝 <b>Длина сообщения:</b> {text_length:,} символов")
+        
+        # Количество изображений
+        images_count = len(image_urls or [])
+        stats_lines.append(f"🖼️ <b>Изображений:</b> {images_count}")
+        
+        # Количество частей текста (чанков)
+        chunks_count = len(text_chunks or [])
+        if chunks_count > 1:
+            stats_lines.append(f"📄 <b>Частей текста:</b> {chunks_count}")
+        
+        # Время обработки
+        if duration_ms is not None:
+            duration_sec = duration_ms / 1000
+            if duration_sec < 1:
+                duration_str = f"{duration_ms} мс"
+            elif duration_sec < 60:
+                duration_str = f"{duration_sec:.2f} сек"
+            else:
+                minutes = int(duration_sec // 60)
+                seconds = int(duration_sec % 60)
+                duration_str = f"{minutes} мин {seconds} сек"
+            stats_lines.append(f"⏱️ <b>Время обработки:</b> {duration_str}")
+        
+        # Request ID для отслеживания
+        if request_id:
+            stats_lines.append(f"🆔 <b>Request ID:</b> <code>{request_id}</code>")
+        
+        stats_message = "\n".join(stats_lines)
+        
+        # Отправляем статистику
+        try:
+            await bot.send_message(
+                chat_id=working_chat_id,
+                text=stats_message,
+                parse_mode="HTML",
+            )
+        except Exception as stats_exc:
+            logger.warning(
+                "Не удалось отправить статистику в чат %s: %s. Продолжаем отправку основного поста.",
+                working_chat_id,
+                stats_exc,
+            )
+    
+    except Exception as stats_prep_exc:
+        logger.warning(
+            "Ошибка при формировании статистики для чата %s: %s. Продолжаем отправку основного поста.",
+            working_chat_id,
+            stats_prep_exc,
+        )
+    
     # Отправляем пост используя рабочий ID
     try:
         main_images = (image_urls or [])[:4]
@@ -1370,6 +1465,13 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             request_id=request_id,
         )
         duration_ms = int((time.monotonic() - started_at) * 1000)
+        
+        # Определяем платформу из URL для статистики
+        from src.utils.url_parser import URLParser
+        platform = URLParser.detect_platform(product_url)
+        
+        # Получаем время запроса
+        request_time = time.time()
         _log_json(
             "info",
             event="scrape_done",
@@ -1438,6 +1540,12 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                     image_urls=image_urls,
                     request_id=request_id,
                     user_id=user_id,
+                    username=username,
+                    product_url=product_url,
+                    platform=platform,
+                    duration_ms=duration_ms,
+                    request_time=request_time,
+                    text_length=len(post_text) if post_text else 0,
                 )
             )
 
