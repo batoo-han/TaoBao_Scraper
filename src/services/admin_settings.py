@@ -62,6 +62,10 @@ class AdminSettings:
     debug_mode: bool = False
     mock_mode: bool = False
     forward_channel_id: str = ""
+    per_user_daily_limit: int | None = None
+    per_user_monthly_limit: int | None = None
+    total_daily_limit: int | None = None
+    total_monthly_limit: int | None = None
 
 
 class AdminSettingsService:
@@ -90,6 +94,10 @@ class AdminSettingsService:
             debug_mode=getattr(settings, "DEBUG_MODE", False),
             mock_mode=getattr(settings, "MOCK_MODE", False),
             forward_channel_id=_normalize_channel_id(getattr(settings, "FORWARD_CHANNEL_ID", "")),
+            per_user_daily_limit=getattr(settings, "PER_USER_DAILY_LIMIT", None),
+            per_user_monthly_limit=getattr(settings, "PER_USER_MONTHLY_LIMIT", None),
+            total_daily_limit=getattr(settings, "TOTAL_DAILY_LIMIT", None),
+            total_monthly_limit=getattr(settings, "TOTAL_MONTHLY_LIMIT", None),
         )
         self._load_from_disk()
         self.apply_to_runtime()
@@ -134,6 +142,10 @@ class AdminSettingsService:
         settings.DEBUG_MODE = self._data.debug_mode
         settings.MOCK_MODE = self._data.mock_mode
         settings.FORWARD_CHANNEL_ID = self._data.forward_channel_id
+        settings.PER_USER_DAILY_LIMIT = self._data.per_user_daily_limit
+        settings.PER_USER_MONTHLY_LIMIT = self._data.per_user_monthly_limit
+        settings.TOTAL_DAILY_LIMIT = self._data.total_daily_limit
+        settings.TOTAL_MONTHLY_LIMIT = self._data.total_monthly_limit
 
         # Сбрасываем кэши, чтобы новые настройки вступили в силу немедленно
         llm_provider.reset_llm_cache()
@@ -186,16 +198,34 @@ class AdminSettingsService:
         debug_mode: bool,
         mock_mode: bool,
         forward_channel_id: str | int | None,
+        per_user_daily_limit: int | None = None,
+        per_user_monthly_limit: int | None = None,
+        total_daily_limit: int | None = None,
+        total_monthly_limit: int | None = None,
     ) -> AdminSettings:
         """
         Переключает рабочие опции бота.
         """
+        def _norm_limit(val: int | str | None) -> int | None:
+            if val in (None, "", 0, "0"):
+                return None
+            try:
+                iv = int(val)
+                return iv if iv > 0 else None
+            except Exception:
+                return None
+
         with self._lock:
             self._data.convert_currency = bool(convert_currency)
             self._data.tmapi_notify_439 = bool(tmapi_notify_439)
             self._data.debug_mode = bool(debug_mode)
             self._data.mock_mode = bool(mock_mode)
             self._data.forward_channel_id = _normalize_channel_id(forward_channel_id)
+            # Лимиты: None или int > 0
+            self._data.per_user_daily_limit = _norm_limit(per_user_daily_limit)
+            self._data.per_user_monthly_limit = _norm_limit(per_user_monthly_limit)
+            self._data.total_daily_limit = _norm_limit(total_daily_limit)
+            self._data.total_monthly_limit = _norm_limit(total_monthly_limit)
             self._save_to_disk()
             self.apply_to_runtime()
             return replace(self._data)

@@ -29,6 +29,8 @@ from src.core.config import settings
 from src.core.scraper import Scraper
 import src.bot.error_handler as error_handler_module
 from src.services.user_settings import get_user_settings_service
+from src.services.rate_limit import RateLimitService
+from src.services.admin_settings import AdminSettingsService
 from src.services.access_control import (
     access_control_service,
     is_admin_user,
@@ -65,6 +67,10 @@ router = Router()
 scraper = Scraper()
 # Инициализация сервиса настроек пользователей
 user_settings_service = get_user_settings_service()
+# Инициализация сервиса лимитов
+rate_limit_service = RateLimitService(user_settings_service)
+# Инициализация админских настроек (для управления глобальными лимитами)
+admin_settings_service = AdminSettingsService()
 
 
 class SettingsState(StatesGroup):
@@ -78,6 +84,11 @@ class AccessState(StatesGroup):
     choosing_action = State()
     editing_whitelist = State()
     editing_blacklist = State()
+
+
+class LimitsState(StatesGroup):
+    """Состояния для меню управления лимитами"""
+    choosing_action = State()
 
 
 def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -102,6 +113,7 @@ def build_settings_menu_keyboard(user_id: int | None = None) -> ReplyKeyboardMar
 
     rows.append([KeyboardButton(text="✍️ Изменить подпись")])
     rows.append([KeyboardButton(text="💱 Валюта"), KeyboardButton(text="ℹ️ Мои настройки")])
+    rows.append([KeyboardButton(text="💰 Режим цен"), KeyboardButton(text="ℹ️ Инфо")])
 
     try:
         if user_id is not None:
@@ -128,18 +140,55 @@ def build_currency_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def format_settings_summary(user_settings) -> str:
+def build_price_mode_keyboard() -> InlineKeyboardMarkup:
+    """Создаёт клавиатуру выбора режима цен"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Простой (только макс. цена)", callback_data="price_mode:simple")],
+            [InlineKeyboardButton(text="Расширенный (варианты цен)", callback_data="price_mode:advanced")],
+            [InlineKeyboardButton(text="Отмена", callback_data="price_mode:cancel")],
+        ]
+    )
+
+
+def format_settings_summary(user_settings, limits_snapshot: dict | None = None) -> str:
     """Форматирует сводку настроек пользователя"""
     currency = user_settings.default_currency.upper()
     signature = user_settings.signature or "—"
     rate = user_settings.exchange_rate
     rate_display = f"{float(rate):.4f} ₽ за 1 ¥" if rate else "не задан"
+    effective_price_mode = (user_settings.price_mode or "").strip().lower() or (getattr(settings, "PRICE_MODE", "simple") or "simple")
+    price_mode = (user_settings.price_mode or "inherit").lower()
+    if price_mode == "inherit":
+        price_mode = f"по умолчанию ({effective_price_mode})"
+    elif price_mode == "simple":
+        price_mode = "simple (макс. цена)"
+    elif price_mode == "advanced":
+        price_mode = "advanced (сводка вариантов)"
     return (
         "<b>Ваши настройки</b>\n"
         f"• подпись: <code>{signature}</code>\n"
         f"• валюта по умолчанию: <b>{currency}</b>\n"
-        f"• курс для рубля: {rate_display}"
-    ) 
+        f"• курс для рубля: {rate_display}\n"
+        f"• режим цен: {price_mode}"
+    )
+    if limits_snapshot and not limits_snapshot.get("unlimited"):
+        def _fmt(limit, count, remaining):
+            if not limit:
+                return "без ограничений"
+            return f"{count}/{limit}, осталось {remaining if remaining is not None else '—'}"
+        user_limits = limits_snapshot.get("user", {})
+        summary += "\n• лимит/сутки: " + _fmt(
+            user_limits.get("daily", {}).get("limit"),
+            user_limits.get("daily", {}).get("count", 0),
+            user_limits.get("daily", {}).get("remaining"),
+        )
+        summary += "\n• лимит/месяц: " + _fmt(
+            user_limits.get("monthly", {}).get("limit"),
+            user_limits.get("monthly", {}).get("count", 0),
+            user_limits.get("monthly", {}).get("remaining"),
+        )
+    return summary
 
 
 async def ensure_access(message: Message) -> bool:
@@ -178,6 +227,71 @@ PUNCTUATION_BREAKS = ('.', '!', '?', ';', ':', ',', '…', '\n')
 MIN_BREAK_RATIO = 0.4
 HTML_SELF_CLOSING_TAGS = {"br", "hr"}
 HTML_TAG_PATTERN = re.compile(r"<(/?)([a-zA-Z0-9]+)(?:\s[^<>]*)?>")
+
+
+def _parse_limit_arg(raw: str | None) -> int | None:
+    """
+    Преобразует ввод лимита в int или None.
+    Поддержка значений: пусто/0/off/none -> None.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip().lower()
+    if raw in {"", "0", "off", "none", "null", "нет"}:
+        return None
+    try:
+        val = int(raw)
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
+async def _resolve_limit_target(bot, token: str):
+    """
+    Определяет целевой user_id по токену (id, @username, username).
+    Проверяет наличие в access списках. Возвращает кортеж (user_id|None, username|None, error_message|None).
+    Пытается резолвить username через bot.get_chat.
+    """
+    cfg = access_control_service._config  # внутренний доступ, для проверки списков
+    token = (token or "").strip()
+    if not token:
+        return None, None, "Укажите ID или username."
+
+    candidate_id = None
+    uname = None
+
+    if token.lstrip("-").isdigit():
+        try:
+            candidate_id = int(token)
+        except Exception:
+            candidate_id = None
+    else:
+        uname = token.lstrip("@").lower()
+        # Пытаемся получить ID через get_chat
+        try:
+            chat = await bot.get_chat(token)
+            candidate_id = chat.id
+            if getattr(chat, "username", None):
+                uname = chat.username.lower()
+        except Exception:
+            candidate_id = None
+
+    in_access = False
+    if candidate_id is not None and candidate_id in (cfg.whitelist_ids + cfg.blacklist_ids):
+        in_access = True
+    if uname and uname in (cfg.whitelist_usernames + cfg.blacklist_usernames):
+        in_access = True
+
+    if not in_access:
+        return None, None, "Пользователь не найден в access (белый/чёрный списки). Сначала добавьте доступ."
+
+    if candidate_id is None:
+        # Нет ID, но username в access: сохраняем отложенный лимит на username, применение при первом запросе
+        if uname and in_access:
+            return None, uname, None
+        return None, None, "Не удалось определить пользователя. Укажите числовой ID."
+
+    return candidate_id, uname, None
 
 
 def split_text_chunks(text: str, limit: int) -> list[str]:
@@ -544,6 +658,7 @@ async def broadcast_post_to_channel(
     duration_ms: int | None = None,
     request_time: float | None = None,
     text_length: int | None = None,
+    limits_snapshot: dict | None = None,
 ) -> None:
     """
     Дублирует готовый пост в дополнительный канал/группу, если он указан.
@@ -661,6 +776,19 @@ async def broadcast_post_to_channel(
         chunks_count = len(text_chunks or [])
         if chunks_count > 1:
             stats_lines.append(f"📄 <b>Частей текста:</b> {chunks_count}")
+
+        # Лимиты
+        if limits_snapshot and not limits_snapshot.get("unlimited"):
+            user_limits = limits_snapshot.get("user", {})
+            daily = user_limits.get("daily", {})
+            monthly = user_limits.get("monthly", {})
+            def _fmt(block):
+                limit = block.get("limit")
+                if not limit:
+                    return "без ограничений"
+                return f"{block.get('count',0)}/{limit}, осталось {block.get('remaining')}"
+            stats_lines.append(f"📅 Лимит/день: {_fmt(daily)}")
+            stats_lines.append(f"🗓️ Лимит/месяц: {_fmt(monthly)}")
         
         # Время обработки
         if duration_ms is not None:
@@ -906,6 +1034,8 @@ async def update_signature(message: Message, state: FSMContext) -> None:
         "✍️ Изменить подпись": None,  # Уже в режиме ввода подписи
         "💱 Валюта": "choose_currency",
         "ℹ️ Мои настройки": "show_settings",
+        "💰 Режим цен": "choose_price_mode",
+        "ℹ️ Инфо": "show_info",
         "📈 Сменить курс": "ask_exchange_rate",
         "🔙 В главное меню": "back_to_main_menu",
         "📦 Запросить описание товара": "back_to_main_menu",
@@ -932,6 +1062,11 @@ async def update_signature(message: Message, state: FSMContext) -> None:
             await message.answer(
                 "Выберите валюту по умолчанию:",
                 reply_markup=build_currency_keyboard(),
+            )
+        elif new_signature == "💰 Режим цен":
+            await message.answer(
+                "Выберите режим работы с ценами:",
+                reply_markup=build_price_mode_keyboard(),
             )
         elif new_signature in ("🔙 В главное меню", "📦 Запросить описание товара"):
             # Возвращаемся в главное меню
@@ -1050,6 +1185,76 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         await callback.answer("Неизвестный выбор", show_alert=True)
 
 
+@router.message(F.text == "💰 Режим цен")
+async def choose_price_mode(message: Message, state: FSMContext) -> None:
+    """Показывает выбор режима цен"""
+    if not await ensure_access(message):
+        return
+    await state.clear()
+    await message.answer(
+        "Выберите режим формирования блока цен:",
+        reply_markup=build_price_mode_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("price_mode:"))
+async def handle_price_mode_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор режима цен"""
+    await state.clear()
+    choice = callback.data.split(":", 1)[1]
+
+    if choice == "cancel":
+        await callback.answer("Выбор отменён")
+        await _safe_clear_markup(callback.message)
+        await callback.message.answer(
+            "Настройки не изменены.",
+            reply_markup=build_settings_menu_keyboard(callback.from_user.id),
+        )
+        return
+
+    user_id = callback.from_user.id
+    if choice in {"simple", "advanced"}:
+        user_settings_service.update_price_mode(user_id, choice)
+        human = "простой (только макс. цена)" if choice == "simple" else "расширенный (сводка вариантов)"
+        await callback.answer(f"Режим: {choice}")
+        await _safe_clear_markup(callback.message)
+        await callback.message.answer(
+            f"✅ Режим цен установлен: {human}.",
+            reply_markup=build_settings_menu_keyboard(user_id),
+        )
+    else:
+        await callback.answer("Неизвестный выбор", show_alert=True)
+
+
+@router.message(F.text == "ℹ️ Инфо")
+async def show_info(message: Message, state: FSMContext) -> None:
+    """Показывает краткий гайд по боту и настройкам"""
+    if not await ensure_access(message):
+        return
+    await state.clear()
+    info_text = (
+        "<b>Что умеет бот</b>\n"
+        "• получает данные товара Taobao/Tmall/1688/Pinduoduo и формирует пост.\n"
+        "• переводит описание и характеристики на русский.\n"
+        "• цена: по умолчанию берётся максимальная (режим simple). В режиме advanced переводятся варианты и выводится сводка цен.\n\n"
+        "<b>Настройки</b>\n"
+        "• подпись — выводится внизу поста.\n"
+        "• валюта — CNY или RUB; для RUB задайте курс.\n"
+        "• режим цен — simple (только макс. цена) или advanced (сводка вариантов с ценами).\n\n"
+        "<b>Как поменять</b>\n"
+        "• подпись: «✍️ Изменить подпись».\n"
+        "• валюта/курс: «💱 Валюта» и «📈 Сменить курс».\n"
+        "• режим цен: «💰 Режим цен».\n"
+        "• лимиты: выдаются администратором, остаток видно в «ℹ️ Мои настройки».\n\n"
+        "Изменения применяются сразу для новых запросов."
+    )
+    await message.answer(
+        info_text,
+        reply_markup=build_settings_menu_keyboard(message.from_user.id),
+        parse_mode="HTML"
+    )
+
+
 @router.message(F.text == "📈 Сменить курс")
 async def prompt_change_rate(message: Message, state: FSMContext) -> None:
     """Запрашивает новый курс, если валюта = рубль."""
@@ -1089,6 +1294,8 @@ async def set_exchange_rate(message: Message, state: FSMContext) -> None:
         "✍️ Изменить подпись",
         "💱 Валюта",
         "ℹ️ Мои настройки",
+        "💰 Режим цен",
+        "ℹ️ Инфо",
         "📈 Сменить курс",
         "🔙 В главное меню",
         "📦 Запросить описание товара",
@@ -1136,7 +1343,15 @@ async def show_settings(message: Message, state: FSMContext) -> None:
     await state.clear()
     user_id = message.from_user.id
     user_settings = user_settings_service.get_settings(user_id)
-    summary = format_settings_summary(user_settings)
+    is_admin = is_admin_user(user_id, message.from_user.username or "")
+    limits_snapshot = rate_limit_service.snapshot(
+        user_id=user_id,
+        is_admin=is_admin,
+        user_daily_limit=user_settings.daily_limit,
+        user_monthly_limit=user_settings.monthly_limit,
+        created_at=user_settings.created_at,
+    )
+    summary = format_settings_summary(user_settings, limits_snapshot)
     await message.answer(
         summary,
         reply_markup=build_settings_menu_keyboard(user_id),
@@ -1158,19 +1373,322 @@ async def access_menu_entry(message: Message, state: FSMContext) -> None:
     help_text = (
         "🔐 <b>Управление доступом к боту</b>\n\n"
         f"{summary}\n\n"
-        "Доступные команды:\n"
-        "• <code>white on</code> / <code>white off</code> — включить/выключить белый список\n"
-        "• <code>black on</code> / <code>black off</code> — включить/выключить чёрный список\n"
-        "• <code>add white</code> — добавить пользователей в белый список\n"
-        "• <code>add black</code> — добавить пользователей в чёрный список\n"
-        "• <code>del white</code> — удалить пользователей из белого списка\n"
-        "• <code>del black</code> — удалить пользователей из чёрного списка\n"
-        "• <code>show</code> — показать текущие списки\n\n"
+        "Доступные команды (нажмите для копирования):\n"
+        "<code>white on</code> / <code>white off</code> — включить/выключить белый список\n"
+        "<code>black on</code> / <code>black off</code> — включить/выключить чёрный список\n"
+        "<code>add white</code> — добавить пользователей в белый список\n"
+        "<code>add black</code> — добавить пользователей в чёрный список\n"
+        "<code>del white</code> — удалить пользователей из белого списка\n"
+        "<code>del black</code> — удалить пользователей из чёрного списка\n"
+        "<code>show</code> — показать текущие списки\n\n"
         "После команды <code>add ...</code> или <code>del ...</code> бот попросит ввести "
         "ID и username через запятую, например:\n"
         "<code>123456, @user1, 987654321, user2</code>"
     )
     await message.answer(help_text, parse_mode="HTML")
+
+
+@router.message(Command("limits"))
+async def limits_menu_entry(message: Message, state: FSMContext) -> None:
+    """
+    Точка входа в меню управления лимитами (аналогично /access).
+    Только для админов.
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        return
+    await state.set_state(LimitsState.choosing_action)
+    current = admin_settings_service.get_settings()
+    info = (
+        "🔒 <b>Управление лимитами</b>\n\n"
+        "Команды (нажмите для копирования):\n"
+        "<code>global &lt;per_user_daily&gt; &lt;per_user_monthly&gt; &lt;total_daily&gt; &lt;total_monthly&gt;</code>\n"
+        "  Пример: <code>global 100 500 2000 5000</code>\n"
+        "  Значение 0/off/none — снять ограничение.\n"
+        "<code>user &lt;id|@username|username&gt; &lt;daily&gt; &lt;monthly&gt;</code>\n"
+        "  Пример: <code>user 123456 50 200</code>\n"
+        "  Важно: пользователь должен быть в access (белый/чёрный списки). Если найден только username без ID — можно задать отложенный лимит.\n"
+        "<code>show</code> — показать текущие глобальные лимиты.\n"
+        "<code>show_user &lt;id|@username|username&gt;</code> — показать лимиты пользователя; если ID неизвестен, но username есть в access, покажет отложенные лимиты.\n"
+        "<code>show_users</code> — показать все индивидуальные и отложенные лимиты.\n"
+        "<code>cancel</code> — выйти из режима.\n\n"
+        f"Текущие глобальные лимиты (МСК):\n"
+        f"- per_user_daily: {current.per_user_daily_limit or 'без ограничений'}\n"
+        f"- per_user_monthly: {current.per_user_monthly_limit or 'без ограничений'}\n"
+        f"- total_daily: {current.total_daily_limit or 'без ограничений'}\n"
+        f"- total_monthly: {current.total_monthly_limit or 'без ограничений'}"
+    )
+    await message.answer(info, parse_mode="HTML")
+
+
+@router.message(LimitsState.choosing_action)
+async def limits_handle_action(message: Message, state: FSMContext) -> None:
+    """
+    Обработчик команд меню лимитов.
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        await state.clear()
+        return
+
+    text = (message.text or "").strip()
+    lower = text.lower()
+    if lower in {"cancel", "exit", "выход", "отмена"}:
+        await state.clear()
+        await message.answer("Вы вышли из режима лимитов.")
+        return
+
+    parts = text.split()
+    if not parts:
+        await message.answer("Укажите команду: global ... или user ... (см. подсказку).")
+        return
+
+    if parts[0].lower() == "global":
+        if len(parts) < 5:
+            await message.answer("Формат: global <per_user_daily> <per_user_monthly> <total_daily> <total_monthly>")
+            return
+        vals = [_parse_limit_arg(p) for p in parts[1:5]]
+        pu_d, pu_m, tot_d, tot_m = vals
+        current = admin_settings_service.get_settings()
+        updated = admin_settings_service.update_feature_flags(
+            convert_currency=current.convert_currency,
+            tmapi_notify_439=current.tmapi_notify_439,
+            debug_mode=current.debug_mode,
+            mock_mode=current.mock_mode,
+            forward_channel_id=current.forward_channel_id,
+            per_user_daily_limit=pu_d,
+            per_user_monthly_limit=pu_m,
+            total_daily_limit=tot_d,
+            total_monthly_limit=tot_m,
+        )
+        await message.answer(
+            "✅ Глобальные лимиты обновлены (МСК):\n"
+            f"• per_user_daily: {updated.per_user_daily_limit or 'без ограничений'}\n"
+            f"• per_user_monthly: {updated.per_user_monthly_limit or 'без ограничений'}\n"
+            f"• total_daily: {updated.total_daily_limit or 'без ограничений'}\n"
+            f"• total_monthly: {updated.total_monthly_limit or 'без ограничений'}"
+        )
+        return
+
+    if parts[0].lower() == "user":
+        if len(parts) < 4:
+            await message.answer("Формат: user <id|@username|username> <daily> <monthly>")
+            return
+        target_token = parts[1]
+        daily = _parse_limit_arg(parts[2])
+        monthly = _parse_limit_arg(parts[3])
+        target_id, uname, err = await _resolve_limit_target(message.bot, target_token)
+        if err:
+            await message.answer(f"❌ {err}")
+            return
+        if target_id:
+            user_settings_service.update_limits(target_id, daily_limit=daily, monthly_limit=monthly)
+            await message.answer(
+                "✅ Лимиты пользователя обновлены (МСК):\n"
+                f"• id: {target_id}\n"
+                f"• daily_limit: {daily or 'без ограничений'}\n"
+                f"• monthly_limit: {monthly or 'без ограничений'}"
+            )
+        elif uname:
+            rate_limit_service.set_pending_limits_by_username(uname, daily_limit=daily, monthly_limit=monthly)
+            await message.answer(
+                "✅ Лимиты сохранены по username и будут применены при первом запросе пользователя.\n"
+                f"• username: @{uname}\n"
+                f"• daily_limit: {daily or 'без ограничений'}\n"
+                f"• monthly_limit: {monthly or 'без ограничений'}"
+            )
+        else:
+            await message.answer("❌ Не удалось определить пользователя. Укажите числовой ID.")
+        return
+
+    if parts[0].lower() == "show":
+        # show -> все лимиты
+        current = admin_settings_service.get_settings()
+        lines = [
+            "📊 <b>Глобальные лимиты (МСК)</b>",
+            f"• per_user_daily: {current.per_user_daily_limit or 'без ограничений'}",
+            f"• per_user_monthly: {current.per_user_monthly_limit or 'без ограничений'}",
+            f"• total_daily: {current.total_daily_limit or 'без ограничений'}",
+            f"• total_monthly: {current.total_monthly_limit or 'без ограничений'}",
+        ]
+        await message.answer("\n".join(lines), parse_mode="HTML")
+        return
+
+    if parts[0].lower() == "show_user":
+        if len(parts) < 2:
+            await message.answer("Формат: show_user <id|@username|username>")
+            return
+        target_token = parts[1]
+        target_id, uname, err = await _resolve_limit_target(message.bot, target_token)
+        if err:
+            await message.answer(f"❌ {err}")
+            return
+        limits_snapshot = None
+        if target_id:
+            us = user_settings_service.get_settings(target_id)
+            limits_snapshot = rate_limit_service.snapshot(
+                user_id=target_id,
+                is_admin=False,
+                user_daily_limit=us.daily_limit,
+                user_monthly_limit=us.monthly_limit,
+                created_at=us.created_at,
+            )
+            uname_disp = f"@{uname}" if uname else "—"
+            def _fmt(block):
+                if not block or not block.get("limit"):
+                    return "без ограничений"
+                return f"{block.get('count',0)}/{block.get('limit')} (осталось {block.get('remaining')})"
+            msg = (
+                "📊 <b>Лимиты пользователя</b>\n"
+                f"• id: {target_id}\n"
+                f"• username: {uname_disp}\n"
+                f"• сутки: {_fmt(limits_snapshot.get('user', {}).get('daily'))}\n"
+                f"• месяц: {_fmt(limits_snapshot.get('user', {}).get('monthly'))}"
+            )
+            await message.answer(msg, parse_mode="HTML")
+        elif uname:
+            pending = rate_limit_service.get_pending_limits_by_username(uname)
+            if pending:
+                msg = (
+                    "📊 <b>Отложенные лимиты по username</b>\n"
+                    f"• username: @{uname}\n"
+                    f"• daily_limit: {pending.get('daily_limit') or 'без ограничений'}\n"
+                    f"• monthly_limit: {pending.get('monthly_limit') or 'без ограничений'}\n"
+                    "Лимиты вступят в силу при первом запросе пользователя."
+                )
+                await message.answer(msg, parse_mode="HTML")
+            else:
+                await message.answer("Лимиты по этому username не найдены (и ID не определён).")
+        else:
+            await message.answer("❌ Не удалось определить пользователя.")
+        return
+
+    if parts[0].lower() == "show_users":
+        limits = rate_limit_service.list_limits_full()
+        settings_limits = limits.get("settings", {})
+        usage = limits.get("usage", {})
+        pending = limits.get("pending_by_username", {})
+
+        lines = ["📊 <b>Индивидуальные лимиты</b>"]
+        if settings_limits:
+            lines.append("<b>По ID (установленные лимиты):</b>")
+            for uid, lim in settings_limits.items():
+                dl = lim.get("daily_limit") or "без ограничений"
+                ml = lim.get("monthly_limit") or "без ограничений"
+                counters = usage.get(str(uid), {})
+                day_cnt = counters.get("day_count", 0)
+                month_cnt = counters.get("month_count", 0)
+                lines.append(f"id {uid}: дневной {dl}, месячный {ml} (счётчики: day={day_cnt}, month={month_cnt})")
+        else:
+            lines.append("По ID: нет данных")
+
+        if pending:
+            lines.append("")
+            lines.append("<b>Отложенные по username:</b>")
+            for uname, data in pending.items():
+                lines.append(
+                    f"@{uname}: daily_limit={data.get('daily_limit') or '∞'}, monthly_limit={data.get('monthly_limit') or '∞'}"
+                )
+        else:
+            lines.append("")
+            lines.append("Отложенных лимитов нет")
+
+        await message.answer("\n".join(lines), parse_mode="HTML")
+        return
+
+    await message.answer("Неизвестная команда. Используйте global или user, либо cancel для выхода.")
+
+
+@router.message(Command("set_global_limits"))
+async def set_global_limits(message: Message, state: FSMContext) -> None:
+    """
+    Установка глобальных лимитов (МСК) для всех пользователей.
+    Формат: /set_global_limits <per_user_daily> <per_user_monthly> <total_daily> <total_monthly>
+    Значение 0/off/none — снять ограничение. Пробелы можно опустить, чтобы не менять поле.
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        return
+    parts = (message.text or "").split()
+    args = parts[1:] if len(parts) > 1 else []
+    current = admin_settings_service.get_settings()
+
+    def _current_view():
+        return (
+            f"Текущие глобальные лимиты (МСК):\n"
+            f"• per_user_daily: {current.per_user_daily_limit or 'без ограничений'}\n"
+            f"• per_user_monthly: {current.per_user_monthly_limit or 'без ограничений'}\n"
+            f"• total_daily: {current.total_daily_limit or 'без ограничений'}\n"
+            f"• total_monthly: {current.total_monthly_limit or 'без ограничений'}"
+        )
+
+    if len(args) == 0:
+        await message.answer(
+            "Использование: /set_global_limits <per_user_daily> <per_user_monthly> <total_daily> <total_monthly>\n"
+            "Значение 0/off/none — снять ограничение. Пример: /set_global_limits 100 500 2000 10000\n\n"
+            + _current_view()
+        )
+        return
+
+    # Заполняем значениями: если аргумент пропущен, оставляем текущее
+    values = []
+    for idx in range(4):
+        arg = args[idx] if idx < len(args) else None
+        if arg is None:
+            values.append(None)
+        else:
+            values.append(_parse_limit_arg(arg))
+
+    pu_d, pu_m, tot_d, tot_m = values
+    updated = admin_settings_service.update_feature_flags(
+        convert_currency=current.convert_currency,
+        tmapi_notify_439=current.tmapi_notify_439,
+        debug_mode=current.debug_mode,
+        mock_mode=current.mock_mode,
+        forward_channel_id=current.forward_channel_id,
+        per_user_daily_limit=pu_d if args else current.per_user_daily_limit,
+        per_user_monthly_limit=pu_m if len(args) >= 2 else current.per_user_monthly_limit,
+        total_daily_limit=tot_d if len(args) >= 3 else current.total_daily_limit,
+        total_monthly_limit=tot_m if len(args) >= 4 else current.total_monthly_limit,
+    )
+
+    await message.answer(
+        "✅ Глобальные лимиты обновлены (МСК):\n"
+        f"• per_user_daily: {updated.per_user_daily_limit or 'без ограничений'}\n"
+        f"• per_user_monthly: {updated.per_user_monthly_limit or 'без ограничений'}\n"
+        f"• total_daily: {updated.total_daily_limit or 'без ограничений'}\n"
+        f"• total_monthly: {updated.total_monthly_limit or 'без ограничений'}"
+    )
+
+
+@router.message(Command("set_user_limits"))
+async def set_user_limits(message: Message, state: FSMContext) -> None:
+    """
+    Установка индивидуальных лимитов для пользователя.
+    Формат: /set_user_limits <user_id> <daily_limit> <monthly_limit>
+    Значение 0/off/none — снять ограничение.
+    """
+    if not is_admin_user(message.from_user.id, message.from_user.username):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 4:
+        await message.answer(
+            "Использование: /set_user_limits <user_id> <daily_limit> <monthly_limit>\n"
+            "Значение 0/off/none — снять ограничение. Пример: /set_user_limits 123456 50 200"
+        )
+        return
+    try:
+        target_user_id = int(parts[1])
+    except Exception:
+        await message.answer("❌ user_id должен быть числом.")
+        return
+
+    daily_arg = _parse_limit_arg(parts[2])
+    monthly_arg = _parse_limit_arg(parts[3])
+    user_settings_service.update_limits(target_user_id, daily_limit=daily_arg, monthly_limit=monthly_arg)
+    await message.answer(
+        "✅ Лимиты пользователя обновлены (МСК):\n"
+        f"• user_id: {target_user_id}\n"
+        f"• daily_limit: {daily_arg or 'без ограничений'}\n"
+        f"• monthly_limit: {monthly_arg or 'без ограничений'}"
+    )
 
 
 @router.message(Command("dump_data"))
@@ -1434,7 +1952,38 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             reply_markup=build_settings_menu_keyboard(user_id),
         )
         return
+
+    # Проверяем лимиты
+    is_admin = is_admin_user(user_id, username)
+    limit_result = rate_limit_service.consume(
+        user_id=user_id,
+        is_admin=is_admin,
+        user_daily_limit=user_settings.daily_limit,
+        user_monthly_limit=user_settings.monthly_limit,
+        created_at=user_settings.created_at,
+    )
+    if not limit_result.get("allowed"):
+        snap = limit_result.get("snapshot") or {}
+        user_limits = snap.get("user", {})
+        daily = user_limits.get("daily", {})
+        monthly = user_limits.get("monthly", {})
+        def _fmt_limit(block):
+            limit = block.get("limit")
+            if not limit:
+                return "без ограничений"
+            remaining = block.get("remaining")
+            return f"{block.get('count', 0)}/{limit}, осталось {remaining if remaining is not None else '—'}"
+        msg_lines = [
+            "❌ Превышен лимит запросов.",
+            f"Причина: {limit_result.get('reason', 'лимит')}.",
+            f"Сутки: {_fmt_limit(daily)}",
+            f"Месяц: {_fmt_limit(monthly)}",
+        ]
+        await message.answer("\n".join(msg_lines), reply_markup=build_settings_menu_keyboard(user_id))
+        return
     
+    usage_snapshot = limit_result.get("snapshot") if limit_result else None
+
     try:
         _log_json(
             "info",
@@ -1455,6 +2004,8 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             currency=user_settings.default_currency,
             exchange_rate=user_settings.exchange_rate,
             signature=user_settings.signature,
+            price_mode=user_settings.price_mode or getattr(settings, "PRICE_MODE", "simple"),
+            limits=usage_snapshot,
         )
         # Скрапинг информации о товаре и генерация текста поста с учётом настроек пользователя
         post_text, image_urls = await scraper.scrape_product(
@@ -1463,6 +2014,8 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             user_currency=user_settings.default_currency,
             exchange_rate=user_settings.exchange_rate,
             request_id=request_id,
+            user_price_mode=user_settings.price_mode,
+            is_admin=is_admin,
         )
         duration_ms = int((time.monotonic() - started_at) * 1000)
         
@@ -1546,6 +2099,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                     duration_ms=duration_ms,
                     request_time=request_time,
                     text_length=len(post_text) if post_text else 0,
+                    limits_snapshot=usage_snapshot,
                 )
             )
 

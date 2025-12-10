@@ -53,6 +53,8 @@ class Scraper:
         self.llm_client = get_llm_client()  # Унифицированный LLM клиент (YandexGPT или OpenAI)
         self.exchange_rate_client = ExchangeRateClient()  # Клиент для ExchangeRate-API
         self.translation_client = get_translation_client()  # Отдельный LLM для переводов/предобработки цен
+        # Режим работы с ценами: simple — старый сценарий (только максимальная цена), advanced — перевод и сводка вариантов
+        self.price_mode = (settings.PRICE_MODE or "simple").strip().lower()
         # Для ProxyAPI отключаем режим структурированных (JSON) батч-переводов, чтобы не тратить лишний бюджет
         # и не получать нестабильные ответы через прокси.
         if isinstance(self.translation_client, ProxyAPIClient):
@@ -67,6 +69,8 @@ class Scraper:
         user_currency: str = None,
         exchange_rate: float = None,
         request_id: str | None = None,
+        user_price_mode: str | None = None,
+        is_admin: bool = False,
     ):
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
@@ -77,6 +81,8 @@ class Scraper:
             user_signature (str, optional): Подпись пользователя для поста
             user_currency (str, optional): Валюта пользователя (cny или rub)
             exchange_rate (float, optional): Курс обмена для рубля
+            user_price_mode (str, optional): Режим цен для пользователя (simple/advanced/None → использовать глобальный)
+            is_admin (bool, optional): Является ли пользователь администратором (для детализированных ошибок)
 
         Returns:
             tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
@@ -84,6 +90,8 @@ class Scraper:
         # Используем настройки пользователя или значения по умолчанию
         signature = user_signature or settings.DEFAULT_SIGNATURE
         currency = (user_currency or settings.DEFAULT_CURRENCY).lower()
+        # Режим цен: пользовательский override → глобальный → simple
+        effective_price_mode = (user_price_mode or "").strip().lower() or self.price_mode or "simple"
         # Сохраняем переданный курс пользователя (если есть)
         user_exchange_rate = exchange_rate if exchange_rate is not None else None
         # Определяем платформу заранее, чтобы Pinduoduo обрабатывать веб-скрапингом
@@ -143,15 +151,18 @@ class Scraper:
             # Проверяем ошибку авторизации
             if isinstance(api_response, dict) and api_response.get('code') == 401:
                 logger.warning("Ошибка 401: отсутствуют cookies для Pinduoduo")
-                user_msg = (
-                    "❌ Не удалось получить данные товара с Pinduoduo.\n\n"
-                    "⚠️ Отсутствует файл с cookies для авторизации.\n\n"
-                    "Для работы с Pinduoduo необходимо:\n"
-                    "1. Создать файл `src/pdd_cookies.json` на основе `src/pdd_cookies_example.json`\n"
-                    "2. Заполнить файл реальными cookies из вашего браузера\n"
-                    "3. Перезапустить бота\n\n"
-                    "Подробнее см. в документации проекта."
-                )
+                if is_admin:
+                    user_msg = (
+                        "❌ Не удалось получить данные товара с Pinduoduo.\n\n"
+                        "⚠️ Отсутствует файл с cookies для авторизации.\n\n"
+                        "Для работы с Pinduoduo необходимо:\n"
+                        "1. Создать файл `src/pdd_cookies.json` на основе `src/pdd_cookies_example.json`\n"
+                        "2. Заполнить файл реальными cookies из вашего браузера\n"
+                        "3. Перезапустить бота\n\n"
+                        "Подробнее см. в документации проекта."
+                    )
+                else:
+                    user_msg = "⚠️ Работа с Pinduoduo временно недоступна. Попробуйте позже."
                 return user_msg, []
             # Ранняя проверка: если Pinduoduo и совсем пусто — прерываем цепочку до LLM
             no_images = not product_data.get('main_imgs') and not product_data.get('detail_imgs')
@@ -225,9 +236,12 @@ class Scraper:
             'description': translated_description
         }
 
-        price_lines = await self._prepare_price_entries(product_data, product_context)
-        if price_lines:
-            compact_data["translated_sku_prices"] = price_lines
+        price_lines: list[dict] = []
+        # В simple-режиме возвращаемся к старому сценарию: только максимальная цена без перечисления вариантов
+        if effective_price_mode in {"advanced", "adv", "full", "detailed"}:
+            price_lines = await self._prepare_price_entries(product_data, product_context)
+            if price_lines:
+                compact_data["translated_sku_prices"] = price_lines
         
         # Генерируем структурированный контент с помощью выбранного LLM
         # LLM вернет JSON с: title, description, characteristics, hashtags

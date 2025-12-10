@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     TRANSLATE_MODEL: str = ""  # Конкретная модель для переводов
     TRANSLATE_OPENAI_MODEL: str = "gpt-4o-mini"  # Legacy-поле для OpenAI моделей
     TRANSLATE_LEGACY: bool = False  # True → использовать Yandex Translate вместо LLM
+    PRICE_MODE: str = "simple"  # Режим цен: simple (только максимальная цена) или advanced (перевод и сводка вариантов)
+    # Глобальные лимиты (0 или пусто = без ограничений)
+    PER_USER_DAILY_LIMIT: int | None = None  # Лимит запросов на пользователя в сутки (МСК)
+    PER_USER_MONTHLY_LIMIT: int | None = None  # Лимит запросов на пользователя в месяц (МСК)
+    TOTAL_DAILY_LIMIT: int | None = None  # Общий лимит запросов всех пользователей в сутки (МСК)
+    TOTAL_MONTHLY_LIMIT: int | None = None  # Общий лимит запросов всех пользователей в месяц (МСК)
     TMAPI_RATE_LIMIT: int = 5  # Максимальное количество запросов к TMAPI в секунду (по умолчанию 5)
     TMAPI_RETRY_ATTEMPTS: int = 3  # Количество повторов для TMAPI при ошибках сети/429/5xx
     TMAPI_RETRY_BACKOFF: float = 0.5  # Базовая задержка перед повтором (сек), экспоненциальный рост

@@ -174,6 +174,9 @@ class MiniAppServer:
             "signature": settings_obj.signature,
             "default_currency": settings_obj.default_currency,
             "exchange_rate": settings_obj.exchange_rate,
+            "price_mode": settings_obj.price_mode,
+            "daily_limit": settings_obj.daily_limit,
+            "monthly_limit": settings_obj.monthly_limit,
         }
 
     # endregion -----------------------------------------------------------------
@@ -209,6 +212,8 @@ class MiniAppServer:
             },
             "capabilities": {
                 "allowed_currencies": ["cny", "rub"],
+                "allowed_price_modes": ["simple", "advanced"],
+                "allowed_limits": True,
             },
         }
 
@@ -236,20 +241,33 @@ class MiniAppServer:
         except Exception:
             return web.json_response({"error": "Неверный JSON"}, status=400)
 
+        target_user_id = user_ctx.user_id
+        if user_ctx.user_id and (payload.get("user_id") is not None):
+            # Админ может менять любого пользователя
+            if not self._is_admin(user_ctx.user_id):
+                return web.json_response({"error": "Недостаточно прав для изменения другого пользователя"}, status=403)
+            try:
+                target_user_id = int(payload.get("user_id"))
+            except Exception:
+                return web.json_response({"error": "user_id должен быть числом"}, status=400)
+
         signature = (payload.get("signature") or "").strip()
         currency = (payload.get("currency") or "").lower()
         exchange_rate = payload.get("exchange_rate")
+        price_mode = (payload.get("price_mode") or "").strip().lower()
+        daily_limit = payload.get("daily_limit")
+        monthly_limit = payload.get("monthly_limit")
 
         if signature and len(signature) > 64:
             return web.json_response({"error": "Подпись не должна превышать 64 символа"}, status=400)
 
         if signature:
-            self.user_settings_service.update_signature(user_ctx.user_id, signature)
+            self.user_settings_service.update_signature(target_user_id, signature)
 
         if currency:
             if currency not in {"cny", "rub"}:
                 return web.json_response({"error": "Доступны только валюты CNY или RUB"}, status=400)
-            self.user_settings_service.update_currency(user_ctx.user_id, currency)
+            self.user_settings_service.update_currency(target_user_id, currency)
 
         if exchange_rate is not None:
             try:
@@ -258,9 +276,34 @@ class MiniAppServer:
                     raise ValueError
             except (TypeError, ValueError):
                 return web.json_response({"error": "Курс должен быть положительным числом"}, status=400)
-            self.user_settings_service.update_exchange_rate(user_ctx.user_id, rate_value)
+            self.user_settings_service.update_exchange_rate(target_user_id, rate_value)
 
-        updated = self._serialize_user_settings(user_ctx.user_id)
+        if price_mode:
+            if price_mode not in {"simple", "advanced", "inherit"}:
+                return web.json_response({"error": "Режим цен должен быть simple, advanced или inherit"}, status=400)
+            normalized = "" if price_mode == "inherit" else price_mode
+            self.user_settings_service.update_price_mode(target_user_id, normalized)
+
+        if daily_limit is not None or monthly_limit is not None:
+            if not self._is_admin(user_ctx.user_id):
+                return web.json_response({"error": "Изменять лимиты может только админ"}, status=403)
+            def _norm(val):
+                if val in (None, ""):
+                    return None
+                try:
+                    iv = int(val)
+                    return iv if iv > 0 else None
+                except Exception:
+                    return None
+            dl = _norm(daily_limit)
+            ml = _norm(monthly_limit)
+            if daily_limit not in (None, "") and dl is None:
+                return web.json_response({"error": "daily_limit должен быть положительным числом"}, status=400)
+            if monthly_limit not in (None, "") and ml is None:
+                return web.json_response({"error": "monthly_limit должен быть положительным числом"}, status=400)
+            self.user_settings_service.update_limits(target_user_id, dl, ml)
+
+        updated = self._serialize_user_settings(target_user_id)
         return web.json_response({"status": "ok", "settings": updated})
 
     async def handle_update_admin_llm(self, request: web.Request) -> web.Response:
@@ -330,6 +373,10 @@ class MiniAppServer:
             debug_mode=bool(payload.get("debug_mode")),
             mock_mode=bool(payload.get("mock_mode")),
             forward_channel_id=forward_channel_id,
+            per_user_daily_limit=payload.get("per_user_daily_limit"),
+            per_user_monthly_limit=payload.get("per_user_monthly_limit"),
+            total_daily_limit=payload.get("total_daily_limit"),
+            total_monthly_limit=payload.get("total_monthly_limit"),
         )
 
         logger.info(

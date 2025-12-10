@@ -219,6 +219,12 @@ MINI_APP_BASE_PATH=/mini-app
 # (через меню бота и Mimi App), через запятую
 ADMIN_GROUP_BOT=123456789,987654321
 
+# Лимиты запросов (МСК). Пусто или 0 = без ограничений.
+PER_USER_DAILY_LIMIT=
+PER_USER_MONTHLY_LIMIT=
+TOTAL_DAILY_LIMIT=
+TOTAL_MONTHLY_LIMIT=
+
 # Никнейм поддержки, который увидят заблокированные пользователи
 # (например, @your_support_username)
 ACCESS_SUPPORT_USERNAME=@your_support
@@ -299,6 +305,8 @@ PLAYWRIGHT_PAGE_TIMEOUT_MS=90000
 
 - `/access` — управление доступом к боту (белый/чёрный список)
 - `/dump_data` — аварийный экспорт всех настроек пользователей и списков доступа в формате JSON
+- `/set_global_limits <per_user_daily> <per_user_monthly> <total_daily> <total_monthly>` — задать глобальные лимиты (0/off/none — снять, МСК).
+- `/set_user_limits <user_id> <daily_limit> <monthly_limit>` — задать индивидуальные лимиты пользователю (0/off/none — снять, МСК).
 
 > ℹ️ Бот отправляет до четырёх основных фотографий в первом сообщении. Остальные изображения приходят дополнительно, если они есть.
 
