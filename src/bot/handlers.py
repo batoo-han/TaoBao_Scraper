@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 import json
+import contextlib
 from collections import deque
 from aiogram import Router, F
 from aiogram.types import (
@@ -58,8 +59,32 @@ async def _safe_clear_markup(message: Message | None) -> None:
 
 def _log_json(level: str, **payload):
     """Структурированное логирование в JSON."""
-    msg = json.dumps(payload, ensure_ascii=False)
+    msg = json.dumps(payload, ensure_ascii=False, default=str)
     getattr(logger, level, logger.info)(msg)
+
+
+async def _delete_user_message(message: Message) -> None:
+    """Пытается удалить сообщение пользователя с нажатием кнопки, чтобы не засорять чат."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+def _json_safe(value):
+    """Приводит структуры к JSON-совместимым типам (dates -> iso)."""
+    import datetime
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [ _json_safe(v) for v in value ]
+    return str(value)
 
 # Инициализация роутера для обработки сообщений
 router = Router()
@@ -165,29 +190,47 @@ def format_settings_summary(user_settings, limits_snapshot: dict | None = None) 
         price_mode = "simple (макс. цена)"
     elif price_mode == "advanced":
         price_mode = "advanced (сводка вариантов)"
-    return (
+    summary = (
         "<b>Ваши настройки</b>\n"
         f"• подпись: <code>{signature}</code>\n"
         f"• валюта по умолчанию: <b>{currency}</b>\n"
         f"• курс для рубля: {rate_display}\n"
         f"• режим цен: {price_mode}"
     )
-    if limits_snapshot and not limits_snapshot.get("unlimited"):
-        def _fmt(limit, count, remaining):
-            if not limit:
-                return "без ограничений"
-            return f"{count}/{limit}, осталось {remaining if remaining is not None else '—'}"
-        user_limits = limits_snapshot.get("user", {})
-        summary += "\n• лимит/сутки: " + _fmt(
-            user_limits.get("daily", {}).get("limit"),
-            user_limits.get("daily", {}).get("count", 0),
-            user_limits.get("daily", {}).get("remaining"),
-        )
-        summary += "\n• лимит/месяц: " + _fmt(
-            user_limits.get("monthly", {}).get("limit"),
-            user_limits.get("monthly", {}).get("count", 0),
-            user_limits.get("monthly", {}).get("remaining"),
-        )
+
+    if limits_snapshot:
+        if limits_snapshot.get("unlimited"):
+            summary += "\n• Лимиты: без ограничений (администратор)"
+        else:
+            def _fmt_limit(block, title, is_daily=False):
+                limit = block.get("limit")
+                if not limit:
+                    return f"{title}: без ограничений"
+                remaining = block.get("remaining")
+                reset_at = block.get("reset_at")
+                period = block.get("period")
+                if is_daily:
+                    # для суток показываем дату восстановления
+                    suffix = ""
+                    if reset_at:
+                        try:
+                            from datetime import datetime
+                            dt = datetime.fromisoformat(reset_at)
+                            suffix = f", будет восстановлен в {dt.date().isoformat()}"
+                        except Exception:
+                            suffix = f", будет восстановлен в {reset_at}"
+                else:
+                    if period and isinstance(period, (list, tuple)) and len(period) == 2:
+                        start, end = period
+                        suffix = f", действует с {start} по {end}"
+                    else:
+                        suffix = f", сброс в {reset_at}" if reset_at else ""
+                return f"{title}: {limit} ({remaining if remaining is not None else '0'} осталось){suffix}"
+
+            user_limits = limits_snapshot.get("user", {}) if isinstance(limits_snapshot, dict) else {}
+            summary += "\n• " + _fmt_limit(user_limits.get("daily", {}) or {}, "Суточный лимит", is_daily=True)
+            summary += "\n• " + _fmt_limit(user_limits.get("monthly", {}) or {}, "Месячный лимит", is_daily=False)
+
     return summary
 
 
@@ -981,6 +1024,7 @@ async def command_start_handler(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "⚙️ Настройки")
 async def open_settings_menu(message: Message, state: FSMContext) -> None:
     """Обработчик кнопки настроек"""
+    await _delete_user_message(message)
     await state.clear()
     user_id = message.from_user.id
     user_settings_service.get_settings(user_id)
@@ -994,6 +1038,7 @@ async def open_settings_menu(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "🔙 В главное меню")
 async def back_to_main_menu(message: Message, state: FSMContext) -> None:
     """Обработчик возврата в главное меню"""
+    await _delete_user_message(message)
     if not await ensure_access(message):
         return
     await state.clear()
@@ -1006,6 +1051,7 @@ async def back_to_main_menu(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "✍️ Изменить подпись")
 async def ask_for_signature(message: Message, state: FSMContext) -> None:
     """Запрашивает новую подпись у пользователя"""
+    await _delete_user_message(message)
     if not await ensure_access(message):
         return
     await state.set_state(SettingsState.waiting_signature)
@@ -1025,6 +1071,7 @@ async def update_signature(message: Message, state: FSMContext) -> None:
     Проверяет, что ввод не является нажатием кнопки меню.
     Если пользователь нажал кнопку вместо ввода текста, отменяет ввод и обрабатывает кнопку.
     """
+    await _delete_user_message(message)
     new_signature = (message.text or "").strip()
     
     # Список текстов кнопок, которые не должны обрабатываться как подпись
@@ -1051,7 +1098,16 @@ async def update_signature(message: Message, state: FSMContext) -> None:
             # Показываем настройки
             user_id = message.from_user.id
             user_settings = user_settings_service.get_settings(user_id)
-            summary = format_settings_summary(user_settings)
+            is_admin_local = is_admin_user(user_id, message.from_user.username or "")
+            limits_snapshot_local = rate_limit_service.snapshot(
+                user_id=user_id,
+                is_admin=is_admin_local,
+                user_daily_limit=user_settings.daily_limit,
+                user_monthly_limit=user_settings.monthly_limit,
+                created_at=user_settings.created_at,
+                whitelist_enabled=access_control_service._config.whitelist_enabled,
+            )
+            summary = format_settings_summary(user_settings, limits_snapshot_local)
             await message.answer(
                 summary,
                 reply_markup=build_settings_menu_keyboard(user_id),
@@ -1131,6 +1187,7 @@ async def update_signature(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "💱 Валюта")
 async def choose_currency(message: Message, state: FSMContext) -> None:
     """Показывает выбор валюты"""
+    await _delete_user_message(message)
     if not await ensure_access(message):
         return
     await state.clear()
@@ -1188,6 +1245,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
 @router.message(F.text == "💰 Режим цен")
 async def choose_price_mode(message: Message, state: FSMContext) -> None:
     """Показывает выбор режима цен"""
+    await _delete_user_message(message)
     if not await ensure_access(message):
         return
     await state.clear()
@@ -1229,6 +1287,7 @@ async def handle_price_mode_choice(callback: CallbackQuery, state: FSMContext) -
 @router.message(F.text == "ℹ️ Инфо")
 async def show_info(message: Message, state: FSMContext) -> None:
     """Показывает краткий гайд по боту и настройкам"""
+    await _delete_user_message(message)
     if not await ensure_access(message):
         return
     await state.clear()
@@ -1258,6 +1317,7 @@ async def show_info(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "📈 Сменить курс")
 async def prompt_change_rate(message: Message, state: FSMContext) -> None:
     """Запрашивает новый курс, если валюта = рубль."""
+    await _delete_user_message(message)
     if not await ensure_access(message):
         return
     user_id = message.from_user.id
@@ -1338,6 +1398,7 @@ async def set_exchange_rate(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "ℹ️ Мои настройки")
 async def show_settings(message: Message, state: FSMContext) -> None:
     """Показывает текущие настройки пользователя"""
+    await _delete_user_message(message)
     if not await ensure_access(message):
         return
     await state.clear()
@@ -1350,6 +1411,7 @@ async def show_settings(message: Message, state: FSMContext) -> None:
         user_daily_limit=user_settings.daily_limit,
         user_monthly_limit=user_settings.monthly_limit,
         created_at=user_settings.created_at,
+        whitelist_enabled=access_control_service._config.whitelist_enabled,
     )
     summary = format_settings_summary(user_settings, limits_snapshot)
     await message.answer(
@@ -1398,6 +1460,8 @@ async def limits_menu_entry(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(LimitsState.choosing_action)
     current = admin_settings_service.get_settings()
+    def _lim(value):
+        return "без ограничений" if not value else str(value)
     info = (
         "🔒 <b>Управление лимитами</b>\n\n"
         "Команды (нажмите для копирования):\n"
@@ -1411,11 +1475,11 @@ async def limits_menu_entry(message: Message, state: FSMContext) -> None:
         "<code>show_user &lt;id|@username|username&gt;</code> — показать лимиты пользователя; если ID неизвестен, но username есть в access, покажет отложенные лимиты.\n"
         "<code>show_users</code> — показать все индивидуальные и отложенные лимиты.\n"
         "<code>cancel</code> — выйти из режима.\n\n"
-        f"Текущие глобальные лимиты (МСК):\n"
-        f"- per_user_daily: {current.per_user_daily_limit or 'без ограничений'}\n"
-        f"- per_user_monthly: {current.per_user_monthly_limit or 'без ограничений'}\n"
-        f"- total_daily: {current.total_daily_limit or 'без ограничений'}\n"
-        f"- total_monthly: {current.total_monthly_limit or 'без ограничений'}"
+        "Текущие глобальные лимиты (МСК):\n"
+        f"- Суточный лимит на пользователя: {_lim(current.per_user_daily_limit)} запросов\n"
+        f"- Месячный лимит на пользователя: {_lim(current.per_user_monthly_limit)} запросов\n"
+        f"- Суточный общий лимит: {_lim(current.total_daily_limit)} запросов\n"
+        f"- Месячный общий лимит: {_lim(current.total_monthly_limit)} запросов"
     )
     await message.answer(info, parse_mode="HTML")
 
@@ -1459,12 +1523,13 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
             total_daily_limit=tot_d,
             total_monthly_limit=tot_m,
         )
+        def _lim(v): return "без ограничений" if not v else str(v)
         await message.answer(
             "✅ Глобальные лимиты обновлены (МСК):\n"
-            f"• per_user_daily: {updated.per_user_daily_limit or 'без ограничений'}\n"
-            f"• per_user_monthly: {updated.per_user_monthly_limit or 'без ограничений'}\n"
-            f"• total_daily: {updated.total_daily_limit or 'без ограничений'}\n"
-            f"• total_monthly: {updated.total_monthly_limit or 'без ограничений'}"
+            f"• Суточный лимит на пользователя: {_lim(updated.per_user_daily_limit)}\n"
+            f"• Месячный лимит на пользователя: {_lim(updated.per_user_monthly_limit)}\n"
+            f"• Суточный общий лимит: {_lim(updated.total_daily_limit)}\n"
+            f"• Месячный общий лимит: {_lim(updated.total_monthly_limit)}"
         )
         return
 
@@ -1483,17 +1548,17 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
             user_settings_service.update_limits(target_id, daily_limit=daily, monthly_limit=monthly)
             await message.answer(
                 "✅ Лимиты пользователя обновлены (МСК):\n"
-                f"• id: {target_id}\n"
-                f"• daily_limit: {daily or 'без ограничений'}\n"
-                f"• monthly_limit: {monthly or 'без ограничений'}"
+                f"• ID: {target_id}\n"
+                f"• Суточный лимит: {daily or 'без ограничений'}\n"
+                f"• Месячный лимит: {monthly or 'без ограничений'}"
             )
         elif uname:
             rate_limit_service.set_pending_limits_by_username(uname, daily_limit=daily, monthly_limit=monthly)
             await message.answer(
                 "✅ Лимиты сохранены по username и будут применены при первом запросе пользователя.\n"
                 f"• username: @{uname}\n"
-                f"• daily_limit: {daily or 'без ограничений'}\n"
-                f"• monthly_limit: {monthly or 'без ограничений'}"
+                f"• Суточный лимит: {daily or 'без ограничений'}\n"
+                f"• Месячный лимит: {monthly or 'без ограничений'}"
             )
         else:
             await message.answer("❌ Не удалось определить пользователя. Укажите числовой ID.")
@@ -1502,12 +1567,13 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
     if parts[0].lower() == "show":
         # show -> все лимиты
         current = admin_settings_service.get_settings()
+        def _lim(v): return "без ограничений" if not v else str(v)
         lines = [
             "📊 <b>Глобальные лимиты (МСК)</b>",
-            f"• per_user_daily: {current.per_user_daily_limit or 'без ограничений'}",
-            f"• per_user_monthly: {current.per_user_monthly_limit or 'без ограничений'}",
-            f"• total_daily: {current.total_daily_limit or 'без ограничений'}",
-            f"• total_monthly: {current.total_monthly_limit or 'без ограничений'}",
+            f"• Суточный лимит на пользователя: {_lim(current.per_user_daily_limit)}",
+            f"• Месячный лимит на пользователя: {_lim(current.per_user_monthly_limit)}",
+            f"• Суточный общий лимит: {_lim(current.total_daily_limit)}",
+            f"• Месячный общий лимит: {_lim(current.total_monthly_limit)}",
         ]
         await message.answer("\n".join(lines), parse_mode="HTML")
         return
@@ -1521,7 +1587,6 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
         if err:
             await message.answer(f"❌ {err}")
             return
-        limits_snapshot = None
         if target_id:
             us = user_settings_service.get_settings(target_id)
             limits_snapshot = rate_limit_service.snapshot(
@@ -1530,18 +1595,29 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
                 user_daily_limit=us.daily_limit,
                 user_monthly_limit=us.monthly_limit,
                 created_at=us.created_at,
+                whitelist_enabled=access_control_service._config.whitelist_enabled,
             )
             uname_disp = f"@{uname}" if uname else "—"
-            def _fmt(block):
+            def _fmt(block, title):
                 if not block or not block.get("limit"):
-                    return "без ограничений"
-                return f"{block.get('count',0)}/{block.get('limit')} (осталось {block.get('remaining')})"
+                    return f"{title}: без ограничений"
+                rem = block.get("remaining")
+                cnt = block.get("count", 0)
+                limit = block.get("limit")
+                reset = block.get("reset_at")
+                period = block.get("period")
+                if period:
+                    start, end = period
+                    period_text = f" (период: {start} — {end})"
+                else:
+                    period_text = ""
+                return f"{title}: {limit} ({rem if rem is not None else '0'} осталось), сброс в {reset}{period_text}"
             msg = (
                 "📊 <b>Лимиты пользователя</b>\n"
-                f"• id: {target_id}\n"
+                f"• ID: {target_id}\n"
                 f"• username: {uname_disp}\n"
-                f"• сутки: {_fmt(limits_snapshot.get('user', {}).get('daily'))}\n"
-                f"• месяц: {_fmt(limits_snapshot.get('user', {}).get('monthly'))}"
+                f"• {_fmt(limits_snapshot.get('user', {}).get('daily'), 'Суточный лимит')}\n"
+                f"• {_fmt(limits_snapshot.get('user', {}).get('monthly'), 'Месячный лимит')}"
             )
             await message.answer(msg, parse_mode="HTML")
         elif uname:
@@ -1550,8 +1626,8 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
                 msg = (
                     "📊 <b>Отложенные лимиты по username</b>\n"
                     f"• username: @{uname}\n"
-                    f"• daily_limit: {pending.get('daily_limit') or 'без ограничений'}\n"
-                    f"• monthly_limit: {pending.get('monthly_limit') or 'без ограничений'}\n"
+                    f"• Суточный лимит: {pending.get('daily_limit') or 'без ограничений'}\n"
+                    f"• Месячный лимит: {pending.get('monthly_limit') or 'без ограничений'}\n"
                     "Лимиты вступят в силу при первом запросе пользователя."
                 )
                 await message.answer(msg, parse_mode="HTML")
@@ -1576,7 +1652,10 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
                 counters = usage.get(str(uid), {})
                 day_cnt = counters.get("day_count", 0)
                 month_cnt = counters.get("month_count", 0)
-                lines.append(f"id {uid}: дневной {dl}, месячный {ml} (счётчики: day={day_cnt}, month={month_cnt})")
+                lines.append(
+                    f"ID {uid}: суточный лимит {dl} (использовано {day_cnt}), "
+                    f"месячный лимит {ml} (использовано {month_cnt})"
+                )
         else:
             lines.append("По ID: нет данных")
 
@@ -1585,7 +1664,7 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
             lines.append("<b>Отложенные по username:</b>")
             for uname, data in pending.items():
                 lines.append(
-                    f"@{uname}: daily_limit={data.get('daily_limit') or '∞'}, monthly_limit={data.get('monthly_limit') or '∞'}"
+                    f"@{uname}: суточный лимит {data.get('daily_limit') or 'без ограничений'}, месячный лимит {data.get('monthly_limit') or 'без ограничений'}"
                 )
         else:
             lines.append("")
@@ -1928,63 +2007,89 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     
     # Запускаем фоновую задачу для индикатора "печатает"
     typing_task = asyncio.create_task(send_typing_action(message, stop_typing))
-    
-    # Проверяем, не находимся ли мы в процессе настройки
-    current_state = await state.get_state()
-    if current_state:
-        await message.answer(
-            "Сначала завершите настройку, затем отправьте ссылку.",
-            reply_markup=build_settings_menu_keyboard(message.from_user.id),
-        )
-        return
-
-    product_url = message.text  # Определяем переменную до try блока
-    
-    # Получаем настройки пользователя
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
-    user_settings = user_settings_service.get_settings(user_id)
-    
-    # Проверяем, что если валюта рубль, то курс установлен
-    if user_settings.default_currency.lower() == "rub" and not user_settings.exchange_rate:
-        await message.answer(
-            "⚠️ Сначала укажите курс рубля в настройках.",
-            reply_markup=build_settings_menu_keyboard(user_id),
-        )
-        return
-
-    # Проверяем лимиты
-    is_admin = is_admin_user(user_id, username)
-    limit_result = rate_limit_service.consume(
-        user_id=user_id,
-        is_admin=is_admin,
-        user_daily_limit=user_settings.daily_limit,
-        user_monthly_limit=user_settings.monthly_limit,
-        created_at=user_settings.created_at,
-    )
-    if not limit_result.get("allowed"):
-        snap = limit_result.get("snapshot") or {}
-        user_limits = snap.get("user", {})
-        daily = user_limits.get("daily", {})
-        monthly = user_limits.get("monthly", {})
-        def _fmt_limit(block):
-            limit = block.get("limit")
-            if not limit:
-                return "без ограничений"
-            remaining = block.get("remaining")
-            return f"{block.get('count', 0)}/{limit}, осталось {remaining if remaining is not None else '—'}"
-        msg_lines = [
-            "❌ Превышен лимит запросов.",
-            f"Причина: {limit_result.get('reason', 'лимит')}.",
-            f"Сутки: {_fmt_limit(daily)}",
-            f"Месяц: {_fmt_limit(monthly)}",
-        ]
-        await message.answer("\n".join(msg_lines), reply_markup=build_settings_menu_keyboard(user_id))
-        return
-    
-    usage_snapshot = limit_result.get("snapshot") if limit_result else None
-
     try:
+        # Проверяем, не находимся ли мы в процессе настройки
+        current_state = await state.get_state()
+        if current_state:
+            await message.answer(
+                "Сначала завершите настройку, затем отправьте ссылку.",
+                reply_markup=build_settings_menu_keyboard(message.from_user.id),
+            )
+            return
+
+        product_url = message.text  # Определяем переменную до try блока
+        
+        # Получаем настройки пользователя
+        user_id = message.from_user.id
+        username = message.from_user.username or ""
+        user_settings = user_settings_service.get_settings(user_id)
+        
+        # Проверяем, что если валюта рубль, то курс установлен
+        if user_settings.default_currency.lower() == "rub" and not user_settings.exchange_rate:
+            await message.answer(
+                "⚠️ Сначала укажите курс рубля в настройках.",
+                reply_markup=build_settings_menu_keyboard(user_id),
+            )
+            return
+        
+        # Проверяем лимиты (без инкремента — неудачные запросы не считаем)
+        is_admin = is_admin_user(user_id, username)
+        wl_enabled = access_control_service._config.whitelist_enabled
+        limit_result = rate_limit_service.consume(
+            user_id=user_id,
+            is_admin=is_admin,
+            user_daily_limit=user_settings.daily_limit,
+            user_monthly_limit=user_settings.monthly_limit,
+            created_at=user_settings.created_at,
+            username=username,
+            whitelist_enabled=wl_enabled,
+            increment=False,
+        )
+        if not limit_result.get("allowed"):
+            snap = limit_result.get("snapshot") or {}
+            user_limits = snap.get("user", {})
+            daily = user_limits.get("daily", {})
+            monthly = user_limits.get("monthly", {})
+            def _fmt_limit(block, kind: str):
+                limit = block.get("limit")
+                if not limit:
+                    return f"{kind}: без ограничений"
+                remaining = block.get("remaining")
+                reset_at = block.get("reset_at")
+                period = block.get("period")
+                from datetime import datetime, date
+                # Форматируем дату восстановления для суток
+                restore_date = ""
+                if reset_at:
+                    try:
+                        dt = datetime.fromisoformat(reset_at)
+                        restore_date = dt.date().isoformat()
+                    except Exception:
+                        restore_date = reset_at
+                if kind.lower().startswith("суточ"):
+                    suffix = f", будет восстановлен в {restore_date}" if restore_date else ""
+                else:
+                    if period and isinstance(period, (list, tuple)) and len(period) == 2:
+                        start, end = period
+                        suffix = f", действует с {start} по {end}"
+                    else:
+                        suffix = f", сброс в {reset_at}" if reset_at else ""
+                return f"{kind}: {limit} ({remaining if remaining is not None else '0'} осталось){suffix}"
+            support_nick = (getattr(settings, "ACCESS_SUPPORT_USERNAME", "") or "").lstrip("@")
+            support_suffix = f"\nСвяжитесь с @{support_nick}" if support_nick else ""
+            msg_lines = [
+                "❌ Превышен лимит запросов.",
+                f"{limit_result.get('reason', 'Лимит достигнут')}.",
+                _fmt_limit(daily, "Суточный"),
+                _fmt_limit(monthly, "Месячный"),
+                "*Время начала нового периода 00 ч 00 мин по МСК",
+                support_suffix,
+            ]
+            await message.answer("\n".join([m for m in msg_lines if m]), reply_markup=build_settings_menu_keyboard(user_id))
+            return
+        
+        usage_snapshot = limit_result.get("snapshot") if limit_result else None
+
         _log_json(
             "info",
             event="scrape_start",
@@ -1994,6 +2099,20 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             username=username or "unknown",
             url=product_url,
         )
+        # Готовим словарь для логов без объектов date (JSON-safe)
+        safe_limits = None
+        if usage_snapshot:
+            import copy
+            safe_limits = copy.deepcopy(usage_snapshot)
+            try:
+                for scope in ("user", "global"):
+                    for period_key in ("daily", "monthly"):
+                        block = (safe_limits or {}).get(scope, {}).get(period_key)
+                        if block and isinstance(block, dict) and "period" in block and isinstance(block["period"], (list, tuple)) and len(block["period"]) == 2:
+                            block["period"] = [str(block["period"][0]), str(block["period"][1])]
+            except Exception:
+                pass
+
         _log_json(
             "info",
             event="user_settings",
@@ -2005,18 +2124,28 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             exchange_rate=user_settings.exchange_rate,
             signature=user_settings.signature,
             price_mode=user_settings.price_mode or getattr(settings, "PRICE_MODE", "simple"),
-            limits=usage_snapshot,
+            limits=safe_limits,
         )
         # Скрапинг информации о товаре и генерация текста поста с учётом настроек пользователя
-        post_text, image_urls = await scraper.scrape_product(
-            product_url,
-            user_signature=user_settings.signature,
-            user_currency=user_settings.default_currency,
-            exchange_rate=user_settings.exchange_rate,
-            request_id=request_id,
-            user_price_mode=user_settings.price_mode,
-            is_admin=is_admin,
-        )
+        # Добавляем общий таймаут, чтобы не зависнуть навсегда при проблемах сети/TMAPI
+        scrape_timeout = getattr(settings, "TMAPI_TIMEOUT", 60) or 60
+        total_timeout = max(30, scrape_timeout + 10)  # общий лимит для wait_for
+        try:
+            post_text, image_urls = await asyncio.wait_for(
+                scraper.scrape_product(
+                    product_url,
+                    user_signature=user_settings.signature,
+                    user_currency=user_settings.default_currency,
+                    exchange_rate=user_settings.exchange_rate,
+                    request_id=request_id,
+                    user_price_mode=user_settings.price_mode,
+                    is_admin=is_admin,
+                ),
+                timeout=total_timeout,  # чуть больше TMAPI таймаута
+            )
+        except asyncio.TimeoutError:
+            await message.answer("⏱️ Запрос выполняется слишком долго. Попробуйте ещё раз позже.")
+            return
         duration_ms = int((time.monotonic() - started_at) * 1000)
         
         # Определяем платформу из URL для статистики
@@ -2083,6 +2212,16 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         else:
             await send_text_sequence(message, full_text_chunks)
 
+        # Фиксируем успешный запрос: инкрементируем счётчики лимитов только после удачной отправки
+        commit_result = rate_limit_service.commit_success(
+            user_id=user_id,
+            user_daily_limit=user_settings.daily_limit,
+            user_monthly_limit=user_settings.monthly_limit,
+            created_at=user_settings.created_at,
+            username=username,
+        )
+        usage_snapshot = commit_result.get("snapshot") if commit_result else usage_snapshot
+
         if forward_channel_id:
             broadcast_task = asyncio.create_task(
                 broadcast_post_to_channel(
@@ -2142,16 +2281,19 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                 )
                 return
         except Exception as handler_exc:  # защита от падения внутри самого обработчика
-            _log_json(
-                "error",
-                event="error_handler_failure",
-                request_id=request_id,
-                chat_id=message.chat.id,
-                user_id=user_id,
-                username=username or "unknown",
-                url=product_url,
-                error=str(handler_exc),
-            )
+            try:
+                _log_json(
+                    "error",
+                    event="error_handler_failure",
+                    request_id=request_id,
+                    chat_id=message.chat.id,
+                    user_id=user_id,
+                    username=username or "unknown",
+                    url=product_url,
+                    error=str(handler_exc),
+                )
+            except Exception:
+                pass
 
         # Fallback на случай если error_handler не инициализирован или сломался
         logger.warning("error_handler недоступен, используем fallback-поведение")
@@ -2162,11 +2304,11 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     finally:
         # Останавливаем индикатор "печатает"
         stop_typing.set()
-        typing_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await typing_task
-        except asyncio.CancelledError:
-            pass
+        if broadcast_task:
+            with contextlib.suppress(Exception):
+                await broadcast_task
 
 @router.message()
 async def echo_message(message: Message, state: FSMContext):

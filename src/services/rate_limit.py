@@ -40,6 +40,19 @@ def _add_months(d: date, months: int) -> date:
     return date(year, month, min(d.day, last_day))
 
 
+def _month_period(month_start_str: str) -> tuple[date, date]:
+    """
+    Возвращает (start_date, end_date) для месяца, где start_date = month_start_str,
+    end_date = последний день месяца.
+    """
+    try:
+        start = date.fromisoformat(month_start_str)
+    except Exception:
+        start = _today_msk().replace(day=1)
+    end = _add_months(start, 1) - timedelta(days=1)
+    return start, end
+
+
 @dataclass
 class LimitCounters:
     day_start: str
@@ -217,60 +230,122 @@ class RateLimitService:
         }
 
     # -------------------- публичные методы --------------------
-    def snapshot(self, user_id: int, is_admin: bool, user_daily_limit: Optional[int], user_monthly_limit: Optional[int], created_at: Optional[str]) -> Dict[str, Any]:
+    def _build_snapshot(
+        self,
+        u: LimitCounters,
+        g: LimitCounters,
+        per_user_daily: Optional[int],
+        per_user_monthly: Optional[int],
+        total_daily: Optional[int],
+        total_monthly: Optional[int],
+        whitelist_enabled: bool,
+        is_admin: bool,
+    ) -> Dict[str, Any]:
+        if is_admin:
+            return {"unlimited": True}
+
+        # Если whitelist выключен — не ограничиваем, но считаем usage
+        if not whitelist_enabled:
+            per_user_daily = None
+            per_user_monthly = None
+            total_daily = None
+            total_monthly = None
+
+        return {
+            "unlimited": False,
+            "user": {
+                "daily": {
+                    "limit": per_user_daily,
+                    "count": u.day_count,
+                    "remaining": self._remaining(per_user_daily, u.day_count),
+                    "reset_at": datetime.combine(date.fromisoformat(u.day_start), datetime.min.time(), MSK).replace(hour=23, minute=59, second=59).isoformat(),
+                },
+                "monthly": {
+                    "limit": per_user_monthly,
+                    "count": u.month_count,
+                    "remaining": self._remaining(per_user_monthly, u.month_count),
+                    "reset_at": _add_months(date.fromisoformat(u.month_start), 1).isoformat(),
+                    "period": _month_period(u.month_start),
+                },
+            },
+            "global": {
+                "daily": {
+                    "limit": total_daily,
+                    "count": g.day_count,
+                    "remaining": self._remaining(total_daily, g.day_count),
+                    "reset_at": datetime.combine(date.fromisoformat(g.day_start), datetime.min.time(), MSK).replace(hour=23, minute=59, second=59).isoformat(),
+                },
+                "monthly": {
+                    "limit": total_monthly,
+                    "count": g.month_count,
+                    "remaining": self._remaining(total_monthly, g.month_count),
+                    "reset_at": _add_months(date.fromisoformat(g.month_start), 1).isoformat(),
+                    "period": _month_period(g.month_start),
+                },
+            },
+        }
+
+    def snapshot(
+        self,
+        user_id: int,
+        is_admin: bool,
+        user_daily_limit: Optional[int],
+        user_monthly_limit: Optional[int],
+        created_at: Optional[str],
+        whitelist_enabled: bool = True,
+    ) -> Dict[str, Any]:
         """
         Возвращает текущие счётчики и остатки без инкремента.
         """
-        if is_admin:
-            return {"unlimited": True}
         with self._lock:
             g = self._reset_global_if_needed(self._ensure_global())
             u = self._ensure_user(user_id, created_at)
             self._write_counters(user_id, u, g)
 
-            # Лимиты
-            per_user_daily = user_daily_limit or getattr(settings, "PER_USER_DAILY_LIMIT", None)
-            per_user_monthly = user_monthly_limit or getattr(settings, "PER_USER_MONTHLY_LIMIT", None)
+            per_user_daily = user_daily_limit if user_daily_limit is not None else getattr(settings, "PER_USER_DAILY_LIMIT", None)
+            per_user_monthly = user_monthly_limit if user_monthly_limit is not None else getattr(settings, "PER_USER_MONTHLY_LIMIT", None)
             total_daily = getattr(settings, "TOTAL_DAILY_LIMIT", None)
             total_monthly = getattr(settings, "TOTAL_MONTHLY_LIMIT", None)
 
-            return {
-                "unlimited": False,
-                "user": {
-                    "daily": {
-                        "limit": per_user_daily,
-                        "count": u.day_count,
-                        "remaining": self._remaining(per_user_daily, u.day_count),
-                        "reset_at": datetime.combine(date.fromisoformat(u.day_start), datetime.min.time(), MSK).replace(hour=23, minute=59, second=59).isoformat(),
-                    },
-                    "monthly": {
-                        "limit": per_user_monthly,
-                        "count": u.month_count,
-                        "remaining": self._remaining(per_user_monthly, u.month_count),
-                        "reset_at": _add_months(date.fromisoformat(u.month_start), 1).isoformat(),
-                    },
-                },
-                "global": {
-                    "daily": {
-                        "limit": total_daily,
-                        "count": g.day_count,
-                        "remaining": self._remaining(total_daily, g.day_count),
-                        "reset_at": datetime.combine(date.fromisoformat(g.day_start), datetime.min.time(), MSK).replace(hour=23, minute=59, second=59).isoformat(),
-                    },
-                    "monthly": {
-                        "limit": total_monthly,
-                        "count": g.month_count,
-                        "remaining": self._remaining(total_monthly, g.month_count),
-                        "reset_at": _add_months(date.fromisoformat(g.month_start), 1).isoformat(),
-                    },
-                },
-            }
+            return self._build_snapshot(
+                u=u,
+                g=g,
+                per_user_daily=per_user_daily,
+                per_user_monthly=per_user_monthly,
+                total_daily=total_daily,
+                total_monthly=total_monthly,
+                whitelist_enabled=whitelist_enabled,
+                is_admin=is_admin,
+            )
 
-    def consume(self, user_id: int, is_admin: bool, user_daily_limit: Optional[int], user_monthly_limit: Optional[int], created_at: Optional[str], username: Optional[str] = None) -> Dict[str, Any]:
+    def consume(
+        self,
+        user_id: int,
+        is_admin: bool,
+        user_daily_limit: Optional[int],
+        user_monthly_limit: Optional[int],
+        created_at: Optional[str],
+        username: Optional[str] = None,
+        whitelist_enabled: bool = True,
+        increment: bool = True,
+        enforce_limits_override: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         """
-        Проверяет лимиты, инкрементирует счётчики. Возвращает словарь с полями allowed, reason, snapshot.
+        Проверяет лимиты, опционально инкрементирует счётчики (increment=True).
+        Возвращает словарь с полями allowed, reason, snapshot.
+        enforce_limits_override: True/False чтобы принудительно включить/выключить блокировки, None — по whitelist_enabled.
         """
         if is_admin:
+            # Админы не ограничиваются, но usage считаем для метрик
+            with self._lock:
+                g = self._reset_global_if_needed(self._ensure_global())
+                u = self._ensure_user(user_id, created_at)
+                if increment:
+                    u.day_count += 1
+                    u.month_count += 1
+                    g.day_count += 1
+                    g.month_count += 1
+                    self._write_counters(user_id, u, g)
             return {"allowed": True, "snapshot": {"unlimited": True}}
 
         with self._lock:
@@ -290,50 +365,122 @@ class RateLimitService:
             g = self._reset_global_if_needed(self._ensure_global())
             u = self._ensure_user(user_id, created_at)
 
-            per_user_daily = user_daily_limit or getattr(settings, "PER_USER_DAILY_LIMIT", None)
-            per_user_monthly = user_monthly_limit or getattr(settings, "PER_USER_MONTHLY_LIMIT", None)
+            per_user_daily = user_daily_limit if user_daily_limit is not None else getattr(settings, "PER_USER_DAILY_LIMIT", None)
+            per_user_monthly = user_monthly_limit if user_monthly_limit is not None else getattr(settings, "PER_USER_MONTHLY_LIMIT", None)
             total_daily = getattr(settings, "TOTAL_DAILY_LIMIT", None)
             total_monthly = getattr(settings, "TOTAL_MONTHLY_LIMIT", None)
+
+            # Индивидуальные лимиты имеют приоритет над глобальными (и могут быть больше), total сохраняем
+            # Если whitelist отключён — не блокируем, но считаем usage
+            enforce_limits = enforce_limits_override if enforce_limits_override is not None else bool(whitelist_enabled)
 
             # Проверки
             def _exceeded(limit: Optional[int], count: int) -> bool:
                 return bool(limit) and count >= limit
 
-            if _exceeded(per_user_daily, u.day_count):
+            if enforce_limits and _exceeded(per_user_daily, u.day_count):
+                snap = self._build_snapshot(
+                    u=u, g=g,
+                    per_user_daily=per_user_daily,
+                    per_user_monthly=per_user_monthly,
+                    total_daily=total_daily,
+                    total_monthly=total_monthly,
+                    whitelist_enabled=whitelist_enabled,
+                    is_admin=False,
+                )
                 return {
                     "allowed": False,
                     "reason": "Превышен дневной лимит пользователя",
-                    "snapshot": self.snapshot(user_id, False, user_daily_limit, user_monthly_limit, created_at),
+                    "snapshot": snap,
                 }
-            if _exceeded(per_user_monthly, u.month_count):
+            if enforce_limits and _exceeded(per_user_monthly, u.month_count):
+                snap = self._build_snapshot(
+                    u=u, g=g,
+                    per_user_daily=per_user_daily,
+                    per_user_monthly=per_user_monthly,
+                    total_daily=total_daily,
+                    total_monthly=total_monthly,
+                    whitelist_enabled=whitelist_enabled,
+                    is_admin=False,
+                )
                 return {
                     "allowed": False,
                     "reason": "Превышен месячный лимит пользователя",
-                    "snapshot": self.snapshot(user_id, False, user_daily_limit, user_monthly_limit, created_at),
+                    "snapshot": snap,
                 }
-            if _exceeded(total_daily, g.day_count):
+            if enforce_limits and _exceeded(total_daily, g.day_count):
+                snap = self._build_snapshot(
+                    u=u, g=g,
+                    per_user_daily=per_user_daily,
+                    per_user_monthly=per_user_monthly,
+                    total_daily=total_daily,
+                    total_monthly=total_monthly,
+                    whitelist_enabled=whitelist_enabled,
+                    is_admin=False,
+                )
                 return {
                     "allowed": False,
                     "reason": "Превышен общий дневной лимит",
-                    "snapshot": self.snapshot(user_id, False, user_daily_limit, user_monthly_limit, created_at),
+                    "snapshot": snap,
                 }
-            if _exceeded(total_monthly, g.month_count):
+            if enforce_limits and _exceeded(total_monthly, g.month_count):
+                snap = self._build_snapshot(
+                    u=u, g=g,
+                    per_user_daily=per_user_daily,
+                    per_user_monthly=per_user_monthly,
+                    total_daily=total_daily,
+                    total_monthly=total_monthly,
+                    whitelist_enabled=whitelist_enabled,
+                    is_admin=False,
+                )
                 return {
                     "allowed": False,
                     "reason": "Превышен общий месячный лимит",
-                    "snapshot": self.snapshot(user_id, False, user_daily_limit, user_monthly_limit, created_at),
+                    "snapshot": snap,
                 }
 
-            # Инкременты
-            u.day_count += 1
-            u.month_count += 1
-            g.day_count += 1
-            g.month_count += 1
+            # Инкременты (опционально)
+            if increment:
+                u.day_count += 1
+                u.month_count += 1
+                g.day_count += 1
+                g.month_count += 1
+                self._write_counters(user_id, u, g)
 
-            self._write_counters(user_id, u, g)
-
+            snap = self._build_snapshot(
+                u=u, g=g,
+                per_user_daily=per_user_daily,
+                per_user_monthly=per_user_monthly,
+                total_daily=total_daily,
+                total_monthly=total_monthly,
+                whitelist_enabled=whitelist_enabled,
+                is_admin=False,
+            )
             return {
                 "allowed": True,
-                "snapshot": self.snapshot(user_id, False, user_daily_limit, user_monthly_limit, created_at),
+                "snapshot": snap,
             }
+
+    def commit_success(
+        self,
+        user_id: int,
+        user_daily_limit: Optional[int],
+        user_monthly_limit: Optional[int],
+        created_at: Optional[str],
+        username: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Фиксирует успешный запрос: инкремент счётчиков без повторной блокировки.
+        """
+        return self.consume(
+            user_id=user_id,
+            is_admin=False,
+            user_daily_limit=user_daily_limit,
+            user_monthly_limit=user_monthly_limit,
+            created_at=created_at,
+            username=username,
+            whitelist_enabled=True,
+            increment=True,
+            enforce_limits_override=False,
+        )
 
