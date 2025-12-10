@@ -2128,24 +2128,15 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         )
         # Скрапинг информации о товаре и генерация текста поста с учётом настроек пользователя
         # Добавляем общий таймаут, чтобы не зависнуть навсегда при проблемах сети/TMAPI
-        scrape_timeout = getattr(settings, "TMAPI_TIMEOUT", 60) or 60
-        total_timeout = max(30, scrape_timeout + 10)  # общий лимит для wait_for
-        try:
-            post_text, image_urls = await asyncio.wait_for(
-                scraper.scrape_product(
-                    product_url,
-                    user_signature=user_settings.signature,
-                    user_currency=user_settings.default_currency,
-                    exchange_rate=user_settings.exchange_rate,
-                    request_id=request_id,
-                    user_price_mode=user_settings.price_mode,
-                    is_admin=is_admin,
-                ),
-                timeout=total_timeout,  # чуть больше TMAPI таймаута
-            )
-        except asyncio.TimeoutError:
-            await message.answer("⏱️ Запрос выполняется слишком долго. Попробуйте ещё раз позже.")
-            return
+        post_text, image_urls = await scraper.scrape_product(
+            product_url,
+            user_signature=user_settings.signature,
+            user_currency=user_settings.default_currency,
+            exchange_rate=user_settings.exchange_rate,
+            request_id=request_id,
+            user_price_mode=user_settings.price_mode,
+            is_admin=is_admin,
+        )
         duration_ms = int((time.monotonic() - started_at) * 1000)
         
         # Определяем платформу из URL для статистики
