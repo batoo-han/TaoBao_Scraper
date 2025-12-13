@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     # Канал для дублирования всех постов
     FORWARD_CHANNEL_ID: str = ""  # ID или @username канала, куда дублировать посты
 
+    # Переключатели платформ (True/False, по умолчанию False - платформа выключена)
+    ENABLE_TAOBAO: bool = False  # Включить поддержку Taobao
+    ENABLE_TMALL: bool = False  # Включить поддержку Tmall
+    ENABLE_1688: bool = False  # Включить поддержку 1688
+    ENABLE_PINDUODUO: bool = False  # Включить поддержку Pinduoduo
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

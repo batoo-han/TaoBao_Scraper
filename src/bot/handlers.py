@@ -37,8 +37,70 @@ from src.services.access_control import (
     is_admin_user,
     parse_ids_and_usernames,
 )
+from src.utils.url_parser import Platform
 
 logger = logging.getLogger(__name__)
+
+
+def get_enabled_platforms() -> list[str]:
+    """
+    Возвращает список включенных платформ на основе настроек.
+    
+    Returns:
+        list[str]: Список названий включенных платформ
+    """
+    enabled = []
+    if getattr(settings, "ENABLE_TAOBAO", False):
+        enabled.append("Taobao")
+    if getattr(settings, "ENABLE_TMALL", False):
+        enabled.append("Tmall")
+    if getattr(settings, "ENABLE_1688", False):
+        enabled.append("1688")
+    if getattr(settings, "ENABLE_PINDUODUO", False):
+        enabled.append("Pinduoduo")
+    return enabled
+
+
+def is_platform_enabled(platform: str) -> bool:
+    """
+    Проверяет, включена ли платформа.
+    
+    Args:
+        platform: Название платформы (taobao/tmall/1688/pinduoduo)
+        
+    Returns:
+        bool: True если платформа включена, False иначе
+    """
+    platform_lower = platform.lower()
+    if platform_lower == Platform.TAOBAO:
+        return getattr(settings, "ENABLE_TAOBAO", False)
+    elif platform_lower == Platform.TMALL:
+        return getattr(settings, "ENABLE_TMALL", False)
+    elif platform_lower == Platform.ALI1688 or platform_lower == "1688":
+        return getattr(settings, "ENABLE_1688", False)
+    elif platform_lower == Platform.PINDUODUO:
+        return getattr(settings, "ENABLE_PINDUODUO", False)
+    return False
+
+
+def format_platforms_list(platforms: list[str]) -> str:
+    """
+    Форматирует список платформ для отображения пользователю.
+    
+    Args:
+        platforms: Список названий платформ
+        
+    Returns:
+        str: Отформатированная строка с платформами
+    """
+    if not platforms:
+        return "нет доступных платформ"
+    if len(platforms) == 1:
+        return platforms[0]
+    elif len(platforms) == 2:
+        return f"{platforms[0]} и {platforms[1]}"
+    else:
+        return ", ".join(platforms[:-1]) + f" и {platforms[-1]}"
 
 
 async def _safe_clear_markup(message: Message | None) -> None:
@@ -1016,8 +1078,17 @@ async def command_start_handler(message: Message, state: FSMContext) -> None:
     if not await ensure_access(message):
         return
     await state.clear()
+    enabled_platforms = get_enabled_platforms()
+    if not enabled_platforms:
+        await message.answer(
+            f"Привет, {message.from_user.full_name}! В данный момент все платформы временно недоступны.",
+            reply_markup=build_main_menu_keyboard()
+        )
+        return
+    
+    platforms_text = format_platforms_list(enabled_platforms)
     await message.answer(
-        f"Привет, {message.from_user.full_name}! Отправь мне ссылку на товар с Taobao.",
+        f"Привет, {message.from_user.full_name}! Отправь мне ссылку на товар с {platforms_text}.",
         reply_markup=build_main_menu_keyboard()
     )
 
@@ -1291,9 +1362,12 @@ async def show_info(message: Message, state: FSMContext) -> None:
     if not await ensure_access(message):
         return
     await state.clear()
+    enabled_platforms = get_enabled_platforms()
+    platforms_text = format_platforms_list(enabled_platforms) if enabled_platforms else "нет доступных платформ"
+    
     info_text = (
         "<b>Что умеет бот</b>\n"
-        "• получает данные товара Taobao и формирует пост.\n"
+        f"• получает данные товара с {platforms_text}, формирует пост.\n"
         "• переводит описание и характеристики на русский.\n"
         "• цена: по умолчанию берётся максимальная (режим simple). В режиме advanced переводятся варианты и выводится сводка цен.\n\n"
         "<b>Настройки</b>\n"
@@ -1999,6 +2073,35 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     broadcast_task: asyncio.Task | None = None
     forward_channel_id = (getattr(settings, "FORWARD_CHANNEL_ID", "") or "").strip()
 
+    product_url = message.text  # Определяем переменную до try блока
+    
+    # Определяем платформу и проверяем, включена ли она (до отправки сообщения о обработке)
+    from src.utils.url_parser import URLParser
+    platform = URLParser.detect_platform(product_url)
+    if platform == Platform.UNKNOWN or not is_platform_enabled(platform):
+        platform_names = {
+            Platform.TAOBAO: "Taobao",
+            Platform.TMALL: "Tmall",
+            Platform.ALI1688: "1688",
+            Platform.PINDUODUO: "Pinduoduo",
+        }
+        platform_display = platform_names.get(platform, "неизвестная платформа")
+        enabled_platforms = get_enabled_platforms()
+        if enabled_platforms:
+            platforms_text = format_platforms_list(enabled_platforms)
+            await message.answer(
+                f"❌ Платформа {platform_display} временно недоступна.\n\n"
+                f"Доступные платформы: {platforms_text}.",
+                reply_markup=build_main_menu_keyboard()
+            )
+        else:
+            await message.answer(
+                f"❌ Платформа {platform_display} временно недоступна.\n\n"
+                "В данный момент все платформы временно недоступны.",
+                reply_markup=build_main_menu_keyboard()
+            )
+        return
+
     # Отправляем начальное сообщение
     await message.answer("Обрабатываю вашу ссылку, пожалуйста, подождите...")
     
@@ -2016,8 +2119,6 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                 reply_markup=build_settings_menu_keyboard(message.from_user.id),
             )
             return
-
-        product_url = message.text  # Определяем переменную до try блока
         
         # Получаем настройки пользователя
         user_id = message.from_user.id
@@ -2139,9 +2240,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         )
         duration_ms = int((time.monotonic() - started_at) * 1000)
         
-        # Определяем платформу из URL для статистики
-        from src.utils.url_parser import URLParser
-        platform = URLParser.detect_platform(product_url)
+        # Платформа уже определена выше при проверке доступности
         
         # Получаем время запроса
         request_time = time.time()
@@ -2309,7 +2408,16 @@ async def echo_message(message: Message, state: FSMContext):
     if not await ensure_access(message):
         return
     await state.clear()
+    enabled_platforms = get_enabled_platforms()
+    if not enabled_platforms:
+        await message.answer(
+            "В данный момент все платформы временно недоступны. Используйте команду /start для получения информации.",
+            reply_markup=build_main_menu_keyboard()
+        )
+        return
+    
+    platforms_text = format_platforms_list(enabled_platforms)
     await message.answer(
-        "Пожалуйста, отправьте мне ссылку на товар Taobao/Tmall или используйте команду /start.",
+        f"Пожалуйста, отправьте мне ссылку на товар с {platforms_text}, или используйте команду /start.",
         reply_markup=build_main_menu_keyboard()
     )
