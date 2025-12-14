@@ -54,6 +54,7 @@ class URLParser:
     ALI1688_DOMAINS = [
         "1688.com",
         "detail.1688.com",
+        "detail.m.1688.com",  # Мобильная версия detail страницы
         "m.1688.com",
         "winport.m.1688.com"
     ]
@@ -162,6 +163,7 @@ class URLParser:
         - https://detail.1688.com/offer/978544643627.html?offerId=978544643627&hotSaleSkuId=...
         - https://detail.1688.com/offer/978544643627.html
         - https://m.1688.com/offer/978544643627.html
+        - http://detail.m.1688.com/page/index.htm?offerId=1000507489165
         
         Args:
             url: URL товара 1688
@@ -199,6 +201,10 @@ class URLParser:
         Нормализует URL 1688 до формата: https://detail.1688.com/offer/{id}.html
         
         Извлекает ID товара из любого формата URL 1688 и формирует правильный URL.
+        Обрабатывает случаи:
+        - detail.m.1688.com -> detail.1688.com
+        - m.1688.com -> detail.1688.com
+        - любые форматы с offerId в query параметрах
         
         Args:
             url: URL товара 1688 (любой формат)
@@ -206,7 +212,12 @@ class URLParser:
         Returns:
             Optional[str]: Нормализованный URL или None если ID не найден
         """
-        offer_id = URLParser.extract_1688_id(url)
+        # Заменяем detail.m.1688.com на detail.1688.com перед обработкой
+        # Это нужно для корректной работы с ссылками типа:
+        # http://detail.m.1688.com/page/index.htm?offerId=1000507489165
+        normalized_input = url.replace("detail.m.1688.com", "detail.1688.com")
+        
+        offer_id = URLParser.extract_1688_id(normalized_input)
         if offer_id:
             return f"https://detail.1688.com/offer/{offer_id}.html"
         return None
