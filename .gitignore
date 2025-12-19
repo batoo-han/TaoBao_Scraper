@@ -68,3 +68,8 @@ data/user_settings.json
 data/*.json
 logs/
 other/
+
+# Backups (архивы с токенами и данными)
+backups/
+*.tar.gz
+bot_backup_*.tar.gz

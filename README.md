@@ -555,6 +555,8 @@ docker-compose restart
 
 ### 🚀 Deployment
 - [**deployment.md**](docs/DEPLOYMENT.md) — Развёртывание в production
+- [**migration_GUIDE.md**](docs/MIGRATION_GUIDE.md) — 📦 Перенос бота на новый сервер
+- [**migration_QUICK.md**](docs/MIGRATION_QUICK.md) — ⚡ Быстрый перенос (шпаргалка)
 - [**update_WORKFLOW.md**](docs/UPDATE_WORKFLOW.md) — 📘 Процесс обновления на сервере (NEW!)
 - [**quick_COMMANDS.md**](docs/QUICK_COMMANDS.md) — ⚡ Шпаргалка по командам (NEW!)
 - [**ci_CD_SETUP.md**](docs/CI_CD_SETUP.md) — Настройка CI/CD
