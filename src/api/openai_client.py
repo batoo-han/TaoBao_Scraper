@@ -50,9 +50,10 @@ class OpenAIClient:
             base_url=base_url,
             default_headers=extra_headers or None,
         )
-        # Chat Completions API поддерживает temperature и max_tokens
-        self.supports_temperature = True
-        self.supports_max_tokens = True
+        # Для моделей gpt-5 не поддерживается temperature, используется max_completion_tokens вместо max_tokens
+        is_gpt5 = self._requires_responses_api(self.model)
+        self.supports_temperature = not is_gpt5
+        self.supports_max_tokens = not is_gpt5  # Для gpt-5 используется max_completion_tokens
 
     @classmethod
     def _requires_responses_api(cls, model_name: str) -> bool:
@@ -126,25 +127,39 @@ class OpenAIClient:
         model_override: str | None = None,
     ) -> str:
         """
-        Вызов Chat Completions API (gpt-4o, gpt-4o-mini, gpt-4.1-mini и т.п.).
+        Вызов Chat Completions API (gpt-4o, gpt-4o-mini, gpt-4.1-mini, gpt-5-mini и т.п.).
+        
+        Для моделей семейства gpt-5:
+        - Используется max_completion_tokens вместо max_tokens
+        - Параметр temperature не поддерживается
         """
         messages = [
             {"role": "system", "content": system_prompt or self.SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
         model_name = model_override or self.model
+        is_gpt5_model = self._requires_responses_api(model_name)  # Проверяем, является ли модель gpt-5
+        
         kwargs = {
             "model": model_name,
             "messages": messages,
         }
         if expect_json:
             kwargs["response_format"] = {"type": "json_object"}
-        temp_value = temperature if temperature is not None else (0.1 if self.supports_temperature else None)
-        if temp_value is not None and self.supports_temperature:
-            kwargs["temperature"] = temp_value
+        
+        # Для моделей gpt-5 не поддерживается temperature
+        if not is_gpt5_model:
+            temp_value = temperature if temperature is not None else (0.1 if self.supports_temperature else None)
+            if temp_value is not None and self.supports_temperature:
+                kwargs["temperature"] = temp_value
+        
+        # Для моделей gpt-5 используется max_completion_tokens вместо max_tokens
         max_value = max_tokens if max_tokens is not None else (2000 if self.supports_max_tokens else None)
-        if max_value is not None and self.supports_max_tokens:
-            kwargs["max_tokens"] = max_value
+        if max_value is not None:
+            if is_gpt5_model:
+                kwargs["max_completion_tokens"] = max_value
+            elif self.supports_max_tokens:
+                kwargs["max_tokens"] = max_value
 
         response = await self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
@@ -212,12 +227,13 @@ class OpenAIClient:
         )
 
         # Всегда используем Chat Completions API для перевода (быстрее и надёжнее)
+        # Для моделей gpt-5 temperature не передаётся (не поддерживается)
         translated = await self._call_chat_completions(
             user_prompt,
             system_prompt="Ты профессиональный переводчик.",
             expect_json=False,
             max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
-            temperature=0.1,
+            temperature=0.1 if not self._requires_responses_api(self.model) else None,
         )
 
         return translated.strip() or text
