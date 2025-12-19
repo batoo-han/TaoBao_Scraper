@@ -92,11 +92,37 @@ cp .env.example .env
 nano .env  # или используйте любой редактор
 ```
 
-#### 2. Запуск
+#### 2. Настройка прав доступа
+
+**ВАЖНО:** Контейнер запускается от пользователя `botuser` (UID 1000). 
+Папки `data/` и `logs/` должны быть доступны для записи этому пользователю.
+
+```bash
+# Автоматическая настройка (рекомендуется)
+./scripts/setup_permissions.sh
+
+# Или вручную:
+# Создайте папки
+mkdir -p data logs
+
+# Вариант 1: Если пользователь с UID 1000 существует на хосте
+chown -R 1000:1000 data logs
+chmod -R 755 data logs
+find data -type f -name "*.json" -exec chmod 644 {} \;
+
+# Вариант 2: Использовать текущего пользователя (менее безопасно)
+# chown -R $(id -u):$(id -g) data logs
+# chmod -R 775 data logs
+
+# Вариант 3: Если не можете изменить владельца (не рекомендуется)
+# chmod -R 777 data logs
+```
+
+#### 3. Запуск
 
 ```bash
 # Соберите и запустите контейнер
-docker-compose up -d
+docker-compose up -d --build
 
 # Просмотр логов
 docker-compose logs -f

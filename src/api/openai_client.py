@@ -20,9 +20,10 @@ class OpenAIClient:
         "любой текст. НЕ оставляй английские слова или китайские иероглифы. Всегда отвечай только валидным JSON."
     )
 
-    RESPONSES_PREFIXES = ("gpt-5",)
-    RESPONSES_JSON_TOKENS = 4500
-    RESPONSES_TRANSLATE_TOKENS = 500
+    # Константы для Responses API (отключено, используется только Chat Completions)
+    RESPONSES_PREFIXES = ("gpt-5",)  # Не используется - Responses API отключён
+    RESPONSES_JSON_TOKENS = 4500  # Не используется
+    RESPONSES_TRANSLATE_TOKENS = 500  # Используется как max_tokens для переводов
 
     def __init__(self, model_name: str | None = None):
         if not settings.OPENAI_API_KEY:
@@ -33,7 +34,9 @@ class OpenAIClient:
         source_model = model_name or settings.OPENAI_MODEL or "gpt-4o-mini"
         model_raw = source_model.strip()
         self.model = model_raw or "gpt-4o-mini"
-        self.use_responses_api = self._requires_responses_api(self.model)
+        # Отключено использование Responses API - всегда используем Chat Completions API
+        # Responses API слишком медленный из-за reasoning-запросов
+        self.use_responses_api = False
 
         # Поддержка внешнего шлюза (OpenAI Gateway)
         base_url = (getattr(settings, "OPENAI_BASE_URL", "") or "").strip() or None
@@ -47,8 +50,9 @@ class OpenAIClient:
             base_url=base_url,
             default_headers=extra_headers or None,
         )
-        self.supports_temperature = not self.use_responses_api
-        self.supports_max_tokens = not self.use_responses_api
+        # Chat Completions API поддерживает temperature и max_tokens
+        self.supports_temperature = True
+        self.supports_max_tokens = True
 
     @classmethod
     def _requires_responses_api(cls, model_name: str) -> bool:
@@ -99,20 +103,15 @@ class OpenAIClient:
     ) -> str:
         """
         Универсальный метод получения структурированного ответа (JSON) от модели.
+        Всегда использует Chat Completions API для быстрой работы.
         """
-        if self.use_responses_api:
-            text = await self._call_responses_api(
-                user_prompt,
-                system_prompt=system_prompt,
-                max_output_tokens=max_output_tokens
-            )
-        else:
-            text = await self._call_chat_completions(
-                user_prompt,
-                system_prompt=system_prompt,
-                expect_json=True,
-                max_tokens=max_output_tokens
-            )
+        # Всегда используем Chat Completions API (быстрее, чем Responses API)
+        text = await self._call_chat_completions(
+            user_prompt,
+            system_prompt=system_prompt,
+            expect_json=True,
+            max_tokens=max_output_tokens
+        )
         if not text:
             raise ValueError("OpenAI вернул пустой ответ.")
         return text
@@ -158,6 +157,10 @@ class OpenAIClient:
     ) -> str:
         """
         Вызов Responses API (семейство gpt-5.x) с автоувеличением лимита токенов.
+        
+        ВНИМАНИЕ: Этот метод отключён и не используется.
+        Responses API слишком медленный из-за reasoning-запросов.
+        Всегда используется Chat Completions API вместо этого.
         """
         max_tokens = max_output_tokens or self.RESPONSES_JSON_TOKENS
         max_cap = 6000
@@ -208,27 +211,14 @@ class OpenAIClient:
             f"{text}"
         )
 
-        if self.use_responses_api:
-            # ВАЖНО: для простого перевода нам не нужны reasoning‑модели.
-            # Responses API (семейство gpt‑5.x) иногда тратит все токены на рассуждения
-            # и помечает ответ как `status=incomplete, reason=max_output_tokens` без текста.
-            # Поэтому для перевода всегда используем лёгкую chat‑модель.
-            translated = await self._call_chat_completions(
-                user_prompt,
-                system_prompt="Ты профессиональный переводчик.",
-                expect_json=False,
-                max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
-                temperature=0.1,
-                model_override="gpt-4o-mini",
-            )
-        else:
-            translated = await self._call_chat_completions(
-                user_prompt,
-                system_prompt="Ты профессиональный переводчик.",
-                expect_json=False,
-                max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
-                temperature=0.1,
-            )
+        # Всегда используем Chat Completions API для перевода (быстрее и надёжнее)
+        translated = await self._call_chat_completions(
+            user_prompt,
+            system_prompt="Ты профессиональный переводчик.",
+            expect_json=False,
+            max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
+            temperature=0.1,
+        )
 
         return translated.strip() or text
 

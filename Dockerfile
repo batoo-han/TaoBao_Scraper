@@ -49,7 +49,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Создаём non-root пользователя для безопасности
+# Используем UID 1000 (обычно первый пользователь на системе)
 RUN useradd -m -u 1000 botuser
+
+# Создаём необходимые директории для данных и логов
+RUN mkdir -p /app/data /app/logs && \
+    chown -R botuser:botuser /app/data /app/logs
 
 # Копируем исходный код (новая структура)
 COPY main.py ./

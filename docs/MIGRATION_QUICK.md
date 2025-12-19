@@ -38,6 +38,9 @@ tar -xzf bot_backup_*.tar.gz
 chmod 600 .env
 chmod 644 data/*.json
 
+# Настройка прав доступа (ВАЖНО!)
+./scripts/setup_permissions.sh
+
 # Запуск
 docker-compose up -d
 ```

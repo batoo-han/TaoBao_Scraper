@@ -139,8 +139,13 @@ cd taobao-scraper-bot
 # Создайте необходимые директории
 mkdir -p data logs
 
-# Установите правильные права доступа
-chmod 755 data logs
+# Настройте права доступа (автоматически)
+./scripts/setup_permissions.sh
+
+# Или вручную (если пользователь botuser с UID 1000 существует):
+# chown -R botuser:botuser data logs
+# chmod -R 755 data logs
+# find data -type f -name "*.json" -exec chmod 644 {} \;
 ```
 
 ---

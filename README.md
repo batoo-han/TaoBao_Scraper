@@ -555,6 +555,7 @@ docker-compose restart
 
 ### 🚀 Deployment
 - [**deployment.md**](docs/DEPLOYMENT.md) — Развёртывание в production
+- [**docker_PERMISSIONS.md**](docs/DOCKER_PERMISSIONS.md) — 🔒 Настройка прав доступа для Docker
 - [**migration_GUIDE.md**](docs/MIGRATION_GUIDE.md) — 📦 Перенос бота на новый сервер
 - [**migration_QUICK.md**](docs/MIGRATION_QUICK.md) — ⚡ Быстрый перенос (шпаргалка)
 - [**update_WORKFLOW.md**](docs/UPDATE_WORKFLOW.md) — 📘 Процесс обновления на сервере (NEW!)
