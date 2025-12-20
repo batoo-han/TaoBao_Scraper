@@ -16,7 +16,7 @@ from src.core.config import settings
 @dataclass
 class UserSettings:
     """Настройки пользователя"""
-    signature: str = "@annabbox"
+    signature: str = ""  # Полная подпись пользователя (если пустая, не добавляется в пост)
     default_currency: str = "cny"  # cny или rub
     exchange_rate: Optional[float] = None  # Курс обмена для рубля
     price_mode: str = ""  # Режим цен: simple или advanced ("" → брать из глобального settings)
@@ -112,7 +112,7 @@ class UserSettingsService:
         """
         if user_id not in self._settings_cache:
             # Создаём настройки по умолчанию
-            default_signature = getattr(settings, 'DEFAULT_SIGNATURE', '@annabbox')
+            default_signature = getattr(settings, 'DEFAULT_SIGNATURE', '')
             default_currency = getattr(settings, 'DEFAULT_CURRENCY', 'cny')
             default_price_mode = (getattr(settings, 'PRICE_MODE', 'simple') or 'simple').strip().lower()
             try:

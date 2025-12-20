@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     TMAPI_RETRY_ATTEMPTS: int = 3  # Количество повторов для TMAPI при ошибках сети/429/5xx
     TMAPI_RETRY_BACKOFF: float = 0.5  # Базовая задержка перед повтором (сек), экспоненциальный рост
     CONVERT_CURRENCY: bool = False  # Флаг для включения/отключения конвертации валют
-    DEFAULT_SIGNATURE: str = "@annabbox"  # Подпись по умолчанию для постов
+    DEFAULT_SIGNATURE: str = ""  # Подпись по умолчанию для постов (пустая - пользователи задают свою)
     DEFAULT_CURRENCY: str = "cny"  # Валюта по умолчанию (cny или rub)
     DEBUG_MODE: bool = False  # Режим отладки - показывать подробные логи в консоли
     MOCK_MODE: bool = False  # Mock режим - использовать данные из result.txt вместо реальных API-запросов к TMAPI

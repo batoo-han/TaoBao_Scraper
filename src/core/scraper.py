@@ -87,8 +87,8 @@ class Scraper:
         Returns:
             tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
         """
-        # Используем настройки пользователя или значения по умолчанию
-        signature = user_signature or settings.DEFAULT_SIGNATURE
+        # Используем подпись пользователя (может быть пустой)
+        signature = user_signature or ""
         currency = (user_currency or settings.DEFAULT_CURRENCY).lower()
         # Режим цен: пользовательский override → глобальный → simple
         effective_price_mode = (user_price_mode or "").strip().lower() or self.price_mode or "simple"
@@ -2117,8 +2117,8 @@ class Scraper:
         Returns:
             str: Отформатированный текст поста в HTML
         """
-        # Используем подпись пользователя или значение по умолчанию
-        user_signature = signature or settings.DEFAULT_SIGNATURE
+        # Используем подпись пользователя (может быть пустой)
+        user_signature = (signature or "").strip()
         # Извлекаем данные из LLM ответа
         title = llm_content.get('title', 'Товар')
         description = llm_content.get('description', '')
@@ -2319,10 +2319,10 @@ class Scraper:
             post_parts.append(price_block)
             post_parts.append("")
         
-        # Призыв к действию (курсивом) с подписью пользователя
-        contact = user_signature.strip() if user_signature.strip() else settings.DEFAULT_SIGNATURE
-        post_parts.append(f"<i>📝 Для заказа пишите {contact} или в комментариях 🛍️</i>")
-        post_parts.append("")
+        # Подпись пользователя (если не пустая)
+        if user_signature:
+            post_parts.append(f"<i>{user_signature}</i>")
+            post_parts.append("")
         
         # Хэштеги (курсивом)
         # Очищаем хэштеги от пробелов (программная проверка на случай, если LLM добавил пробелы)

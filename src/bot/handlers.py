@@ -199,17 +199,21 @@ def build_settings_menu_keyboard(user_id: int | None = None) -> ReplyKeyboardMar
         rows.append([KeyboardButton(text="🧩 Mimi App", web_app=WebAppInfo(url=mini_app_url))])
 
     rows.append([KeyboardButton(text="✍️ Изменить подпись")])
-    rows.append([KeyboardButton(text="💱 Валюта"), KeyboardButton(text="ℹ️ Мои настройки")])
-    rows.append([KeyboardButton(text="💰 Режим цен"), KeyboardButton(text="ℹ️ Инфо")])
-
+    
+    # Показываем кнопку удаления подписи только если подпись задана
     try:
         if user_id is not None:
             settings_obj = user_settings_service.get_settings(user_id)
+            if settings_obj.signature and settings_obj.signature.strip():
+                rows.append([KeyboardButton(text="🗑️ Удалить подпись")])
             if settings_obj.default_currency.lower() == "rub":
                 rows.append([KeyboardButton(text="📈 Сменить курс")])
     except Exception:
         # В случае ошибки не блокируем построение клавиатуры
         pass
+    
+    rows.append([KeyboardButton(text="💱 Валюта"), KeyboardButton(text="ℹ️ Мои настройки")])
+    rows.append([KeyboardButton(text="💰 Режим цен"), KeyboardButton(text="ℹ️ Инфо")])
 
     rows.append([KeyboardButton(text="🔙 В главное меню")])
 
@@ -241,7 +245,7 @@ def build_price_mode_keyboard() -> InlineKeyboardMarkup:
 def format_settings_summary(user_settings, limits_snapshot: dict | None = None) -> str:
     """Форматирует сводку настроек пользователя"""
     currency = user_settings.default_currency.upper()
-    signature = user_settings.signature or "—"
+    signature = user_settings.signature if user_settings.signature else "(не задана)"
     rate = user_settings.exchange_rate
     rate_display = f"{float(rate):.4f} ₽ за 1 ¥" if rate else "не задан"
     effective_price_mode = (user_settings.price_mode or "").strip().lower() or (getattr(settings, "PRICE_MODE", "simple") or "simple")
@@ -1127,7 +1131,9 @@ async def ask_for_signature(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(SettingsState.waiting_signature)
     await message.answer(
-        "Введите новую подпись (например @username или номер телефона).\n\n"
+        "Введите полную подпись для поста (например: \"📝 Для заказа пишите @username или в комментариях 🛍️\").\n\n"
+        "Вы можете указать любую подпись целиком.\n"
+        "Для удаления подписи отправьте пустое сообщение или используйте кнопку «🗑️ Удалить подпись» в меню настроек.\n\n"
         "⚠️ <b>Важно:</b> Введите именно текст подписи. "
         "Если вы нажмёте кнопку меню, ввод будет отменён.\n\n"
         "Для отмены нажмите «🔙 В главное меню».",
@@ -1150,6 +1156,7 @@ async def update_signature(message: Message, state: FSMContext) -> None:
     menu_buttons = {
         "🧩 Mimi App": None,  # Web App обрабатывается отдельно
         "✍️ Изменить подпись": None,  # Уже в режиме ввода подписи
+        "🗑️ Удалить подпись": None,  # Обрабатывается отдельно
         "💱 Валюта": "choose_currency",
         "ℹ️ Мои настройки": "show_settings",
         "💰 Режим цен": "choose_price_mode",
@@ -1219,6 +1226,15 @@ async def update_signature(message: Message, state: FSMContext) -> None:
                 "Если вы нажмёте кнопку меню, ввод будет отменён.",
                 parse_mode="HTML"
             )
+        elif new_signature == "🗑️ Удалить подпись":
+            # Удаляем подпись
+            user_id = message.from_user.id
+            user_settings_service.update_signature(user_id, "")
+            await message.answer(
+                "✅ Подпись удалена. Подпись не будет добавляться в посты.",
+                reply_markup=build_settings_menu_keyboard(user_id),
+                parse_mode="HTML"
+            )
         else:
             # Общее сообщение для других кнопок
             await message.answer(
@@ -1228,12 +1244,7 @@ async def update_signature(message: Message, state: FSMContext) -> None:
             )
         return
     
-    # Проверка на пустую подпись
-    if not new_signature:
-        await message.answer(
-            "❌ Подпись не должна быть пустой. Попробуйте снова или нажмите кнопку «🔙 В главное меню» для отмены."
-        )
-        return
+    # Пустая подпись разрешена (будет означать, что подпись не добавляется в пост)
     
     # Проверка длины подписи (максимум 64 символа, как в веб-приложении)
     if len(new_signature) > 64:
@@ -1248,9 +1259,50 @@ async def update_signature(message: Message, state: FSMContext) -> None:
     user_settings_service.update_signature(user_id, new_signature)
 
     await state.clear()
+    if new_signature:
+        await message.answer(
+            f"✅ Подпись обновлена: <code>{new_signature}</code>",
+            reply_markup=build_settings_menu_keyboard(message.from_user.id),
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            "✅ Подпись очищена. Подпись не будет добавляться в посты.",
+            reply_markup=build_settings_menu_keyboard(message.from_user.id),
+            parse_mode="HTML"
+        )
+
+
+@router.message(F.text == "🗑️ Удалить подпись")
+async def delete_signature(message: Message, state: FSMContext) -> None:
+    """Удаляет подпись пользователя"""
+    await _delete_user_message(message)
+    if not await ensure_access(message):
+        return
+    
+    user_id = message.from_user.id
+    user_settings_service.update_signature(user_id, "")
+    
     await message.answer(
-        f"✅ Подпись обновлена: <code>{new_signature}</code>",
-        reply_markup=build_settings_menu_keyboard(message.from_user.id),
+        "✅ Подпись удалена. Подпись не будет добавляться в посты.",
+        reply_markup=build_settings_menu_keyboard(user_id),
+        parse_mode="HTML"
+        )
+
+
+@router.message(F.text == "🗑️ Удалить подпись")
+async def delete_signature(message: Message, state: FSMContext) -> None:
+    """Удаляет подпись пользователя"""
+    await _delete_user_message(message)
+    if not await ensure_access(message):
+        return
+    
+    user_id = message.from_user.id
+    user_settings_service.update_signature(user_id, "")
+    
+    await message.answer(
+        "✅ Подпись удалена. Подпись не будет добавляться в посты.",
+        reply_markup=build_settings_menu_keyboard(user_id),
         parse_mode="HTML"
     )
 
