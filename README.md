@@ -156,11 +156,19 @@ YANDEX_GPT_MODEL=yandexgpt-lite
 # OpenAI (используйте при выборе провайдера openai)
 OPENAI_API_KEY=your_openai_key
 OPENAI_MODEL=gpt-4o-mini
+# Настройки цен токенов OpenAI (в USD за 1 000 000 токенов)
+# Источник цен: https://openai.com/ru-RU/api/pricing/
+# Если не указаны, используются стандартные цены
+OPENAI_PROMPT_PRICE_PER_1M=
+OPENAI_COMPLETION_PRICE_PER_1M=
 
 # ProxyAPI (опционально, OpenAI-совместимый провайдер для РФ)
 PROXYAPI_API_KEY=your_proxyapi_key
 # Можно оставить по умолчанию:
 # PROXYAPI_BASE_URL=https://api.proxyapi.ru/openai/v1
+# Настройки цен токенов ProxyAPI (в USD за 1 000 000 токенов)
+PROXYAPI_PROMPT_PRICE_PER_1M=
+PROXYAPI_COMPLETION_PRICE_PER_1M=
 
 # Переключение провайдера (yandex, openai или proxyapi)
 DEFAULT_LLM=yandex
@@ -247,6 +255,7 @@ PLAYWRIGHT_PAGE_TIMEOUT_MS=90000
 - Для OpenAI обязательно задайте `OPENAI_API_KEY`. По умолчанию используется модель `gpt-4o-mini`, но вы можете выбрать, например, `gpt-4.1-mini`, `gpt-4o`, `o4-mini`, `gpt-5-mini` или `gpt-5.1`.
 - Семейство `gpt-5.1` (включая `gpt-5.1-mini` и `gpt-5.1-nano`) использует Responses API: бот автоматически отключает temperature/top_p/max_tokens и задаёт `reasoning` + `max_output_tokens` как рекомендует OpenAI Latest Model Guide.
 - Для YandexGPT необходимо оставить заполненными `YANDEX_GPT_API_KEY`, `YANDEX_FOLDER_ID`, `YANDEX_GPT_MODEL`.
+- **Подсчет токенов и стоимости:** При использовании OpenAI/ProxyAPI бот автоматически считает количество токенов и стоимость запросов. Вы можете указать цены вручную через `OPENAI_PROMPT_PRICE_PER_1M`, `OPENAI_COMPLETION_PRICE_PER_1M` (или `PROXYAPI_*`) в USD за 1 000 000 токенов. Если цены не указаны, используются стандартные цены из `openai_pricing.py`. Статистика токенов и стоимости отображается в дублирующем чате после каждого запроса. Для YandexGPT стоимость не считается.
 
 Если вы используете **OpenAI Gateway** на зарубежном сервере:
 

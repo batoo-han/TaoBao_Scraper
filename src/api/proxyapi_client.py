@@ -10,12 +10,14 @@ BASE_URL = https://api.proxyapi.ru/openai/v1
 """
 
 import json
-from typing import Iterable
+from typing import Iterable, Optional
 
 from openai import AsyncOpenAI, OpenAIError
 
 from src.core.config import settings
 from src.api.prompts import POST_GENERATION_PROMPT
+from src.api.tokens_stats import TokensUsage, calculate_cost
+from src.api.openai_pricing import get_effective_pricing
 
 
 class ProxyAPIClient:
@@ -58,19 +60,32 @@ class ProxyAPIClient:
         normalized = (model_name or "").strip().lower()
         return any(normalized.startswith(prefix) for prefix in cls.RESPONSES_PREFIXES)
 
-    async def generate_post_content(self, product_data: dict) -> dict:
+    async def generate_post_content(
+        self, product_data: dict
+    ) -> dict | tuple[dict, TokensUsage]:
         """
         Генерация описания товара через ProxyAPI (OpenAI-совместимое API).
+        
+        Returns:
+            dict: JSON с содержимым поста
+            tuple[dict, TokensUsage]: JSON с содержимым и статистика токенов (если используется новая сигнатура)
         """
         product_info_str = json.dumps(product_data, ensure_ascii=False, indent=2)
         prompt = POST_GENERATION_PROMPT.replace("{product_data}", product_info_str)
 
         try:
-            llm_response = await self.generate_json_response(
+            result = await self.generate_json_response(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_prompt=prompt,
                 max_output_tokens=self.RESPONSES_JSON_TOKENS,
             )
+            # Новая сигнатура: возвращает кортеж (text, tokens_usage)
+            if isinstance(result, tuple):
+                llm_response, tokens_usage = result
+            else:
+                # Обратная совместимость
+                llm_response = result
+                tokens_usage = TokensUsage()
         except OpenAIError as exc:
             raise RuntimeError(f"ProxyAPI (OpenAI) вернул ошибку: {exc}") from exc
 
@@ -84,7 +99,9 @@ class ProxyAPIClient:
                 cleaned_response = cleaned_response[:-3]
             cleaned_response = cleaned_response.strip()
 
-            return json.loads(cleaned_response)
+            parsed_content = json.loads(cleaned_response)
+            # Возвращаем кортеж для совместимости с новой сигнатурой
+            return parsed_content, tokens_usage
         except json.JSONDecodeError as exc:
             raise ValueError(f"ProxyAPI (OpenAI) вернул невалидный JSON: {exc}") from exc
 
@@ -93,19 +110,32 @@ class ProxyAPIClient:
         system_prompt: str,
         user_prompt: str,
         max_output_tokens: int | None = None,
-    ) -> str:
+    ) -> str | tuple[str, TokensUsage]:
         """
         Универсальный метод получения структурированного ответа (JSON) от модели.
+        
+        Returns:
+            str: Текст ответа (старая сигнатура для обратной совместимости)
+            tuple[str, TokensUsage]: Текст ответа и статистика токенов (новая сигнатура)
         """
-        text = await self._call_chat_completions(
+        result = await self._call_chat_completions(
             user_prompt,
             system_prompt=system_prompt,
             expect_json=True,
             max_tokens=max_output_tokens,
         )
+        
+        # Новая сигнатура: возвращает кортеж (text, tokens_usage)
+        if isinstance(result, tuple):
+            text, tokens_usage = result
+        else:
+            text = result
+            tokens_usage = TokensUsage()
+        
         if not text:
             raise ValueError("ProxyAPI (OpenAI) вернул пустой ответ.")
-        return text
+        
+        return text, tokens_usage
 
     async def _call_chat_completions(
         self,
@@ -114,9 +144,13 @@ class ProxyAPIClient:
         expect_json: bool = True,
         max_tokens: int | None = None,
         temperature: float | None = None,
-    ) -> str:
+    ) -> str | tuple[str, TokensUsage]:
         """
         Вызов Chat Completions API через ProxyAPI.
+        
+        Returns:
+            str: Текст ответа (старая сигнатура)
+            tuple[str, TokensUsage]: Текст ответа и статистика токенов (новая сигнатура)
         """
         messages = [
             {"role": "system", "content": system_prompt or self.SYSTEM_PROMPT},
@@ -143,7 +177,54 @@ class ProxyAPIClient:
                 kwargs["max_tokens"] = max_tokens
 
         response = await self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+        text = response.choices[0].message.content or ""
+        
+        # Извлекаем статистику токенов из response.usage
+        # Согласно документации OpenAI/ProxyAPI, response.usage содержит:
+        # - prompt_tokens: количество токенов во входном промпте
+        # - completion_tokens: количество токенов в ответе
+        # - total_tokens: общее количество токенов
+        tokens_usage = TokensUsage()
+        if hasattr(response, "usage") and response.usage is not None:
+            usage = response.usage
+            # Прямой доступ к атрибутам согласно документации OpenAI
+            try:
+                prompt_tokens = usage.prompt_tokens if hasattr(usage, "prompt_tokens") else 0
+                completion_tokens = usage.completion_tokens if hasattr(usage, "completion_tokens") else 0
+                # total_tokens может быть не указан, тогда вычисляем его
+                if hasattr(usage, "total_tokens") and usage.total_tokens is not None:
+                    total_tokens = usage.total_tokens
+                else:
+                    total_tokens = prompt_tokens + completion_tokens
+                
+                # Получаем цены токенов для ProxyAPI (за 1M токенов)
+                prompt_price, completion_price = get_effective_pricing(
+                    model_name=self.model,
+                    prompt_price_override=getattr(settings, "PROXYAPI_PROMPT_PRICE_PER_1M", 0.0),
+                    completion_price_override=getattr(settings, "PROXYAPI_COMPLETION_PRICE_PER_1M", 0.0),
+                )
+                
+                # Если цены доступны, вычисляем стоимость
+                if prompt_price > 0 or completion_price > 0:
+                    tokens_usage = calculate_cost(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        prompt_price_per_1m=prompt_price if prompt_price > 0 else 0.0,
+                        completion_price_per_1m=completion_price if completion_price > 0 else 0.0,
+                    )
+                else:
+                    # Сохраняем только количество токенов без стоимости
+                    tokens_usage = TokensUsage(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=total_tokens,
+                    )
+            except (AttributeError, TypeError) as e:
+                # Если возникла ошибка при доступе к атрибутам, логируем и продолжаем
+                if settings.DEBUG_MODE:
+                    print(f"[ProxyAPI] Ошибка при извлечении статистики токенов: {e}")
+        
+        return text, tokens_usage
 
     async def _call_responses_api(
         self,
@@ -189,12 +270,18 @@ class ProxyAPIClient:
             f"{last_dump}"
         )
 
-    async def translate_text(self, text: str, target_language: str = "ru") -> str:
+    async def translate_text(
+        self, text: str, target_language: str = "ru"
+    ) -> str | tuple[str, TokensUsage]:
         """
         Переводит текст на указанный язык через ProxyAPI.
+        
+        Returns:
+            str: Переведённый текст (старая сигнатура)
+            tuple[str, TokensUsage]: Переведённый текст и статистика токенов (новая сигнатура)
         """
         if not text:
-            return text
+            return text, TokensUsage()
 
         user_prompt = (
             f"Переведи следующий текст на {target_language}. "
@@ -202,15 +289,22 @@ class ProxyAPIClient:
             f"{text}"
         )
 
-        translated = await self._call_chat_completions(
+        result = await self._call_chat_completions(
             user_prompt,
             system_prompt="Ты профессиональный переводчик.",
             expect_json=False,
             max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
             temperature=0.1,
         )
+        
+        # Новая сигнатура: возвращает кортеж (text, tokens_usage)
+        if isinstance(result, tuple):
+            translated, tokens_usage = result
+        else:
+            translated = result
+            tokens_usage = TokensUsage()
 
-        return translated.strip() or text
+        return (translated.strip() or text), tokens_usage
 
     @staticmethod
     def _extract_text_from_response(response) -> str:

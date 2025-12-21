@@ -178,9 +178,10 @@ class ErrorHandler:
         # Отправляем дружественное сообщение пользователю
         user_friendly_message = self.USER_MESSAGES.get(error_type, self.USER_MESSAGES['unknown_error'])
         if request_id:
-            user_friendly_message += f"\n\nID запроса: <code>{request_id}</code>"
+            # Используем обратные кавычки для моноширинного текста (работает в HTML)
+            user_friendly_message += f"\n\nID запроса: <pre>{request_id}</pre>"
         try:
-            await user_message.answer(user_friendly_message)
+            await user_message.answer(user_friendly_message, parse_mode="HTML")
         except Exception as send_error:
             logger.error(f"Failed to send error message to user: {send_error}")
         
@@ -216,7 +217,7 @@ class ErrorHandler:
             f"📄 <b>Описание:</b> <code>{error_info['error_message'][:200]}</code>\n"
         )
         if error_info.get('request_id'):
-            admin_message += f"\n🪪 <b>Request ID:</b> <code>{error_info['request_id']}</code>\n"
+            admin_message += f"\n🪪 <b>Request ID:</b> <pre>{error_info['request_id']}</pre>\n"
         
         # Добавляем пояснения для ошибок TMAPI
         if tmapi_explanation:

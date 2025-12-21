@@ -768,6 +768,7 @@ async def broadcast_post_to_channel(
     request_time: float | None = None,
     text_length: int | None = None,
     limits_snapshot: dict | None = None,
+    tokens_usage = None,  # TokensUsage объект или None
 ) -> None:
     """
     Дублирует готовый пост в дополнительный канал/группу, если он указан.
@@ -887,17 +888,28 @@ async def broadcast_post_to_channel(
             stats_lines.append(f"📄 <b>Частей текста:</b> {chunks_count}")
 
         # Лимиты
-        if limits_snapshot and not limits_snapshot.get("unlimited"):
-            user_limits = limits_snapshot.get("user", {})
-            daily = user_limits.get("daily", {})
-            monthly = user_limits.get("monthly", {})
-            def _fmt(block):
-                limit = block.get("limit")
-                if not limit:
-                    return "без ограничений"
-                return f"{block.get('count',0)}/{limit}, осталось {block.get('remaining')}"
-            stats_lines.append(f"📅 Лимит/день: {_fmt(daily)}")
-            stats_lines.append(f"🗓️ Лимит/месяц: {_fmt(monthly)}")
+        if limits_snapshot:
+            if not limits_snapshot.get("unlimited"):
+                user_limits = limits_snapshot.get("user", {})
+                global_limits = limits_snapshot.get("global", {})
+                daily = user_limits.get("daily", {})
+                monthly = user_limits.get("monthly", {})
+                global_daily = global_limits.get("daily", {})
+                global_monthly = global_limits.get("monthly", {})
+                
+                def _fmt(block):
+                    limit = block.get("limit")
+                    if not limit:
+                        return "без ограничений"
+                    return f"{block.get('count',0)}/{limit}, осталось {block.get('remaining')}"
+                
+                stats_lines.append(f"📅 Лимит/день: {_fmt(daily)}")
+                stats_lines.append(f"🗓️ Лимит/месяц: {_fmt(monthly)}")
+            else:
+                # Для админов нет лимитов, но сохраняем глобальные данные для стоимости
+                global_limits = limits_snapshot.get("global", {})
+                global_daily = global_limits.get("daily", {})
+                global_monthly = global_limits.get("monthly", {})
         
         # Время обработки
         if duration_ms is not None:
@@ -912,9 +924,59 @@ async def broadcast_post_to_channel(
                 duration_str = f"{minutes} мин {seconds} сек"
             stats_lines.append(f"⏱️ <b>Время обработки:</b> {duration_str}")
         
+        # Статистика токенов (если используется OpenAI/ProxyAPI)
+        if tokens_usage and tokens_usage.total_tokens > 0:
+            stats_lines.append("")  # Пустая строка для разделения
+            stats_lines.append("💬 <b>Статистика токенов:</b>")
+            
+            # Форматирование чисел с пробелами вместо запятых для разделения тысяч
+            def format_number(num: int) -> str:
+                """Форматирует число с пробелами для разделения тысяч"""
+                return f"{num:,}".replace(",", " ")
+            
+            # Входящие токены
+            prompt_tokens_str = format_number(tokens_usage.prompt_tokens)
+            if tokens_usage.prompt_cost > 0:
+                stats_lines.append(f"  📥 Входящие: {prompt_tokens_str} токенов/💰${tokens_usage.prompt_cost:.6f}")
+            else:
+                stats_lines.append(f"  📥 Входящие: {prompt_tokens_str} токенов")
+            
+            # Исходящие токены
+            completion_tokens_str = format_number(tokens_usage.completion_tokens)
+            if tokens_usage.completion_cost > 0:
+                stats_lines.append(f"  📤 Исходящие: {completion_tokens_str} токенов/💰${tokens_usage.completion_cost:.6f}")
+            else:
+                stats_lines.append(f"  📤 Исходящие: {completion_tokens_str} токенов")
+            
+            # Всего токенов
+            total_tokens_str = format_number(tokens_usage.total_tokens)
+            if tokens_usage.total_cost > 0:
+                stats_lines.append(f"  📊 Всего: {total_tokens_str} токенов/💰${tokens_usage.total_cost:.6f}")
+            else:
+                stats_lines.append(f"  📊 Всего: {total_tokens_str} токенов")
+        
+        # Статистика стоимости запросов (после статистики токенов)
+        if limits_snapshot:
+            # Получаем глобальную стоимость из snapshot
+            global_limits = limits_snapshot.get("global", {})
+            
+            if global_limits:
+                global_daily = global_limits.get("daily", {})
+                global_monthly = global_limits.get("monthly", {})
+                global_daily_cost = global_daily.get("cost", 0.0)
+                global_monthly_cost = global_monthly.get("cost", 0.0)
+                
+                if global_daily_cost > 0 or global_monthly_cost > 0:
+                    stats_lines.append("")  # Пустая строка для разделения
+                    stats_lines.append("🌐 <b>Общая стоимость запросов (включая админов):</b>")
+                    if global_daily_cost > 0:
+                        stats_lines.append(f"    📅 За день: ${global_daily_cost:.6f}")
+                    if global_monthly_cost > 0:
+                        stats_lines.append(f"    🗓️ За месяц: ${global_monthly_cost:.6f}")
+        
         # Request ID для отслеживания
         if request_id:
-            stats_lines.append(f"🆔 <b>Request ID:</b> <code>{request_id}</code>")
+            stats_lines.append(f"🆔 <b>Request ID:</b> <pre>{request_id}</pre>")
         
         stats_message = "\n".join(stats_lines)
         
@@ -2281,7 +2343,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         )
         # Скрапинг информации о товаре и генерация текста поста с учётом настроек пользователя
         # Добавляем общий таймаут, чтобы не зависнуть навсегда при проблемах сети/TMAPI
-        post_text, image_urls = await scraper.scrape_product(
+        result = await scraper.scrape_product(
             product_url,
             user_signature=user_settings.signature,
             user_currency=user_settings.default_currency,
@@ -2290,6 +2352,12 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             user_price_mode=user_settings.price_mode,
             is_admin=is_admin,
         )
+        # Обрабатываем новую сигнатуру с статистикой токенов (для OpenAI/ProxyAPI)
+        if len(result) == 3:
+            post_text, image_urls, tokens_usage = result
+        else:
+            post_text, image_urls = result
+            tokens_usage = None  # YandexGPT не возвращает статистику токенов
         duration_ms = int((time.monotonic() - started_at) * 1000)
         
         # Платформа уже определена выше при проверке доступности
@@ -2355,12 +2423,16 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             await send_text_sequence(message, full_text_chunks)
 
         # Фиксируем успешный запрос: инкрементируем счётчики лимитов только после удачной отправки
+        # Передаем стоимость запроса, если она есть (только для OpenAI/ProxyAPI)
+        request_cost = tokens_usage.total_cost if tokens_usage and tokens_usage.total_cost > 0 else 0.0
         commit_result = rate_limit_service.commit_success(
             user_id=user_id,
             user_daily_limit=user_settings.daily_limit,
             user_monthly_limit=user_settings.monthly_limit,
             created_at=user_settings.created_at,
             username=username,
+            request_cost=request_cost,
+            is_admin=is_admin,
         )
         usage_snapshot = commit_result.get("snapshot") if commit_result else usage_snapshot
 
@@ -2381,6 +2453,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                     request_time=request_time,
                     text_length=len(post_text) if post_text else 0,
                     limits_snapshot=usage_snapshot,
+                    tokens_usage=tokens_usage,
                 )
             )
 

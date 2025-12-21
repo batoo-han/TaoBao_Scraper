@@ -177,6 +177,33 @@ TRANSLATE_LEGACY=False         # True → использовать старый 
 
 > Рекомендуем для продакшена: `DEFAULT_LLM=openai` (например, `gpt-5-mini`) и `TRANSLATE_PROVIDER=openai` + `TRANSLATE_MODEL=gpt-4o-mini`.
 
+### Настройка цен токенов
+
+Бот автоматически считает количество токенов и стоимость запросов. Вы можете указать цены вручную в `.env`:
+
+```env
+# Цены в USD за 1 000 000 токенов
+# Источник: https://openai.com/ru-RU/api/pricing/
+OPENAI_PROMPT_PRICE_PER_1M=0.25      # Для входящих токенов (prompt)
+OPENAI_COMPLETION_PRICE_PER_1M=2.00  # Для исходящих токенов (completion)
+```
+
+**Примеры цен для популярных моделей:**
+- `gpt-5-mini`: prompt $0.25/1M, completion $2.00/1M
+- `gpt-4o-mini`: prompt $0.15/1M, completion $0.60/1M
+- `gpt-4o`: prompt $2.50/1M, completion $10.00/1M
+
+Если цены не указаны, бот использует стандартные цены из `openai_pricing.py`.
+
+### Статистика токенов и стоимости
+
+После каждого запроса бот отображает в дублирующем чате:
+- количество входящих и исходящих токенов
+- стоимость каждого типа токенов
+- общую стоимость запроса
+- накопленную стоимость запросов пользователя за день/месяц
+- общую стоимость всех запросов (включая админов) за день/месяц
+
 ### Биллинг
 
 - тарификация поминутно по токенам (см. [pricing](https://openai.com/pricing)).
@@ -266,6 +293,13 @@ DEFAULT_LLM=yandex
 CONVERT_CURRENCY=False
 DEBUG_MODE=False
 DISABLE_SSL_VERIFY=False
+
+# Цены токенов (опционально, для OpenAI/ProxyAPI)
+# Если не указаны, используются стандартные цены
+OPENAI_PROMPT_PRICE_PER_1M=
+OPENAI_COMPLETION_PRICE_PER_1M=
+PROXYAPI_PROMPT_PRICE_PER_1M=
+PROXYAPI_COMPLETION_PRICE_PER_1M=
 ```
 
 ---

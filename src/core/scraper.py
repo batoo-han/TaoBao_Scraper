@@ -11,6 +11,7 @@ from src.api.proxyapi_client import ProxyAPIClient
 from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
 from src.scrapers.pinduoduo_web import PinduoduoWebScraper
+from src.api.tokens_stats import TokensUsage
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,9 @@ class Scraper:
             self.translation_supports_structured = False
         else:
             self.translation_supports_structured = hasattr(self.translation_client, "generate_json_response")
+        
+        # Атрибут для сбора статистики токенов во время обработки запроса
+        self._current_tokens_usage: TokensUsage | None = None
 
     async def scrape_product(
         self, 
@@ -71,7 +75,7 @@ class Scraper:
         request_id: str | None = None,
         user_price_mode: str | None = None,
         is_admin: bool = False,
-    ):
+    ) -> tuple[str, list[str]] | tuple[str, list[str], TokensUsage]:
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
         и формирует финальный пост.
@@ -85,8 +89,13 @@ class Scraper:
             is_admin (bool, optional): Является ли пользователь администратором (для детализированных ошибок)
 
         Returns:
-            tuple: Кортеж, содержащий сгенерированный текст поста (str) и список URL изображений (list).
+            tuple: Кортеж, содержащий:
+                - сгенерированный текст поста (str)
+                - список URL изображений (list)
+                - статистика токенов (TokensUsage) - опционально, если используется OpenAI/ProxyAPI
         """
+        # Инициализируем общую статистику токенов для этого запроса
+        self._current_tokens_usage = TokensUsage()
         # Используем подпись пользователя (может быть пустой)
         signature = user_signature or ""
         currency = (user_currency or settings.DEFAULT_CURRENCY).lower()
@@ -188,7 +197,13 @@ class Scraper:
                     (product_data.get('title') or '').strip()
                 )
                 if raw_description:
-                    translated = await self._translate_text_generic(raw_description, target_language="ru")
+                    result = await self._translate_text_generic(raw_description, target_language="ru")
+                    if isinstance(result, tuple):
+                        translated, tokens_usage = result
+                        if self._current_tokens_usage:
+                            self._current_tokens_usage += tokens_usage
+                    else:
+                        translated = result
                     if translated and translated != raw_description:
                         product_data['details'] = translated
                         if settings.DEBUG_MODE:
@@ -207,7 +222,13 @@ class Scraper:
 
         # Заготавливаем переведённый заголовок и описание для контекста цен
         raw_title = product_data.get('title', '') or ''
-        translated_title_hint = await self._translate_text_generic(raw_title, target_language="ru")
+        result = await self._translate_text_generic(raw_title, target_language="ru")
+        if isinstance(result, tuple):
+            translated_title_hint, tokens_usage = result
+            if self._current_tokens_usage:
+                self._current_tokens_usage += tokens_usage
+        else:
+            translated_title_hint = result
         if translated_title_hint:
             compact_data["title_hint"] = translated_title_hint
         
@@ -228,7 +249,13 @@ class Scraper:
         if raw_description:
             # Берём первые 500 символов описания для контекста
             description_sample = raw_description[:500]
-            translated_description = await self._translate_text_generic(description_sample, target_language="ru")
+            result = await self._translate_text_generic(description_sample, target_language="ru")
+            if isinstance(result, tuple):
+                translated_description, tokens_usage = result
+                if self._current_tokens_usage:
+                    self._current_tokens_usage += tokens_usage
+            else:
+                translated_description = result
         
         # Формируем контекст для перевода цен
         product_context = {
@@ -245,7 +272,15 @@ class Scraper:
         
         # Генерируем структурированный контент с помощью выбранного LLM
         # LLM вернет JSON с: title, description, characteristics, hashtags
-        llm_content = await self.llm_client.generate_post_content(compact_data)
+        result = await self.llm_client.generate_post_content(compact_data)
+        # Новая сигнатура: возвращает кортеж (content, tokens_usage) для OpenAI/ProxyAPI
+        if isinstance(result, tuple):
+            llm_content, tokens_usage = result
+            if self._current_tokens_usage:
+                self._current_tokens_usage += tokens_usage
+        else:
+            # Обратная совместимость для YandexGPT
+            llm_content = result
         translated_title = llm_content.get('title') or translated_title_hint
         
         if settings.DEBUG_MODE:
@@ -349,6 +384,10 @@ class Scraper:
         if settings.DEBUG_MODE:
             print(f"[Scraper] Итого изображений: {len(image_urls)} (sku: {len(sku_images)}, detail: {len(detail_images)})")
 
+        # Возвращаем результат с статистикой токенов, если она есть
+        total_tokens_usage = self._current_tokens_usage or TokensUsage()
+        if total_tokens_usage.total_tokens > 0:
+            return post_text, image_urls, total_tokens_usage
         return post_text, image_urls
     
     def _prepare_compact_data_for_llm(self, product_data: dict) -> dict:
@@ -1063,7 +1102,12 @@ class Scraper:
         Args:
             entries: Список вариантов с ценами
             product_context: Контекст товара (title, description)
+        
+        Returns:
+            list[dict]: Обработанный список цен
         """
+        # Статистика токенов собирается внутри вызываемых методов через глобальную переменную
+        # или через обновление total_tokens_usage в методе scrape_product
         try:
             translated = await self._translate_price_entries_with_llm(entries, product_context)
             if not translated:
@@ -1140,12 +1184,19 @@ class Scraper:
 
         for attempt in range(2):
             try:
-                response_text = await self._call_translation_json(
+                result = await self._call_translation_json(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     token_limit=token_limit,
                     temperature=0.0,
                 )
+                # Собираем статистику токенов, если возвращена новая сигнатура
+                if isinstance(result, tuple):
+                    response_text, tokens_usage = result
+                    if self._current_tokens_usage:
+                        self._current_tokens_usage += tokens_usage
+                else:
+                    response_text = result
                 data = self._parse_json_response(response_text)
                 normalized = []
                 for item in data if isinstance(data, list) else []:
@@ -1267,12 +1318,19 @@ class Scraper:
 
         for attempt in range(2):
             try:
-                response_text = await self._call_translation_json(
+                result = await self._call_translation_json(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     token_limit=token_limit,
                     temperature=0.0,
                 )
+                # Собираем статистику токенов, если возвращена новая сигнатура
+                if isinstance(result, tuple):
+                    response_text, tokens_usage = result
+                    if self._current_tokens_usage:
+                        self._current_tokens_usage += tokens_usage
+                else:
+                    response_text = result
                 data = self._parse_json_response(response_text)
                 result = []
                 seen = set()
@@ -1455,12 +1513,18 @@ class Scraper:
             )
             for attempt in range(2):
                 try:
-                    response_text = await self._call_translation_json(
+                    result = await self._call_translation_json(
                         system_prompt="Ты профессиональный переводчик. Всегда отвечай JSON.",
                         user_prompt=user_prompt,
                         token_limit=token_limit,
                         temperature=0.0,
                     )
+                    # Собираем статистику токенов, если возвращена новая сигнатура
+                    if isinstance(result, tuple):
+                        response_text, tokens_usage = result
+                        total_tokens_usage += tokens_usage
+                    else:
+                        response_text = result
                     data = self._parse_json_response(response_text)
                     translated_map: dict[int, str] = {}
                     if isinstance(data, list):
@@ -1891,7 +1955,22 @@ class Scraper:
 
         return hasattr(self.translation_client, "generate_json_response")
 
-    def _parse_json_response(self, text: str):
+    def _parse_json_response(self, text_or_tuple: str | tuple[str, TokensUsage]) -> dict | list:
+        """
+        Парсит JSON-ответ, обрабатывая как старую сигнатуру (str), так и новую (tuple[str, TokensUsage]).
+        
+        Args:
+            text_or_tuple: Строка JSON или кортеж (строка, TokensUsage)
+        
+        Returns:
+            dict | list: Распарсенный JSON
+        """
+        # Извлекаем текст из кортежа, если это новая сигнатура
+        if isinstance(text_or_tuple, tuple):
+            text, _ = text_or_tuple
+        else:
+            text = text_or_tuple
+        
         cleaned = text.strip()
         if cleaned.startswith("```json"):
             cleaned = cleaned[7:]
@@ -1908,7 +1987,14 @@ class Scraper:
         user_prompt: str,
         token_limit: int = 1500,
         temperature: float = 0.0,
-    ) -> str:
+    ) -> str | tuple[str, TokensUsage]:
+        """
+        Вызывает метод generate_json_response для переводческого клиента.
+        
+        Returns:
+            str: Текст ответа (старая сигнатура)
+            tuple[str, TokensUsage]: Текст ответа и статистика токенов (новая сигнатура для OpenAI/ProxyAPI)
+        """
         generator = getattr(self.translation_client, "generate_json_response", None)
         if not callable(generator):
             raise RuntimeError("Активный переводческий провайдер не поддерживает JSON-ответы.")
@@ -1929,21 +2015,35 @@ class Scraper:
         except (TypeError, ValueError):
             kwargs["max_tokens"] = token_limit
 
-        return await generator(**kwargs)
+        result = await generator(**kwargs)
+        # Новая сигнатура: возвращает кортеж (text, tokens_usage) для OpenAI/ProxyAPI
+        return result
 
-    async def _translate_text_generic(self, text: str, target_language: str = "ru") -> str:
+    async def _translate_text_generic(
+        self, text: str, target_language: str = "ru"
+    ) -> str | tuple[str, TokensUsage]:
         """
         Универсальный переводчик: использует выбранный translation_client.
+        
+        Returns:
+            str: Переведённый текст (старая сигнатура)
+            tuple[str, TokensUsage]: Переведённый текст и статистика токенов (новая сигнатура для OpenAI/ProxyAPI)
         """
         if not text:
-            return text
+            return text, TokensUsage()
 
         translator = getattr(self.translation_client, "translate_text", None)
         if callable(translator):
             try:
-                translated = await translator(text, target_language=target_language)
+                result = await translator(text, target_language=target_language)
+                # Новая сигнатура: возвращает кортеж (text, tokens_usage) для OpenAI/ProxyAPI
+                if isinstance(result, tuple):
+                    translated, tokens_usage = result
+                else:
+                    translated = result
+                    tokens_usage = TokensUsage()
                 if translated:
-                    return translated
+                    return translated, tokens_usage
             except Exception as e:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper] Ошибка перевода: {e}")

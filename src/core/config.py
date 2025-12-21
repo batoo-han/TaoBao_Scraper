@@ -132,6 +132,16 @@ class Settings(BaseSettings):
     ENABLE_1688: bool = False  # Включить поддержку 1688
     ENABLE_PINDUODUO: bool = False  # Включить поддержку Pinduoduo
 
+    # Настройки цен токенов OpenAI (в USD за 1 000 000 токенов)
+    # Если не указаны, будут использоваться стандартные цены OpenAI по модели
+    # Можно указать вручную, если используете кастомный шлюз или хотите переопределить цены
+    # Пример для gpt-5-mini: OPENAI_PROMPT_PRICE_PER_1M=0.25, OPENAI_COMPLETION_PRICE_PER_1M=2.00
+    OPENAI_PROMPT_PRICE_PER_1M: float = 0.0  # Цена за 1M входных токенов (0 = автодетекция из ответа или стандартные цены)
+    OPENAI_COMPLETION_PRICE_PER_1M: float = 0.0  # Цена за 1M выходных токенов (0 = автодетекция из ответа или стандартные цены)
+    # Настройки цен токенов ProxyAPI (аналогично OpenAI)
+    PROXYAPI_PROMPT_PRICE_PER_1M: float = 0.0  # Цена за 1M входных токенов
+    PROXYAPI_COMPLETION_PRICE_PER_1M: float = 0.0  # Цена за 1M выходных токенов
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
