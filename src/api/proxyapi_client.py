@@ -70,7 +70,8 @@ class ProxyAPIClient:
             dict: JSON с содержимым поста
             tuple[dict, TokensUsage]: JSON с содержимым и статистика токенов (если используется новая сигнатура)
         """
-        product_info_str = json.dumps(product_data, ensure_ascii=False, indent=2)
+        # Важно: используем компактный JSON, чтобы не тратить токены на пробелы/переносы строк
+        product_info_str = json.dumps(product_data, ensure_ascii=False, separators=(",", ":"))
         prompt = POST_GENERATION_PROMPT.replace("{product_data}", product_info_str)
 
         try:

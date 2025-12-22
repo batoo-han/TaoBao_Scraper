@@ -31,7 +31,8 @@ class YandexGPTClient:
         """
         Генерирует структурированный JSON-контент для поста.
         """
-        product_info_str = json.dumps(product_data, ensure_ascii=False, indent=2)
+        # Важно: используем компактный JSON, чтобы не тратить токены на пробелы/переносы строк
+        product_info_str = json.dumps(product_data, ensure_ascii=False, separators=(",", ":"))
         prompt = POST_GENERATION_PROMPT.replace("{product_data}", product_info_str)
 
         if settings.DEBUG_MODE:

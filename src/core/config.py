@@ -38,7 +38,14 @@ class Settings(BaseSettings):
         ADMIN_GROUP_BOT (str): Дополнительные админские Telegram ID через запятую
         YANDEX_GPT_MODEL (str): Модель YandexGPT (yandexgpt-lite или yandexgpt)
         OPENAI_MODEL (str): Основная модель OpenAI (например, gpt-4o-mini)
+        OPENAI_FALLBACK_CHAT_MODEL (str): Fallback-модель для Chat Completions, если выбрана gpt-5* (требует Responses API)
         DEFAULT_LLM (str): Имя провайдера LLM (yandex или openai)
+        OPENAI_STRATEGY (str): Стратегия работы с OpenAI (legacy или single_pass)
+        OPENAI_PROMPT_VARIANT (str): Вариант промпта для OpenAI (shared или compact_v1)
+        OPENAI_MAX_OUTPUT_TOKENS (int): Максимум выходных токенов OpenAI при генерации JSON-поста
+        OPENAI_SINGLE_PASS_MAX_SKUS (int): Максимум SKU, отправляемых в OpenAI в single_pass
+        OPENAI_SINGLE_PASS_MAX_SKU_VALUES (int): Максимум значений в sku_props на один prop
+        OPENAI_SINGLE_PASS_MAX_PROP_VALUE_LEN (int): Максимальная длина строкового значения в product_props (остальное обрезается)
         TRANSLATE_PROVIDER (str): Провайдер LLM для переводов и обработки цен
         TRANSLATE_LLM (str): (deprecated) Старая переменная для совместимости
         TRANSLATE_MODEL (str): Конкретная модель переводческого LLM
@@ -69,7 +76,26 @@ class Settings(BaseSettings):
     TMAPI_BILLING_CHAT_ID: str = ""  # ID чата ответственного за оплату TMAPI для уведомлений об ошибке 439 (необязательно)
     YANDEX_GPT_MODEL: str = "yandexgpt-lite"  # Модель YandexGPT для использования
     OPENAI_MODEL: str = "gpt-4o-mini"  # Модель OpenAI по умолчанию
+    # Если указана gpt-5* модель, но Responses API отключён (мы используем Chat Completions),
+    # переключаемся на совместимую fallback-модель, чтобы избежать пустых ответов.
+    OPENAI_FALLBACK_CHAT_MODEL: str = "gpt-4o-mini"
     DEFAULT_LLM: str = "yandex"  # Провайдер LLM по умолчанию
+    # Стратегия работы с OpenAI:
+    # - "legacy"      — старое поведение: предварительный перевод + компактные данные
+    # - "single_pass" — новый режим: сразу отдаём сырой ответ TMAPI (только нужные поля) в OpenAI
+    OPENAI_STRATEGY: str = "single_pass"
+    # Вариант промпта для OpenAI (не влияет на YandexGPT/ProxyAPI):
+    # - "shared"      — использовать общий промпт POST_GENERATION_PROMPT (длинный, с примерами)
+    # - "compact_v1"  — первый компактный промпт OpenAI (очень короткий, может быть «вольным»)
+    # - "compact_v2"  — компактный промпт OpenAI с более строгими правилами (рекомендуется)
+    OPENAI_PROMPT_VARIANT: str = "compact_v2"
+    # Лимит выходных токенов при генерации JSON-поста через OpenAI.
+    # Чем меньше — тем дешевле, но слишком низкие значения могут приводить к обрезанному JSON.
+    OPENAI_MAX_OUTPUT_TOKENS: int = 2400
+    # Ограничения для single_pass, чтобы не раздувать prompt токенами
+    OPENAI_SINGLE_PASS_MAX_SKUS: int = 120
+    OPENAI_SINGLE_PASS_MAX_SKU_VALUES: int = 60
+    OPENAI_SINGLE_PASS_MAX_PROP_VALUE_LEN: int = 220
     TRANSLATE_PROVIDER: str = ""  # Провайдер LLM для переводов (по умолчанию = DEFAULT_LLM)
     TRANSLATE_LLM: str = ""  # Backward compatibility alias
     TRANSLATE_MODEL: str = ""  # Конкретная модель для переводов
