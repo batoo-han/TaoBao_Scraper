@@ -1,6 +1,7 @@
 import asyncio
 import json
-from typing import Iterable, Optional
+import logging
+from typing import Iterable
 
 from openai import AsyncOpenAI, OpenAIError
 
@@ -8,6 +9,8 @@ from src.core.config import settings
 from src.api.prompts import POST_GENERATION_PROMPT
 from src.api.tokens_stats import TokensUsage, calculate_cost
 from src.api.openai_pricing import get_effective_pricing
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIClient:
@@ -19,8 +22,110 @@ class OpenAIClient:
     SYSTEM_PROMPT = (
         "Ты помощник для создания структурированного контента для постов в Telegram. "
         "КРИТИЧЕСКИ ВАЖНО: ВСЁ должно быть переведено на русский язык - названия цветов, бренды, "
-        "любой текст. НЕ оставляй английские слова или китайские иероглифы. Всегда отвечай только валидным JSON."
+        "любой текст. НЕ оставляй китайские иероглифы НИГДЕ (включая бренд/аромат/характеристики). "
+        "Если не можешь корректно перевести фрагмент — УДАЛИ его. Всегда отвечай только валидным JSON."
     )
+
+    # Компактный промпт только для OpenAI: специально сделан короче общего POST_GENERATION_PROMPT,
+    # чтобы снизить входные токены и ускорить ответы, не теряя ключевых правил.
+    OPENAI_COMPACT_PROMPT_V1 = """
+Ты создаёшь контент для Telegram-поста по данным товара (JSON).
+Требования:
+- Пиши ТОЛЬКО на русском. Никаких английских слов и китайских иероглифов.
+- Не выдумывай характеристики. Используй только входные данные.
+- Без «воды» и продающих формулировок.
+- Нельзя указывать пол/гендер и возраст (даже если они есть во входных данных).
+- Не упоминай артикулы, SKU, ID, коды.
+- additional_info всегда {}.
+
+Верни ТОЛЬКО JSON (без markdown) со структурой:
+{
+  "title": "до 60 символов",
+  "description": "2–4 коротких предложения, без банальностей",
+  "main_characteristics": { "Название": "значение/список" },
+  "additional_info": {},
+  "hashtags": ["2-3шт, одно слово, без # и пробелов"],
+  "emoji": "один эмодзи"
+}
+
+Правило анти-дублирования:
+- description = только общая информация (конструкция/особенности/назначение без банальностей).
+- main_characteristics = конкретика (состав/материал/цвета/размеры/объём/ключевые параметры).
+- Не повторяй одно и то же в description и main_characteristics.
+
+Если вход содержит available_colors/available_sizes — используй их.
+Если вход содержит sku_props/skus — используй их только чтобы понять варианты (цвет/размер/комплектация), но НЕ перечисляй все варианты в description.
+Если вход содержит translated_sku_prices — не придумывай новых названий, опирайся только на них.
+
+Данные товара (JSON):
+{product_data}
+""".strip()
+
+    # Версия v2: всё ещё компактно, но заметно строже к «галлюцинациям» и «воде».
+    # Цель: сохранить низкие входные токены и при этом повысить точность описания.
+    OPENAI_COMPACT_PROMPT_V2 = """
+Ты создаёшь контент для Telegram-поста по данным товара (JSON).
+
+ЖЁСТКИЕ ПРАВИЛА (важнее всего):
+- Пиши ТОЛЬКО на русском. Никаких английских слов и китайских иероглифов.
+- НИЧЕГО не выдумывай. Каждая фраза должна опираться на входные данные.
+- Убери «воду» и общие слова (модульный/унифицированный/предусматривает/конструкция позволяет и т.п.), если это прямо не подтверждено данными.
+- Нельзя указывать пол/гендер и возраст (даже если они есть во входных данных).
+- Не упоминай артикулы, SKU, ID, коды.
+- Не добавляй поля со значениями «прочее/другое/other/其他/не указан/нет данных» — такие поля нужно ПРОПУСТИТЬ.
+- Не выводи «Сертификаты» (и любые поля про сертификаты/3C/CQC), если значение не конкретное.
+- Не добавляй «Диапазон цен» и «Варианты комплектов» как характеристики: цены и варианты будут оформлены вне JSON в готовом посте.
+- Не добавляй «Гарантия»/«Срок службы» и любые гарантийные условия: это не выводим в постах.
+- Не добавляй «Источник»/«Платформа»/«Маркетплейс»/«Ссылка»: это не выводим в постах.
+- В description НЕЛЬЗЯ указывать любые измеримые конкретики (цена, объём, размеры, вес, количество элементов/предметов, диапазоны). Это должно быть в main_characteristics или будет добавлено системой ниже.
+- В description НЕ пиши цифры, если это не часть официального названия модели/серии (и то по возможности избегай).
+- Не добавляй характеристику «Упаковка», если это обычная товарная упаковка (коробка/пакет/картон). Упаковку указывай только если она реально отличает товар (например: подарочная коробка-матрёшка, футляр, кейс, тканевый мешок с вышивкой).
+- Запрещены «рассуждения» и классификации: не пиши фразы вида «относится к категории…», «является сувениром», «подходит для близких/родных/подарка» и т.п., даже если во входных данных есть поля про категории/адресатов.
+- Не делай вывод «туристический сувенир»/«сувенирный» без прямого подтверждения в названии товара.
+- Если есть характеристика «Цвета», перечисляй ТОЛЬКО реальные цвета/цветовые сочетания/принты. Игнорируй значения, которые выглядят как название объекта/персонажа/серии (например «корейская кукла»).
+- КРИТИЧЕСКИ: в ответе не должно быть китайских иероглифов. Если во входных значениях есть китайский текст — переведи на русский или удали поле целиком.
+- Запрещено указывать дату/время изготовления/производства/партию/сроки (например «произведён в ноябре», «дата производства», «2024-11»). Если во входных данных есть такие фрагменты — игнорируй их.
+
+Формат ответа:
+Верни ТОЛЬКО JSON (без markdown) со структурой:
+{
+  "title": "до 60 символов, БЕЗ перечислений (без двоеточий и списков)",
+  "description": "2–4 коротких предложения (до 640 символов суммарно), сухо и по делу. Добавь 3–5 КОНКРЕТНЫХ фактов из входных данных.",
+  "main_characteristics": { "Название": "значение/список" },
+  "additional_info": {},
+  "hashtags": ["2-3шт, одно слово, без # и пробелов"],
+  "emoji": "один эмодзи"
+}
+
+Правило анти-дублирования:
+- description = только общая суть товара без перечисления параметров списком.
+- main_characteristics = конкретика (питание/аккумулятор/комплектация/ключевые параметры).
+- Не повторяй одно и то же в description и main_characteristics.
+
+Правило про цвета:
+- Если есть несколько вариантов цвета/принта, положи их в main_characteristics ключом "Цвета" (список).
+- Не перечисляй цвета в description.
+
+Правило без мусорных характеристик:
+- Никогда не добавляй характеристики со значениями «нет», «не применимо», «отсутствует», «none/n-a». Если данных нет — просто НЕ добавляй ключ.
+
+Правило форматирования значений:
+- Значения характеристик после двоеточия начинай со строчной буквы (например: "Жесткость: мягкая", "Способ закрытия: молния").
+- Исключения: аббревиатуры размеров (S, M, L, XL) и единицы измерения (30 мл и т.п.) оставляй как есть.
+
+Как извлекать смысл:
+- Если есть sku_props/skus: используй их, чтобы понять состав набора (какие инструменты встречаются в вариантах). Можно упомянуть 2–4 основных инструмента (без полного перечисления всех вариантов).
+- Не делай вывод «основной продукт = ...», если это выглядит как внутренний атрибут и противоречит вариантам комплекта.
+- product_props используй только как факты, но отфильтровывай «мусорные» значения (прочее/其他).
+
+Ограничения по объёму:
+- main_characteristics: максимум 4 ключа.
+- Для наборов электроинструментов используй ОДНУ характеристику "Инструменты": короткая строка/список из 3–4 слов (без маркеров и длинных списков).
+- Убирай любые “служебные” характеристики, которые не помогают понять товар.
+
+Данные товара (JSON):
+{product_data}
+""".strip()
 
     # Константы для Responses API (отключено, используется только Chat Completions)
     RESPONSES_PREFIXES = ("gpt-5",)  # Не используется - Responses API отключён
@@ -39,6 +144,19 @@ class OpenAIClient:
         # Отключено использование Responses API - всегда используем Chat Completions API
         # Responses API слишком медленный из-за reasoning-запросов
         self.use_responses_api = False
+
+        # ВАЖНО: модели семейства gpt-5 корректно работают через Responses API.
+        # Поскольку в проекте Responses API отключён, делаем безопасный fallback на совместимую модель
+        # для Chat Completions, чтобы избежать «пустых» ответов (content=None).
+        if self._requires_responses_api(self.model) and not self.use_responses_api:
+            fallback = (getattr(settings, "OPENAI_FALLBACK_CHAT_MODEL", "") or "gpt-4o-mini").strip() or "gpt-4o-mini"
+            logger.warning(
+                "Выбрана модель OpenAI '%s' (семейство gpt-5), но Responses API отключён. "
+                "Переключаемся на fallback-модель для Chat Completions: '%s'.",
+                self.model,
+                fallback,
+            )
+            self.model = fallback
 
         # Поддержка внешнего шлюза (OpenAI Gateway)
         base_url = (getattr(settings, "OPENAI_BASE_URL", "") or "").strip() or None
@@ -72,17 +190,30 @@ class OpenAIClient:
             dict: JSON с содержимым поста
             tuple[dict, TokensUsage]: JSON с содержимым и статистика токенов (если используется новая сигнатура)
         """
-        product_info_str = json.dumps(product_data, ensure_ascii=False, indent=2)
-        prompt = POST_GENERATION_PROMPT.replace("{product_data}", product_info_str)
+        # Важно: используем компактный JSON, чтобы не тратить токены на пробелы/переносы строк
+        product_info_str = json.dumps(product_data, ensure_ascii=False, separators=(",", ":"))
+
+        # Вариант промпта выбирается ТОЛЬКО для OpenAI через .env,
+        # чтобы можно было безопасно сравнивать качество/стоимость и быстро откатываться.
+        prompt_variant = (getattr(settings, "OPENAI_PROMPT_VARIANT", "") or "compact_v2").strip().lower()
+        if prompt_variant in {"shared", "legacy", "default"}:
+            prompt = POST_GENERATION_PROMPT.replace("{product_data}", product_info_str)
+        elif prompt_variant in {"compact_v1", "v1"}:
+            prompt = self.OPENAI_COMPACT_PROMPT_V1.replace("{product_data}", product_info_str)
+        else:
+            # По умолчанию используем более строгий compact_v2
+            prompt = self.OPENAI_COMPACT_PROMPT_V2.replace("{product_data}", product_info_str)
 
         if settings.DEBUG_MODE:
             print(f"[OpenAI] Отправляем промпт ({self.model}):\n{prompt[:500]}...")
 
         try:
+            # Лимит выходных токенов задаём через настройки, чтобы контролировать стоимость.
+            max_out = int(getattr(settings, "OPENAI_MAX_OUTPUT_TOKENS", 2400) or 2400)
             result = await self.generate_json_response(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_prompt=prompt,
-                max_output_tokens=self.RESPONSES_JSON_TOKENS
+                max_output_tokens=max_out,
             )
             # Новая сигнатура: возвращает кортеж (text, tokens_usage)
             if isinstance(result, tuple):
@@ -198,7 +329,24 @@ class OpenAIClient:
                 kwargs["max_tokens"] = max_value
 
         response = await self.client.chat.completions.create(**kwargs)
-        text = response.choices[0].message.content or ""
+        choice0 = response.choices[0]
+        msg0 = choice0.message
+
+        # Новые поля SDK: при отказе/фильтре content может быть None, но присутствует reason/refusal.
+        refusal = getattr(msg0, "refusal", None)
+        if refusal:
+            raise ValueError(f"OpenAI отказался отвечать: {refusal}")
+
+        # Иногда может прийти tool_calls вместо content (не ожидаем в этом проекте).
+        tool_calls = getattr(msg0, "tool_calls", None)
+        if tool_calls and not getattr(msg0, "content", None):
+            try:
+                dump = json.dumps(msg0.model_dump(), ensure_ascii=False)[:1200]
+            except Exception:
+                dump = repr(tool_calls)[:800]
+            raise ValueError(f"OpenAI вернул tool_calls вместо текста. Fragment: {dump}")
+
+        text = msg0.content or ""
         
         # Извлекаем статистику токенов из response.usage
         # Согласно документации OpenAI, response.usage содержит:
@@ -245,6 +393,19 @@ class OpenAIClient:
                 if settings.DEBUG_MODE:
                     print(f"[OpenAI] Ошибка при извлечении статистики токенов: {e}")
         
+        # Если по какой-то причине текст пустой, дадим более полезную диагностику,
+        # чтобы понимать первопричину (модель/финиш-статус/формат ответа).
+        if not text:
+            finish_reason = getattr(choice0, "finish_reason", None)
+            try:
+                resp_dump = json.dumps(response.model_dump(), ensure_ascii=False)[:1500]
+            except Exception:
+                resp_dump = repr(response)[:1500]
+            raise ValueError(
+                "OpenAI вернул пустой ответ. "
+                f"finish_reason={finish_reason}. Raw fragment:\n{resp_dump}"
+            )
+
         return text, tokens_usage
 
     async def _call_responses_api(

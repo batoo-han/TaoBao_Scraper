@@ -8,6 +8,7 @@ from src.api.tmapi import TmapiClient
 from src.api.llm_provider import get_llm_client, get_translation_client
 from src.api.exchange_rate import ExchangeRateClient
 from src.api.proxyapi_client import ProxyAPIClient
+from src.api.openai_client import OpenAIClient
 from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
 from src.scrapers.pinduoduo_web import PinduoduoWebScraper
@@ -56,6 +57,15 @@ class Scraper:
         self.translation_client = get_translation_client()  # Отдельный LLM для переводов/предобработки цен
         # Режим работы с ценами: simple — старый сценарий (только максимальная цена), advanced — перевод и сводка вариантов
         self.price_mode = (settings.PRICE_MODE or "simple").strip().lower()
+        # Стратегия работы с OpenAI: legacy или single_pass
+        openai_strategy_raw = (getattr(settings, "OPENAI_STRATEGY", "") or "single_pass").strip().lower()
+        self.openai_strategy = openai_strategy_raw or "single_pass"
+        # Флаг: используем ли однопроходный режим для OpenAI (без отдельного шага перевода)
+        self.use_openai_single_pass = isinstance(self.llm_client, OpenAIClient) and self.openai_strategy in {
+            "single_pass",
+            "single",
+            "one_pass",
+        }
         # Для ProxyAPI отключаем режим структурированных (JSON) батч-переводов, чтобы не тратить лишний бюджет
         # и не получать нестабильные ответы через прокси.
         if isinstance(self.translation_client, ProxyAPIClient):
@@ -217,47 +227,57 @@ class Scraper:
         if exchange_rate is None and settings.CONVERT_CURRENCY:
             exchange_rate = await self.exchange_rate_client.get_exchange_rate()
 
-        # Подготавливаем компактные данные для LLM (без огромного массива skus!)
-        compact_data = self._prepare_compact_data_for_llm(product_data)
+        # Подготавливаем данные для LLM.
+        # Для OpenAI в режиме single_pass отправляем сырые данные TMAPI (только нужные поля)
+        # и перекладываем задачу перевода на саму модель.
+        if self.use_openai_single_pass:
+            compact_data = self._prepare_openai_single_pass_payload(product_data)
+            # В однопроходном режиме не тратим токены на отдельный перевод заголовка/описания.
+            raw_title = product_data.get('title', '') or ''
+            translated_title_hint = ""
+            translated_description = ""
+        else:
+            # Старое поведение: компактные данные + отдельный перевод заголовка и описания.
+            compact_data = self._prepare_compact_data_for_llm(product_data)
 
-        # Заготавливаем переведённый заголовок и описание для контекста цен
-        raw_title = product_data.get('title', '') or ''
-        result = await self._translate_text_generic(raw_title, target_language="ru")
-        if isinstance(result, tuple):
-            translated_title_hint, tokens_usage = result
-            if self._current_tokens_usage:
-                self._current_tokens_usage += tokens_usage
-        else:
-            translated_title_hint = result
-        if translated_title_hint:
-            compact_data["title_hint"] = translated_title_hint
-        
-        # Извлекаем и переводим описание товара для контекста
-        raw_description = ''
-        platform = product_data.get('_platform')
-        if platform == 'pinduoduo':
-            pdd_min = product_data.get('pdd_minimal', {}) if isinstance(product_data, dict) else {}
-            raw_description = (
-                (pdd_min.get('description') or '').strip() or
-                (product_data.get('details') or '').strip()
-            )
-        else:
-            raw_description = (product_data.get('details') or '').strip()
-        
-        # Переводим описание (ограничиваем длину для скорости)
-        translated_description = ''
-        if raw_description:
-            # Берём первые 500 символов описания для контекста
-            description_sample = raw_description[:500]
-            result = await self._translate_text_generic(description_sample, target_language="ru")
+            # Заготавливаем переведённый заголовок и описание для контекста цен
+            raw_title = product_data.get('title', '') or ''
+            result = await self._translate_text_generic(raw_title, target_language="ru")
             if isinstance(result, tuple):
-                translated_description, tokens_usage = result
+                translated_title_hint, tokens_usage = result
                 if self._current_tokens_usage:
                     self._current_tokens_usage += tokens_usage
             else:
-                translated_description = result
-        
-        # Формируем контекст для перевода цен
+                translated_title_hint = result
+            if translated_title_hint:
+                compact_data["title_hint"] = translated_title_hint
+            
+            # Извлекаем и переводим описание товара для контекста
+            raw_description = ''
+            platform = product_data.get('_platform')
+            if platform == 'pinduoduo':
+                pdd_min = product_data.get('pdd_minimal', {}) if isinstance(product_data, dict) else {}
+                raw_description = (
+                    (pdd_min.get('description') or '').strip() or
+                    (product_data.get('details') or '').strip()
+                )
+            else:
+                raw_description = (product_data.get('details') or '').strip()
+            
+            # Переводим описание (ограничиваем длину для скорости)
+            translated_description = ''
+            if raw_description:
+                # Берём первые 500 символов описания для контекста
+                description_sample = raw_description[:500]
+                result = await self._translate_text_generic(description_sample, target_language="ru")
+                if isinstance(result, tuple):
+                    translated_description, tokens_usage = result
+                    if self._current_tokens_usage:
+                        self._current_tokens_usage += tokens_usage
+                else:
+                    translated_description = result
+
+        # Формируем контекст для перевода цен (даже в single_pass используем сырой заголовок)
         product_context = {
             'title': translated_title_hint or raw_title,
             'description': translated_description
@@ -293,9 +313,72 @@ class Scraper:
         # Санитация ответа LLM: убираем выдуманные «Цвета», добавляем/фиксируем «Состав»
         try:
             if isinstance(llm_content, dict):
+                # 0) Жёсткая защита от китайских иероглифов в ответе LLM.
+                # Мы НЕ допускаем CJK-символы в title/description/характеристиках:
+                # - если CJK встречается в значении, пытаемся убрать иероглифы;
+                # - если после очистки остаётся «мусор» (почти нет букв), удаляем поле целиком.
+                import re
+
+                cjk_re = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
+
+                def _sanitize_text_no_cjk(val: str) -> tuple[str, bool]:
+                    s = (val or "").strip()
+                    had_cjk = bool(cjk_re.search(s))
+                    if had_cjk:
+                        s = cjk_re.sub("", s)
+                    # Схлопываем лишние пробелы/слэши после удаления
+                    s = re.sub(r"\s{2,}", " ", s).strip(" /-;:,").strip()
+                    return s, had_cjk
+
+                def _has_meaningful_letters(s: str) -> bool:
+                    # Есть ли вообще буквы (кириллица/латиница), чтобы не оставлять пустую "кашу".
+                    return any(("a" <= ch.lower() <= "z") or ("а" <= ch.lower() <= "я") or (ch.lower() == "ё") for ch in (s or ""))
+
+                # title/description
+                if isinstance(llm_content.get("title"), str):
+                    t, _ = _sanitize_text_no_cjk(llm_content.get("title", ""))
+                    llm_content["title"] = t or llm_content.get("title", "")
+                if isinstance(llm_content.get("description"), str):
+                    d, _ = _sanitize_text_no_cjk(llm_content.get("description", ""))
+                    llm_content["description"] = d or llm_content.get("description", "")
+
                 mc = llm_content.get('main_characteristics') or {}
                 if not isinstance(mc, dict):
                     mc = {}
+
+                # main_characteristics: чистим значения от CJK, убираем поля, которые после очистки теряют смысл
+                cleaned_mc: dict = {}
+                for k, v in mc.items():
+                    key = str(k).strip()
+                    if not key:
+                        continue
+                    # Если ключ сам содержит CJK — пропускаем (не должны быть китайские названия полей)
+                    if cjk_re.search(key):
+                        continue
+
+                    if isinstance(v, str):
+                        vv, had = _sanitize_text_no_cjk(v)
+                        if had and (not vv or not _has_meaningful_letters(vv)):
+                            # Был китайский, а после очистки смысла нет — выбрасываем поле
+                            continue
+                        cleaned_mc[key] = vv or v
+                    elif isinstance(v, list):
+                        out_items: list = []
+                        for item in v:
+                            if isinstance(item, str):
+                                it, had = _sanitize_text_no_cjk(item)
+                                if had and (not it or not _has_meaningful_letters(it)):
+                                    continue
+                                if it:
+                                    out_items.append(it)
+                            else:
+                                out_items.append(item)
+                        if out_items:
+                            cleaned_mc[key] = out_items
+                    else:
+                        cleaned_mc[key] = v
+                mc = cleaned_mc
+
                 looks_like_apparel = self._is_apparel_product(translated_title or translated_title_hint, product_data)
                 # 1) Удаляем цвета, если LLM выдумал вроде «Чистый цвет»/«Однотонный»
                 colors = mc.get('Цвета') or mc.get('Цвет')
@@ -304,22 +387,159 @@ class Scraper:
                     def _is_bad(val: str) -> bool:
                         s = (val or '').strip().lower()
                         return any(k in s for k in bad_markers)
+                    def _looks_like_color_value(val: str) -> bool:
+                        """
+                        Грубая эвристика: оставляем только то, что действительно похоже на цвет/принт/паттерн.
+
+                        Примеры, которые ДОЛЖНЫ пройти:
+                        - "чёрно-красный", "бледно-розовый", "хаки", "бордовый"
+                        - "осенний пейзаж" (как абстрактный «цветовой» дескриптор/принт)
+                        - "камуфляж", "мраморный принт", "полоска", "клетка"
+
+                        Примеры, которые ДОЛЖНЫ быть удалены:
+                        - "корейская кукла" (скорее рисунок/сувенир/маркетинг, не цвет)
+                        """
+                        s = (val or "").strip().lower()
+                        if not s:
+                            return False
+
+                        # 1) Если явно содержит известные цветовые слова — ок
+                        try:
+                            if self.COLOR_REGEX.search(s):
+                                return True
+                        except Exception:
+                            pass
+
+                        # 2) Разрешённые «паттерны»/принты/абстракции, которые часто используются как цветовой дескриптор
+                        allowed_pattern_markers = (
+                            "принт", "узор", "рисунок", "градиент",
+                            "камуфляж", "леопард", "зебр", "питон",
+                            "клетк", "полоск", "горош", "мрамор",
+                            "пейзаж", "абстракц", "космос",
+                        )
+                        if any(m in s for m in allowed_pattern_markers):
+                            return True
+
+                        # 3) Явно запрещённые маркеры (часто это не цвет, а объект/упаковка/серия)
+                        disallowed_markers = (
+                            "кукла", "игрушк", "подарок", "сувенир",
+                            "упаков", "короб", "пакет", "брелок",
+                        )
+                        if any(m in s for m in disallowed_markers):
+                            return False
+
+                        # 4) Если не похоже ни на цвет, ни на принт — удаляем
+                        return False
                     if isinstance(colors, list):
-                        filtered = [c for c in colors if isinstance(c, str) and not _is_bad(c)]
+                        filtered = [
+                            c for c in colors
+                            if isinstance(c, str) and not _is_bad(c) and _looks_like_color_value(c)
+                        ]
                         if filtered:
                             mc['Цвета'] = filtered
                         else:
                             mc.pop('Цвета', None)
-                    elif isinstance(colors, str) and _is_bad(colors):
-                        mc.pop('Цвета', None)
+                    elif isinstance(colors, str):
+                        if _is_bad(colors) or not _looks_like_color_value(colors):
+                            mc.pop('Цвета', None)
+                # Раньше мы полностью выбрасывали «Цвета» для не-одежды, чтобы не было галлюцинаций.
+                # Но для части товаров (подарки, кейсы, аксессуары) цвет — важный отличительный признак.
+                # Поэтому оставляем цвета, если они явно присутствуют во входных данных (sku_props/product_props).
                 if not looks_like_apparel:
-                    mc.pop('Цвета', None)
-                    mc.pop('Цвет', None)
+                    try:
+                        def _has_explicit_color_source(pd: dict) -> bool:
+                            # 1) sku_props содержит цветовые измерения
+                            sku_props_src = pd.get("sku_props") or []
+                            if isinstance(sku_props_src, list):
+                                for prop in sku_props_src:
+                                    if not isinstance(prop, dict):
+                                        continue
+                                    pn = (prop.get("prop_name") or "").strip().lower()
+                                    if any(tok in pn for tok in ("цвет", "color", "颜色")):
+                                        return True
+                            # 2) product_props содержит цветовую классификацию
+                            props_src = pd.get("product_props") or []
+                            if isinstance(props_src, list):
+                                for item in props_src:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    for k in item.keys():
+                                        kk = str(k).strip().lower()
+                                        if any(tok in kk for tok in ("цвет", "color", "颜色")):
+                                            return True
+                            return False
+
+                        if not _has_explicit_color_source(product_data):
+                            mc.pop('Цвета', None)
+                            mc.pop('Цвет', None)
+                    except Exception:
+                        mc.pop('Цвета', None)
+                        mc.pop('Цвет', None)
                 # 2) Удаляем лишние секции «Варианты наборов», «Комплектации» и т.п.
                 forbidden_sections = ('вариант', 'комплектац', 'набор')
                 for key in list(mc.keys()):
                     if any(token in key.lower() for token in forbidden_sections):
                         mc.pop(key, None)
+
+                # 2.1) Удаляем заведомо лишнее для постов:
+                # - гарантийные условия (пользователь не хочет видеть это в постах)
+                # - указание источника/платформы/маркетплейса
+                drop_markers = (
+                    'гарант', 'срок служб', 'гарантий',
+                    'источник', 'платформ', 'маркетплейс', 'source', 'platform',
+                )
+                for key in list(mc.keys()):
+                    if any(marker in key.lower() for marker in drop_markers):
+                        mc.pop(key, None)
+
+                # 2.2) Исправляем типичную ошибку LLM: подставляет «Состав» как «инструменты/комплектацию».
+                # Например: "Состав: кусачки для ногтей" — это не состав (материал), а предмет/инструмент.
+                try:
+                    comp_key = None
+                    for k in list(mc.keys()):
+                        if str(k).strip().lower() == "состав":
+                            comp_key = k
+                            break
+                    if comp_key is not None:
+                        v = mc.get(comp_key)
+                        v_str = ""
+                        if isinstance(v, str):
+                            v_str = v.strip().lower()
+                        elif isinstance(v, list):
+                            v_str = " ".join(str(x) for x in v).strip().lower()
+
+                        # Если похоже на материалы/состав ткани — оставляем как «Состав».
+                        material_markers = (
+                            "%", "хлоп", "шерст", "полиэстер", "вискоз", "нейлон", "акрил",
+                            "кожа", "замш", "резин", "пластик", "металл", "сталь", "алюмин",
+                            "дерев", "стекл", "керамик", "силикон",
+                        )
+
+                        # Если похоже на инструменты/предметы — переносим в «Инструменты».
+                        tool_markers = (
+                            "кусач", "щипц", "пилка", "ножниц", "пинцет", "триммер",
+                            "отвёрт", "ключ", "дрель", "гайков", "перфорат", "шлиф",
+                            "болгар", "пила", "цепн", "шурупов",
+                        )
+
+                        looks_like_material = any(m in v_str for m in material_markers)
+                        looks_like_tools = any(t in v_str for t in tool_markers)
+
+                        if (not looks_like_material) and looks_like_tools:
+                            # Переносим в «Инструменты», стараясь не потерять существующее значение.
+                            existing = mc.get("Инструменты")
+                            if existing:
+                                # Если уже есть — объединяем кратко
+                                if isinstance(existing, list):
+                                    merged = existing + ([v] if not isinstance(v, list) else v)
+                                    mc["Инструменты"] = merged
+                                elif isinstance(existing, str):
+                                    mc["Инструменты"] = (existing + "; " + (v if isinstance(v, str) else str(v))).strip()
+                            else:
+                                mc["Инструменты"] = v
+                            mc.pop(comp_key, None)
+                except Exception:
+                    pass
                 # 3) Гарантируем «Состав», если он явным образом указан в описании
                 platform = product_data.get('_platform')
                 if platform == 'pinduoduo':
@@ -458,6 +678,206 @@ class Scraper:
             print(f"[Scraper] Исключено {len(product_data.get('skus', []))} элементов из skus")
         
         return compact
+    
+    def _prepare_openai_single_pass_payload(self, product_data: dict) -> dict:
+        """
+        Подготавливает полезную нагрузку для OpenAI в однопроходном режиме.
+        
+        В этом режиме:
+        - мы не выполняем отдельный шаг перевода заголовка/описания;
+        - передаём в модель только действительно нужные поля из ответа TMAPI;
+        - оставляем перевод и формирование финального поста на саму модель OpenAI.
+        
+        На данном этапе используем фиксированный набор полей, но структура
+        изначально спроектирована так, чтобы в будущем можно было различать
+        платформы и настраивать список полей по платформам/стратегиям.
+        """
+        platform = product_data.get("_platform", "unknown")
+
+        # Лимиты (защита от раздувания prompt токенами)
+        max_skus = int(getattr(settings, "OPENAI_SINGLE_PASS_MAX_SKUS", 120) or 120)
+        max_values_per_prop = int(getattr(settings, "OPENAI_SINGLE_PASS_MAX_SKU_VALUES", 60) or 60)
+        max_prop_value_len = int(getattr(settings, "OPENAI_SINGLE_PASS_MAX_PROP_VALUE_LEN", 220) or 220)
+
+        def _truncate_text(value: str) -> str:
+            """
+            Обрезает слишком длинные строковые значения, чтобы не тратить токены на «простыни».
+            Важно: это касается только полей, где обычно дублируется то же самое из sku_props/skus
+            (например, огромные строки вариантов цветов/комплектаций).
+            """
+            s = (value or "").strip()
+            if not s:
+                return ""
+            if len(s) <= max_prop_value_len:
+                return s
+            return s[: max_prop_value_len - 1].rstrip() + "…"
+
+        def _filter_product_props(props: object) -> list[dict]:
+            """
+            product_props обычно содержит «ключ → значение» (часто 1 ключ в dict).
+            Тут выкидываем заведомо запрещённые/бесполезные вещи (пол/возраст и т.п.)
+            и режем слишком длинные значения.
+            """
+            if not isinstance(props, list):
+                return []
+
+            forbidden_markers = (
+                # Китайский (TMAPI)
+                "适用性别", "性别", "适用年龄", "年龄",
+                # Русский/английский (на случай других источников)
+                "пол", "гендер", "возраст", "gender", "age",
+            )
+
+            cleaned: list[dict] = []
+            for item in props:
+                if not isinstance(item, dict) or not item:
+                    continue
+                out: dict = {}
+                for k, v in item.items():
+                    key = str(k)
+                    key_l = key.lower()
+                    if any(m.lower() in key_l for m in forbidden_markers):
+                        continue
+
+                    # Нормализуем значение
+                    if isinstance(v, str):
+                        vv = _truncate_text(v)
+                        if vv:
+                            out[key] = vv
+                    elif isinstance(v, (int, float, bool)) or v is None:
+                        out[key] = v
+                    else:
+                        # На всякий случай: сериализуем сложные типы в короткую строку
+                        try:
+                            out[key] = _truncate_text(str(v))
+                        except Exception:
+                            pass
+
+                if out:
+                    cleaned.append(out)
+            return cleaned
+
+        def _minify_sku_props(props: object) -> list[dict]:
+            """
+            sku_props содержит варианты по измерениям (цвет/размер/спецификация).
+            В prompt отправляем только то, что нужно:
+            - prop_name
+            - values[].name (без vid/imageUrl и прочего)
+            + лимитируем количество значений.
+            """
+            if not isinstance(props, list):
+                return []
+
+            result: list[dict] = []
+            for prop in props:
+                if not isinstance(prop, dict):
+                    continue
+                prop_name = (prop.get("prop_name") or "").strip()
+                values = prop.get("values") or []
+                if not prop_name or not isinstance(values, list):
+                    continue
+
+                names: list[str] = []
+                seen = set()
+                for v in values:
+                    if not isinstance(v, dict):
+                        continue
+                    name = (v.get("name") or "").strip()
+                    if not name:
+                        continue
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    names.append(name)
+                    if len(names) >= max_values_per_prop:
+                        break
+
+                if names:
+                    result.append(
+                        {
+                            "prop_name": prop_name,
+                            "values": [{"name": n} for n in names],
+                        }
+                    )
+            return result
+
+        def _minify_skus(skus: object) -> list[dict]:
+            """
+            skus часто содержит сотни/тысячи строк. Для LLM обычно достаточно:
+            - props_names (человекочитаемый вариант)
+            - sale_price (цена)
+            Всё остальное выбрасываем. Делаем dedupe и лимит.
+            """
+            if not isinstance(skus, list):
+                return []
+
+            result: list[dict] = []
+            seen = set()
+            for sku in skus:
+                if not isinstance(sku, dict):
+                    continue
+                props_names = (sku.get("props_names") or "").strip()
+                sale_price = sku.get("sale_price")
+                if not props_names and sale_price is None:
+                    continue
+                key = (props_names, str(sale_price))
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append({"props_names": props_names, "sale_price": sale_price})
+                if len(result) >= max_skus:
+                    break
+            return result
+
+        def _minify_price_info(pi: object) -> dict | None:
+            """
+            Для 1688 price_info может быть большим. Берём только полезное:
+            price / price_min / price_max / origin_price_min / origin_price_max / discount_price
+            """
+            if not isinstance(pi, dict):
+                return None
+            keep_keys = (
+                "price",
+                "price_min",
+                "price_max",
+                "origin_price",
+                "origin_price_min",
+                "origin_price_max",
+                "discount_price",
+            )
+            out = {k: pi.get(k) for k in keep_keys if k in pi}
+            return out or None
+
+        # Базовые поля, общие для всех поддерживаемых платформ (но содержимое «поджато»)
+        payload: dict = {
+            "platform": platform,
+            "title": product_data.get("title", ""),
+            "product_props": _filter_product_props(product_data.get("product_props", [])),
+            "sku_props": _minify_sku_props(product_data.get("sku_props", [])),
+            "skus": _minify_skus(product_data.get("skus", [])),
+        }
+
+        # Цена: пытаемся извлечь как унифицированное поле price,
+        # но также прокидываем исходный блок price_info для 1688/других платформ.
+        price_info_raw = product_data.get("price_info")
+        price = product_data.get("price")
+        if price is None and isinstance(price_info_raw, dict):
+            price = price_info_raw.get("price") or price_info_raw.get("sale_price")
+
+        if price is not None:
+            payload["price"] = price
+        price_info = _minify_price_info(price_info_raw)
+        if price_info is not None:
+            payload["price_info"] = price_info
+
+        # При наличии уже подготовленных списков цветов/размеров тоже прокидываем их,
+        # чтобы не терять совместимость с текущим промптом генерации поста.
+        if "available_colors" in product_data:
+            payload["available_colors"] = product_data.get("available_colors") or []
+        if "available_sizes" in product_data:
+            payload["available_sizes"] = product_data.get("available_sizes") or []
+
+        return payload
     
     def _get_unique_images_from_sku_props(self, product_data: dict) -> list:
         """
@@ -2119,6 +2539,43 @@ class Scraper:
                 return "".join(chars)
         return text
 
+    def _ensure_lowercase_characteristic_value(self, key: str, value: str) -> str:
+        """
+        Гарантирует, что значение характеристики после двоеточия начинается со строчной буквы.
+
+        ВАЖНО:
+        - Для размеров (S, M, L, XL и т.п.) и размерных диапазонов не меняем регистр,
+          чтобы не превратить "S, M, L" в "s, M, L".
+        - Для бренда/марки не меняем регистр, чтобы не портить написание (например, "Lusimary").
+        """
+        s = (value or "").strip()
+        if not s:
+            return s
+
+        key_l = (key or "").strip().lower()
+        if "бренд" in key_l or "brand" in key_l:
+            return s
+
+        # Если значение начинается с цифры/символа — оставляем как есть (например, "30 мл")
+        first_char = s[0]
+        if first_char.isdigit() or first_char in "+-*/(":
+            return s
+
+        # Исключение: размеры/размерные ряды
+        if "размер" in key_l or "size" in key_l:
+            return s
+
+        import re
+        size_token = r"(?:XXXS|XXS|XS|S|M|L|XL|XXL|XXXL|XXXXL)"
+        # "S, M, L" / "XS-XL" / "35-40" — не трогаем
+        if re.fullmatch(rf"{size_token}(\s*,\s*{size_token})+", s):
+            return s
+        if re.fullmatch(rf"{size_token}\s*[-–]\s*{size_token}", s):
+            return s
+
+        # По умолчанию: делаем строчной первую букву
+        return self._ensure_lowercase_bullet(s)
+
     def _render_price_section(
         self,
         price_lines: list[dict],
@@ -2274,6 +2731,109 @@ class Scraper:
         
         # Описание в виде цитаты (курсивом)
         if description:
+            # Санитация description: не допускаем цену и измеримые конкретики в описании.
+            # Такие данные должны идти в характеристиках/ценовом блоке ниже.
+            try:
+                def _strip_bad_sentences(text: str) -> str:
+                    import re
+
+                    # Разделяем на предложения максимально простым способом
+                    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p.strip()]
+                    if not parts:
+                        return text.strip()
+
+                    bad_patterns = [
+                        r"(?i)\bцена\b",
+                        r"[¥₽$€]",
+                        r"(?i)\b(руб|юан|cny|rmb|usd|eur)\b",
+                        r"(?i)\b(объ[её]м|вес|размер|габарит|длина|ширина|высота|диаметр)\b",
+                        r"(?i)\b(мм|см|м|л|мл|г|кг)\b",
+                        r"(?i)\b(\d+(\.\d+)?)\b\s*(мм|см|м|л|мл|г|кг)\b",
+                        # Запрещаем даты/время производства/сроки
+                        r"(?i)\b(дата|время)\s+(изготовлен|изготовления|производств|выпуска)\b",
+                        r"(?i)\bизготовлен(о|а|ы)?\b",
+                        r"(?i)\bпроизведен(о|а|ы)?\b",
+                        r"(?i)\b(партия|серия|batch)\b",
+                        r"(?i)\b(год|месяц|срок)\b",
+                        # Месяцы (любые склонения) — часто используются для «произведён в ноябре»
+                        r"(?i)\b(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*\b",
+                        # Явные форматы дат (21.10, 2024-11, 2024/11/03 и т.п.)
+                        r"\b\d{1,2}[./-]\d{1,2}\b",
+                        r"\b20\d{2}[./-]\d{1,2}([./-]\d{1,2})?\b",
+                        # Запрещённые «рассуждения»/классификации
+                        r"(?i)относит(ся|ься)\s+к\s+категор",
+                        r"(?i)\bкатегори(я|и|ей)\b",
+                        r"(?i)\bподходит\s+для\b",
+                        r"(?i)\bдля\s+близких\b",
+                        r"(?i)\bдля\s+родных\b",
+                        r"(?i)\bтуристическ(ий|ая|ое)\b",
+                    ]
+
+                    filtered: list[str] = []
+                    for p in parts:
+                        p_stripped = p.strip()
+                        if any(re.search(pat, p_stripped) for pat in bad_patterns):
+                            # выкидываем предложение с ценой/единицами измерения
+                            continue
+                        # Дополнительный жёсткий фильтр: "Цена 14.5." даже без валюты
+                        if re.search(r"(?i)^цена\s+\d", p_stripped):
+                            continue
+                        filtered.append(p_stripped)
+
+                    return " ".join(filtered).strip() or text.strip()
+
+                description = _strip_bad_sentences(description)
+            except Exception:
+                pass
+
+            # Если в характеристиках есть «Цвета», то упоминания цветов в description считаем лишними
+            # и стараемся убрать типичные фразы «в различных цветах», «доступны цвета: ...», «цвета: ...».
+            try:
+                import re
+                mc_for_desc = main_characteristics if isinstance(main_characteristics, dict) else {}
+                colors_val = mc_for_desc.get("Цвета") or mc_for_desc.get("Цвет")
+                if colors_val:
+                    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", description.strip()) if p.strip()]
+                    cleaned_parts: list[str] = []
+                    for p in parts:
+                        p_l = p.lower()
+                        # Удаляем предложения, где явно перечисляют/обсуждают цвета
+                        if (
+                            "цвет" in p_l
+                            and ("доступ" in p_l or ":" in p or "переч" in p_l or "различн" in p_l)
+                        ):
+                            continue
+                        cleaned_parts.append(p)
+                    description = " ".join(cleaned_parts).strip() or description.strip()
+            except Exception:
+                pass
+
+            # Анти-дублирование: если в характеристиках есть «Упаковка/Инструменты/Материал/Состав/Размер/Объём»,
+            # то удаляем типовые предложения в description, которые повторяют эти факты.
+            try:
+                import re
+                mc_for_desc = main_characteristics if isinstance(main_characteristics, dict) else {}
+                keys = " ".join(str(k).lower() for k in mc_for_desc.keys())
+                parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", description.strip()) if p.strip()]
+                cleaned_parts: list[str] = []
+                for p in parts:
+                    p_l = p.lower()
+                    # Упаковка/коробка/тюбик/мешок и т.п. — часто дублируется и даёт «воду»
+                    if ("упаков" in keys or "упаков" in p_l) and any(w in p_l for w in ("упак", "короб", "пакет", "тюбик", "флакон", "бутыл", "мешок")):
+                        # оставляем только если речь явно про необычный дизайн (матрёшка/футляр/кейс)
+                        if not any(w in p_l for w in ("матр", "футляр", "кейс", "шкатул", "подарочн")):
+                            continue
+                    # Инструменты: не дублируем перечисления и не пишем «нет инструментов»
+                    if ("инструмент" in keys or "инструмент" in p_l) and any(w in p_l for w in ("инструмент", "комплект", "набор включает")):
+                        continue
+                    # Материал/состав/объём/размер — тоже только в характеристиках
+                    if any(w in keys for w in ("материал", "состав", "объём", "объем", "размер")) and any(w in p_l for w in ("материал", "состав", "объём", "объем", "размер")):
+                        continue
+                    cleaned_parts.append(p)
+                description = " ".join(cleaned_parts).strip() or description.strip()
+            except Exception:
+                pass
+
             post_parts.append(f"<blockquote><i>{description}</i></blockquote>")
             post_parts.append("")
         
@@ -2286,7 +2846,7 @@ class Scraper:
                 'mixed', 'various', 'прочие', 'другие', 'не указано',
                 'не указан', 'не указана', 'не указаны',
                 'нет информации', 'нет данных', 'no information',
-                'not specified', 'н/д', 'n/a', ''
+                'not specified', 'н/д', 'n/a', '', 'нет', 'none', 'null', 'не применимо', 'отсутствует'
             ]
             
             # Фильтруем и отображаем характеристики в правильном порядке
@@ -2327,6 +2887,53 @@ class Scraper:
             
             # Отображаем характеристики в правильном порядке
             for key in ordered_keys:
+                # Убираем «Инструменты: нет/none» и подобные бессмысленные ответы
+                try:
+                    if "инструмент" in (key or "").strip().lower():
+                        val = main_characteristics.get(key)
+                        val_s = ""
+                        if isinstance(val, str):
+                            val_s = val.strip().lower()
+                        if val_s in {"нет", "none", "no", "n/a", "не применимо", "отсутствует"}:
+                            continue
+                except Exception:
+                    pass
+
+                # Не показываем обычную товарную упаковку (коробка/пакет и т.п.) — это не ценная информация.
+                try:
+                    key_l = (key or "").strip().lower()
+                    if "упаков" in key_l:
+                        val = main_characteristics.get(key)
+                        val_s = ""
+                        if isinstance(val, str):
+                            val_s = val.strip().lower()
+                        if val_s in {"коробка", "картонная коробка", "пакет", "короб", "box", "carton", "bag"}:
+                            continue
+                        # Если значение слишком общее — тоже пропускаем
+                        if val_s in {"коробочная упаковка", "в коробке", "в коробке/пакете"}:
+                            continue
+                except Exception:
+                    pass
+
+                # Доп. фильтр цветов на этапе рендера (страховка, если что-то проскочило в LLM)
+                try:
+                    if (key or "").strip().lower() == "цвета":
+                        val = main_characteristics.get(key)
+                        if isinstance(val, list):
+                            filtered = []
+                            for item in val:
+                                if not isinstance(item, str):
+                                    continue
+                                s = item.strip().lower()
+                                if any(x in s for x in ("кукла", "игрушк", "упаков", "подарок", "сувенир")):
+                                    continue
+                                filtered.append(item)
+                            if filtered:
+                                main_characteristics[key] = filtered
+                            else:
+                                continue
+                except Exception:
+                    pass
                 value = main_characteristics[key]
                 
                 # Дополнительная проверка: пропускаем неопределенные значения
@@ -2359,7 +2966,10 @@ class Scraper:
                     post_parts.append("")
                 else:
                     # Если значение - строка
-                    post_parts.append(f"<i><b>{key}:</b> {value}</i>")
+                    formatted_value = str(value).strip()
+                    if formatted_value:
+                        formatted_value = self._ensure_lowercase_characteristic_value(key, formatted_value)
+                    post_parts.append(f"<i><b>{key}:</b> {formatted_value}</i>")
         
         # Для Pinduoduo (и схожих): извлечём важные характеристики из переведённого описания
         try:
