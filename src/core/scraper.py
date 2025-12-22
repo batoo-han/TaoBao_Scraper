@@ -2301,6 +2301,99 @@ class Scraper:
         )
         return any(marker in text for marker in apparel_markers)
 
+    def _is_footwear_product(self, translated_title: str | None, product_data: dict) -> bool:
+        """
+        Грубая эвристика определения обуви.
+
+        Нужна для того, чтобы у одежды и обуви были разные названия поля:
+        - одежда: "Состав"
+        - обувь: "Материал"
+        """
+        text_parts = [
+            translated_title or "",
+            product_data.get('title') or "",
+            " ".join(product_data.get('category_path') or []),
+        ]
+        text = " ".join(text_parts).lower()
+        footwear_markers = (
+            "обув", "ботин", "кроссов", "туфл", "кеды", "сапог", "босонож", "шлеп", "сандал",
+            "shoe", "shoes", "sneaker", "boots",
+            "靴",
+        )
+        return any(marker in text for marker in footwear_markers)
+
+    def _normalize_apparel_characteristics(
+        self,
+        apparel_kind: str,
+        main_characteristics: dict,
+    ) -> dict:
+        """
+        Нормализует и ОГРАНИЧИВАЕТ характеристики для одежды/обуви.
+
+        ВАЖНО (по требованиям):
+        - Для одежды/обуви в характеристиках допускаются ТОЛЬКО:
+          1) Состав/Материал (если есть)
+          2) Цвета (если есть)
+          3) Размеры (если есть)
+        - Порядок блоков при выводе фиксированный: Состав/Материал → Цвета → Размеры.
+        """
+        if not isinstance(main_characteristics, dict) or not main_characteristics:
+            return {}
+
+        kind = (apparel_kind or "").strip().lower()
+        is_footwear = kind == "footwear"
+
+        # 1) Извлекаем "Состав/Материал" из любых похожих ключей (ткань/содержание волокон/материал)
+        material_value: str | None = None
+        for k, v in list(main_characteristics.items()):
+            key_l = str(k).strip().lower()
+            if any(tok in key_l for tok in ("состав", "материал", "ткан", "волокон")):
+                if isinstance(v, str) and v.strip():
+                    material_value = v.strip()
+                    break
+
+        # 2) Извлекаем "Цвета"
+        colors_value = None
+        for k, v in list(main_characteristics.items()):
+            key_l = str(k).strip().lower()
+            if "цвет" in key_l or "color" in key_l:
+                colors_value = v
+                break
+
+        # 3) Извлекаем "Размеры"
+        sizes_value: str | None = None
+        for k, v in list(main_characteristics.items()):
+            key_l = str(k).strip().lower()
+            if "размер" in key_l or "size" in key_l:
+                if isinstance(v, str) and v.strip():
+                    sizes_value = v.strip()
+                    break
+
+        normalized: dict = {}
+
+        # Поле 1: Состав/Материал
+        if material_value:
+            key = "Материал" if is_footwear else "Состав"
+            # Для одежды предпочитаем "Состав", даже если модель вернула "Материал"
+            normalized[key] = material_value
+
+        # Поле 2: Цвета (всегда список, если удаётся)
+        if colors_value:
+            if isinstance(colors_value, str):
+                s = colors_value.strip()
+                if s:
+                    normalized["Цвета"] = [s]
+            elif isinstance(colors_value, list):
+                filtered = [c for c in colors_value if isinstance(c, str) and c.strip()]
+                if filtered:
+                    normalized["Цвета"] = filtered
+
+        # Поле 3: Размеры (строка)
+        if sizes_value:
+            normalized["Размеры"] = self._format_size_range(sizes_value)
+
+        return normalized
+
     @staticmethod
     def _common_prefix(lhs: str, rhs: str) -> str:
         limit = min(len(lhs), len(rhs))
@@ -2683,6 +2776,23 @@ class Scraper:
         additional_info = llm_content.get('additional_info', {})
         hashtags = llm_content.get('hashtags', [])
         emoji = llm_content.get('emoji', '')
+
+        # Для одежды/обуви фиксируем строгий формат характеристик:
+        # допускаются только (и строго в этом порядке при выводе):
+        # - Состав/Материал
+        # - Цвета
+        # - Размеры
+        #
+        # Это делаем ДО санитации description, чтобы анти-дублирование работало корректно.
+        try:
+            looks_like_apparel = self._is_apparel_product(title, product_data)
+            if looks_like_apparel:
+                apparel_kind = "footwear" if self._is_footwear_product(title, product_data) else "clothing"
+                main_characteristics = self._normalize_apparel_characteristics(apparel_kind, main_characteristics)
+                # Для одежды/обуви доп. секции в посте не используем (чтобы не уехал шаблон)
+                additional_info = {}
+        except Exception:
+            pass
         
         # Извлекаем цену (первично из skus), далее — надёжные фолбэки
         price = self._get_max_price_from_skus(product_data)
