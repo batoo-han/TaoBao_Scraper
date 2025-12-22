@@ -2390,9 +2390,78 @@ class Scraper:
 
         # Поле 3: Размеры (строка)
         if sizes_value:
-            normalized["Размеры"] = self._format_size_range(sizes_value)
+            cleaned_sizes = self._sanitize_apparel_sizes(sizes_value)
+            if cleaned_sizes:
+                normalized["Размеры"] = self._format_size_range(cleaned_sizes)
 
         return normalized
+
+    def _sanitize_apparel_sizes(self, sizes_str: str) -> str | None:
+        """
+        Санитизация размера для одежды/обуви.
+
+        Требования:
+        - Если указан ТОЛЬКО "универсальный/one size/均码/единый размер" — поле "Размеры" НЕ выводим.
+        - Если указано смешанно (например, "универсальный/42-48") — удаляем "универсальный" и оставляем только "42-48".
+
+        Возвращает:
+        - str: очищенная строка размеров
+        - None: если после очистки значимых размеров не осталось
+        """
+        s = (sizes_str or "").strip()
+        if not s:
+            return None
+
+        import re
+
+        # Нормализуем разделители (/, |, ;, запятые) → запятая
+        normalized = re.sub(r"[|/;]+", ",", s)
+        normalized = normalized.replace("，", ",")
+        # Иногда размеры приходят через пробелы
+        normalized = re.sub(r"\s{2,}", " ", normalized).strip()
+
+        raw_parts = [p.strip() for p in re.split(r"[,]+", normalized) if p.strip()]
+        if not raw_parts:
+            return None
+
+        # Маркеры "универсального" размера, которые не несут ценности в посте
+        universal_markers = (
+            "универсальный", "универсал", "единый размер", "единственный размер",
+            "one size", "onesize", "one-size", "free size", "freesize",
+            "均码", "均一", "均",  # китайские варианты "единый размер"
+        )
+
+        def _is_universal(token: str) -> bool:
+            t = (token or "").strip().lower()
+            if not t:
+                return False
+            # Убираем скобки/лишние символы, чтобы "универсальный (one size)" тоже отфильтровался
+            t = re.sub(r"[\[\](){}/\\|]+", " ", t)
+            t = re.sub(r"\s{2,}", " ", t).strip()
+            return any(m in t for m in universal_markers)
+
+        # Разбиваем части дополнительно по пробелам, если вдруг пришло "универсальный 42-48"
+        exploded: list[str] = []
+        for part in raw_parts:
+            if not part:
+                continue
+            # если есть явный диапазон/размеры вместе со словами — оставляем как отдельный токен, не режем по пробелам
+            if re.search(r"\d", part) and any(sep in part for sep in ("-", "–", "—")):
+                exploded.append(part)
+                continue
+            # иначе режем по пробелам, чтобы убрать "one size"
+            for t in re.split(r"\s+", part):
+                if t.strip():
+                    exploded.append(t.strip())
+
+        parts = [p for p in exploded if p and not _is_universal(p)]
+        if not parts:
+            return None
+
+        # Возвращаем обратно в строку:
+        # - Если остался один диапазон/размер — оставляем как есть
+        # - Если несколько — через ", "
+        return ", ".join(parts)
 
     @staticmethod
     def _common_prefix(lhs: str, rhs: str) -> str:
