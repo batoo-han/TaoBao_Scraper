@@ -58,6 +58,7 @@ class MiniAppServer:
         Healthcheck запросы не должны засорять логи.
         """
         access_logger = logging.getLogger("aiohttp.access")
+        server_logger = logging.getLogger("aiohttp.server")
         
         # Создаём фильтр, который исключает healthcheck запросы
         class HealthCheckFilter(logging.Filter):
@@ -89,6 +90,35 @@ class MiniAppServer:
         
         # Применяем фильтр к access logger
         access_logger.addFilter(HealthCheckFilter())
+
+        # Доп. фильтр: приглушаем шум от интернет-сканеров, которые шлют некорректный HTTP на открытый порт.
+        #
+        # Симптомы в логах:
+        # - "UNKNOWN / HTTP/1.0" 400 ...
+        # - aiohttp.http_exceptions.BadHttpMessage: "Pause on PRI/Upgrade"
+        #
+        # Это не ошибка приложения и не влияет на обработку запросов бота,
+        # но может засорять логи и пугать при мониторинге.
+        class NoisyBadHttpMessageFilter(logging.Filter):
+            def filter(self, record: logging.LogRecord) -> bool:
+                try:
+                    msg = record.getMessage() if hasattr(record, "getMessage") else str(record.msg)
+                    # "Pause on PRI/Upgrade" — типичный мусорный префейс/upgrade от сканеров/HTTP2.
+                    if "Pause on PRI/Upgrade" in msg:
+                        return False
+                    if "BadHttpMessage" in msg:
+                        return False
+                    if "Error handling request from" in msg:
+                        # Проверяем по исключению, если оно есть
+                        exc = record.exc_info[1] if getattr(record, "exc_info", None) else None
+                        if exc and exc.__class__.__name__ == "BadHttpMessage":
+                            return False
+                except Exception:
+                    # Если фильтр сломался — лучше не скрывать логи
+                    return True
+                return True
+
+        server_logger.addFilter(NoisyBadHttpMessageFilter())
     
     def _register_routes(self) -> None:
         """
