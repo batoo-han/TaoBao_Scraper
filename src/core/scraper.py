@@ -227,10 +227,28 @@ class Scraper:
         if exchange_rate is None and settings.CONVERT_CURRENCY:
             exchange_rate = await self.exchange_rate_client.get_exchange_rate()
 
+        # В режиме расширенных цен:
+        # - отключаем single_pass (он может раздувать ввод и усложнять отладку)
+        # - НЕ форсим shared-промпт для генерации поста (используем OPENAI_PROMPT_VARIANT из .env),
+        #   потому что shared сильно раздувает входные токены.
+        force_legacy_openai = effective_price_mode in {"advanced", "adv", "full", "detailed"}
+        original_strategy = getattr(settings, "OPENAI_STRATEGY", "single_pass")
+        original_prompt_variant = getattr(settings, "OPENAI_PROMPT_VARIANT", "compact_v2")
+        use_single_pass = self.use_openai_single_pass and not force_legacy_openai
+
+        if force_legacy_openai and isinstance(self.llm_client, OpenAIClient):
+            try:
+                # Исторически в advanced режиме мы откатывались на legacy/shared,
+                # но теперь ценовой пайплайн стабилизирован (1 запрос на перевод + локальная суммаризация),
+                # поэтому shared больше не нужен.
+                settings.OPENAI_STRATEGY = "legacy"
+            except Exception:
+                pass
+
         # Подготавливаем данные для LLM.
         # Для OpenAI в режиме single_pass отправляем сырые данные TMAPI (только нужные поля)
         # и перекладываем задачу перевода на саму модель.
-        if self.use_openai_single_pass:
+        if use_single_pass:
             compact_data = self._prepare_openai_single_pass_payload(product_data)
             # В однопроходном режиме не тратим токены на отдельный перевод заголовка/описания.
             raw_title = product_data.get('title', '') or ''
@@ -242,13 +260,7 @@ class Scraper:
 
             # Заготавливаем переведённый заголовок и описание для контекста цен
             raw_title = product_data.get('title', '') or ''
-            result = await self._translate_text_generic(raw_title, target_language="ru")
-            if isinstance(result, tuple):
-                translated_title_hint, tokens_usage = result
-                if self._current_tokens_usage:
-                    self._current_tokens_usage += tokens_usage
-            else:
-                translated_title_hint = result
+            translated_title_hint = await self._translate_text_generic(raw_title, target_language="ru")
             if translated_title_hint:
                 compact_data["title_hint"] = translated_title_hint
             
@@ -269,13 +281,7 @@ class Scraper:
             if raw_description:
                 # Берём первые 500 символов описания для контекста
                 description_sample = raw_description[:500]
-                result = await self._translate_text_generic(description_sample, target_language="ru")
-                if isinstance(result, tuple):
-                    translated_description, tokens_usage = result
-                    if self._current_tokens_usage:
-                        self._current_tokens_usage += tokens_usage
-                else:
-                    translated_description = result
+                translated_description = await self._translate_text_generic(description_sample, target_language="ru")
 
         # Формируем контекст для перевода цен (даже в single_pass используем сырой заголовок)
         product_context = {
@@ -290,16 +296,27 @@ class Scraper:
             if price_lines:
                 compact_data["translated_sku_prices"] = price_lines
         
-        # Генерируем структурированный контент с помощью выбранного LLM
-        # LLM вернет JSON с: title, description, characteristics, hashtags
-        result = await self.llm_client.generate_post_content(compact_data)
+        # Генерируем структурированный контент с помощью выбранного LLM.
+        # Важно: для OpenAI/ProxyAPI метод может вернуть (content, tokens_usage).
+        result = None
+        try:
+            result = await self.llm_client.generate_post_content(compact_data)
+        finally:
+            # Возвращаем стратегию/промпт в исходное состояние, если временно форсировали legacy/shared.
+            if force_legacy_openai and isinstance(self.llm_client, OpenAIClient):
+                try:
+                    settings.OPENAI_STRATEGY = original_strategy
+                    settings.OPENAI_PROMPT_VARIANT = original_prompt_variant
+                except Exception:
+                    pass
+
         # Новая сигнатура: возвращает кортеж (content, tokens_usage) для OpenAI/ProxyAPI
         if isinstance(result, tuple):
             llm_content, tokens_usage = result
-            if self._current_tokens_usage:
+            if self._current_tokens_usage and tokens_usage:
                 self._current_tokens_usage += tokens_usage
         else:
-            # Обратная совместимость для YandexGPT
+            # Обратная совместимость: YandexGPT возвращает только dict
             llm_content = result
         translated_title = llm_content.get('title') or translated_title_hint
         
@@ -672,6 +689,15 @@ class Scraper:
                         sizes = [v.get('name', '') for v in prop.get('values', [])]
                         if sizes:
                             compact['available_sizes'] = sizes[:30]
+
+        # В режиме цен advanced пробрасываем цены в основной промпт,
+        # чтобы OpenAI сразу видел ассортимент и не «выдумывал» варианты.
+        if self.price_mode == "advanced":
+            price_entries = self._get_unique_sku_price_items(product_data)
+            if price_entries:
+                compact["price_mode"] = "advanced"
+                # Ограничиваем объём, чтобы не раздувать токены
+                compact["price_entries"] = price_entries[:120]
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] Компактные данные для LLM подготовлены. Размер: ~{len(str(compact))} символов")
@@ -726,6 +752,10 @@ class Scraper:
                 "适用性别", "性别", "适用年龄", "年龄",
                 # Русский/английский (на случай других источников)
                 "пол", "гендер", "возраст", "gender", "age",
+                # Сезоны и времена года
+                "季节", "season", "seasonality", "seasonal", "сезон", "сезонность", "сезонный",
+                # Формат выпуска и заявления производителя
+                "格式", "format", "release", "release format", "выпуск", "формат выпуска", "заявлен", "заявлен как",
             )
 
             cleaned: list[dict] = []
@@ -876,6 +906,14 @@ class Scraper:
             payload["available_colors"] = product_data.get("available_colors") or []
         if "available_sizes" in product_data:
             payload["available_sizes"] = product_data.get("available_sizes") or []
+
+        # В режиме цен advanced отправляем LLM готовые позиции с ценами,
+        # чтобы промпт compact_v2 сразу видел ассортимент (без выдумывания вариантов).
+        if self.price_mode == "advanced":
+            price_entries = self._get_unique_sku_price_items(product_data)
+            if price_entries:
+                payload["price_mode"] = "advanced"
+                payload["price_entries"] = price_entries[:120]
 
         return payload
     
@@ -1512,7 +1550,7 @@ class Scraper:
                 return structured
 
         if settings.DEBUG_MODE:
-            print("[Scraper] Используется fallback-ветка для обработки цен (без LLM)")
+            print("[Scraper] Используется fallback-ветка для обработки цен (без structured JSON задач)")
         return await self._prepare_price_entries_fallback(entries)
 
     async def _process_prices_with_llm(self, entries: list[dict], product_context: dict) -> list[dict]:
@@ -1529,18 +1567,53 @@ class Scraper:
         # Статистика токенов собирается внутри вызываемых методов через глобальную переменную
         # или через обновление total_tokens_usage в методе scrape_product
         try:
+            # ВАЖНО: делаем ровно ОДИН LLM-запрос — массовый перевод позиций.
+            # Дальше суммаризацию выполняем локально, чтобы:
+            # - не тратить токены на огромный промпт;
+            # - убрать ретраи/падения из-за невалидного JSON на этапе суммаризации.
             translated = await self._translate_price_entries_with_llm(entries, product_context)
             if not translated:
                 return []
-            summarized = await self._summarize_price_entries_with_llm(product_context, translated)
-            return summarized
+            return self._summarize_translated_prices_locally(translated)
         except Exception as e:
             if settings.DEBUG_MODE:
                 print(f"[Scraper] Ошибка обработки цен через LLM: {e}")
             return []
 
     async def _translate_price_entries_with_llm(self, entries: list[dict], product_context: dict) -> list[dict]:
-        payload = json.dumps(entries, ensure_ascii=False, indent=2)
+        # 1) Дедупликация и сжатие списка для экономии токенов
+        uniq = []
+        seen = set()
+        for e in entries:
+            name = (e.get("name") or "").strip()
+            price = e.get("price")
+            try:
+                price_f = float(price)
+            except (TypeError, ValueError):
+                continue
+            key = (name.lower(), price_f)
+            if key in seen:
+                continue
+            seen.add(key)
+            # Усечём слишком длинные названия, чтобы не раздувать промпт
+            if len(name) > 160:
+                name = name[:157].rstrip() + "…"
+            # Добавляем id, чтобы жёстко требовать у модели вернуть ВСЕ элементы
+            uniq.append({"id": len(uniq), "name": name, "price": price_f})
+            if len(uniq) >= 50:  # жёсткий предел на список для перевода
+                break
+
+        if len(uniq) <= 1:
+            return [{"label": uniq[0]["name"], "price": uniq[0]["price"]}] if uniq else []
+
+        payload = json.dumps(uniq, ensure_ascii=False, separators=(",", ":"))
+        
+        if settings.DEBUG_MODE:
+            logger.info(
+                "[Prices][translate] Подготовлено уникальных позиций: %s, payload_len=%s",
+                len(uniq),
+                len(payload),
+            )
         
         # Извлекаем контекст
         title = product_context.get('title', '')
@@ -1561,244 +1634,228 @@ class Scraper:
         
         context_hint = "\n".join(context_lines) + "\n\n" if context_lines else ""
         
+        # Важно: Responses API у нас вызывается с text.format.type=json_object,
+        # поэтому модель НЕ обязана возвращать "чистый массив". Чтобы избежать
+        # обёрток вида {"0":[...]} и частичных ответов, требуем фиксированную форму:
+        # {"items":[ ... ]} и жёстко проверяем полноту по id.
         user_prompt = (
             f"{context_hint}"
-            "Ниже передан JSON-массив позиций с оригинальными названиями и ценами в юанях.\n"
-            "Переведи каждое название на русский язык ЧЕСТНО и ПОЛНОСТЬЮ, сохраняя всю информацию.\n"
-            "Верни JSON-массив вида: [{\"label\": \"переведённое название\", \"price\": число}].\n\n"
-            "⚠️ КРИТИЧЕСКИ ВАЖНО - ЧЕСТНЫЙ ПОЛНЫЙ ПЕРЕВОД:\n\n"
-            "1. СОХРАНЯЙ структуру: [ТИП ТОВАРА], [описание цвета/принта]\n"
-            "   - 'XS, 长袖套装, MARBLE MUSHROOM PRINT' → 'майка, принт мраморный грибной'\n"
-            "   - 'M, 短裤, BLACK' → 'шорты, чёрные'\n"
-            "   - 'L, 长裤, RED PRINT' → 'брюки, принт красный'\n\n"
-            "2. ОПРЕДЕЛИ ТИП товара из китайских слов:\n"
-            "   - '长袖' / '长袖套装' → 'майка' или 'футболка' (длинный рукав)\n"
-            "   - '短裤' → 'шорты' (короткие штаны)\n"
-            "   - '长裤' → 'брюки' (длинные штаны)\n"
-            "   - '衬衫' → 'рубашка'\n"
-            "   - '裤子' → 'брюки'\n\n"
-            "3. ПЕРЕВОДИ принты/цвета, но ставь ИХ ПОСЛЕ типа товара:\n"
-            "   - 'MARBLE MUSHROOM PRINT, 甜奶油红蘑菇, 长袖' → 'майка, принт мраморный грибной'\n"
-            "   - 'CARAMEL GINGERBREAD PRINT, 焦糖小人儿姜饼干, 短裤' → 'шорты, принт карамельный имбирный пряник'\n"
-            "   - 'BLACK, 黑色, 长裤' → 'брюки, чёрные'\n\n"
-            "4. ИСПОЛЬЗУЙ контекст описания для УТОЧНЕНИЯ типа:\n"
-            "   - Если в описании: 'Комплект: майка, шорты, брюки'\n"
-            "   - И в варианте: '长袖' → переводи как 'майка' (из контекста)\n"
-            "   - И в варианте: '短裤' → переводи как 'шорты' (из контекста)\n\n"
-            "5. НЕ УДАЛЯЙ информацию:\n"
-            "   - Переводи ВСЁ: размеры, принты, цвета (суммаризация будет позже)\n"
-            "   - Формат: 'ТИП ТОВАРА, атрибуты'\n"
-            "   - Пример: 'майка, принт мраморный грибной' (НЕ просто 'майка')\n\n"
-            "ПРИМЕРЫ:\n\n"
-            "Вход: {\"name\": \"XS, 长袖套装, MARBLE MUSHROOM PRINT 甜奶油红蘑菇\", \"price\": 158}\n"
-            "Выход: {\"label\": \"майка, принт мраморный грибной\", \"price\": 158}\n\n"
-            "Вход: {\"name\": \"M, 短裤, WASHED ONYX SKI PRINT 水洗黑\", \"price\": 118}\n"
-            "Выход: {\"label\": \"шорты, принт стираный чёрный лыжный\", \"price\": 118}\n\n"
-            "Вход: {\"name\": \"L, 长裤, CARAMEL GINGERBREAD\", \"price\": 188}\n"
-            "Выход: {\"label\": \"брюки, принт карамельный имбирный пряник\", \"price\": 188}\n\n"
-            "Цены НЕ изменяй. Переводи ЧЕСТНО и ПОЛНОСТЬЮ.\n\n"
-            f"Исходный JSON:\n{payload}"
+            "Дан JSON-массив объектов вида {\"id\": число, \"name\": \"оригинал\", \"price\": число}.\n"
+            "Переведи поле name на русский, сохрани цену.\n\n"
+            "КРИТИЧЕСКИ ВАЖНО:\n"
+            "- Верни РОВНО столько же элементов, сколько во входном массиве.\n"
+            "- Верни ВСЕ элементы, ничего не пропускай.\n"
+            "- id должен совпадать с входным id.\n"
+            "- price должен совпадать с входным price.\n"
+            "- Если не можешь перевести — поставь исходный name в label.\n"
+            "- label делай КОРОТКИМ: убери размеры/коды/служебные маркеры.\n"
+            "  * УДАЛЯЙ размеры (XS/S/M/L/XL, 35-45, UK4/UK10 и т.п.)\n"
+            "  * УДАЛЯЙ коды вида uk?10, u?k6 и похожие\n"
+            "  * НЕ пиши «цвет на фото/изображённый цвет/图片色»\n"
+            "  * Если остаются только варианты питания/комплекта — оставь это (например: «на батарейках», «аккумуляторный»)\n"
+            "- Запрещены китайские иероглифы и английские слова в label.\n"
+            "- Запрещены любые дополнительные поля, кроме items/id/label/price.\n\n"
+            "ФОРМАТ ОТВЕТА (строго, без markdown):\n"
+            "{\"items\":[{\"id\":0,\"label\":\"перевод\",\"price\":123.45}]}\n\n"
+            f"{payload}"
         )
-        token_limit = max(2000, len(entries) * 80)
+        max_cap = int(getattr(settings, "OPENAI_MAX_OUTPUT_TOKENS", 2400) or 2400)
+        # Выход: JSON с items[].
+        # Даём запас, чтобы модель не обрезала JSON на товарах с большим числом вариантов.
+        token_limit = min(max_cap, max(900, len(uniq) * 45))
         last_error = None
 
         for attempt in range(2):
             try:
+                if settings.DEBUG_MODE:
+                    logger.debug(
+                        "[Prices][translate] Попытка %s | token_limit=%s | uniq=%s",
+                        attempt + 1,
+                        token_limit,
+                        len(uniq),
+                    )
                 result = await self._call_translation_json(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     token_limit=token_limit,
                     temperature=0.0,
                 )
-                # Собираем статистику токенов, если возвращена новая сигнатура
                 if isinstance(result, tuple):
                     response_text, tokens_usage = result
-                    if self._current_tokens_usage:
-                        self._current_tokens_usage += tokens_usage
                 else:
                     response_text = result
                 data = self._parse_json_response(response_text)
-                normalized = []
-                for item in data if isinstance(data, list) else []:
-                    label = str(item.get('label') or item.get('name') or "").strip()
-                    price = item.get('price')
+
+                # Нормализуем возможные «обёртки» и извлекаем items
+                if isinstance(data, dict) and isinstance(data.get("items"), list):
+                    items_iter = data["items"]
+                elif isinstance(data, list):
+                    items_iter = data
+                elif isinstance(data, dict):
+                    items_iter = [data]
+                else:
+                    items_iter = []
+
+                translated_map: dict[int, dict] = {}
+                for item in items_iter:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        idx = int(item.get("id"))
+                    except Exception:
+                        # Если id нет — пропускаем, это нарушает контракт
+                        continue
+                    label = str(item.get("label") or item.get("name") or "").strip()
+                    price = item.get("price")
                     try:
                         price_value = float(price)
                     except (TypeError, ValueError):
                         continue
                     if label:
-                        normalized.append({"label": label, "price": price_value})
+                        # Цена должна совпадать с входной. Если модель «перепутала» — игнорируем элемент.
+                        try:
+                            if abs(price_value - float(uniq[idx]["price"])) > 1e-6:
+                                continue
+                        except Exception:
+                            pass
+                        translated_map[idx] = {"label": label, "price": price_value}
+
+                # Жёстко требуем полноту: если вернули не все элементы — retry
+                if len(translated_map) != len(uniq):
+                    last_error = ValueError(
+                        f"LLM вернул неполный перевод цен: {len(translated_map)}/{len(uniq)} элементов"
+                    )
+                    logger.error(
+                        "[Prices][translate] Неполный результат | got=%s expected=%s | response_sample=%s",
+                        len(translated_map),
+                        len(uniq),
+                        response_text[:500],
+                    )
+                    continue
+
+                normalized = [translated_map[i] for i in range(len(uniq))]
+
                 if normalized:
-                    return normalized
+                    if isinstance(result, tuple) and self._current_tokens_usage:
+                        try:
+                            self._current_tokens_usage += tokens_usage
+                        except Exception:
+                            pass
+                    # Финальная дедупликация по (label, price)
+                    deduped: list[dict] = []
+                    seen_pairs = set()
+                    for item in normalized:
+                        key = (item["label"].lower(), item["price"])
+                        if key in seen_pairs:
+                            continue
+                        seen_pairs.add(key)
+                        deduped.append(item)
+                    return deduped
                 last_error = ValueError("LLM вернул пустой список после перевода цен.")
+                logger.error(
+                    "[Prices][translate] Пустой список после парса JSON | payload_len=%s | response_sample=%s",
+                    len(payload),
+                    response_text[:500],
+                )
             except json.JSONDecodeError as exc:
+                logger.error(
+                    "[Prices][translate] JSONDecodeError: %s | payload_len=%s | response_sample=%s",
+                    exc,
+                    len(payload),
+                    (response_text[:500] if 'response_text' in locals() else 'N/A'),
+                )
                 last_error = exc
                 token_limit = int(token_limit * 1.5) + 500
                 continue
+            except Exception as exc:
+                logger.error(
+                    "[Prices][translate] Ошибка вызова LLM: %s | payload_len=%s",
+                    exc,
+                    len(payload),
+                )
+                last_error = exc
+                continue
 
         if last_error:
-            raise last_error
-        return []
-
-    async def _summarize_price_entries_with_llm(self, product_context: dict, items: list[dict]) -> list[dict]:
-        if not items:
-            return []
-        
-        payload = json.dumps(items, ensure_ascii=False, indent=2)
-        
-        # Извлекаем контекст
-        title = product_context.get('title', '')
-        description = product_context.get('description', '')
-        
-        system_prompt = (
-            "Ты эксперт по товарным каталогам маркетплейсов. Создавай краткие и точные описания цен, "
-            "как на Wildberries или Ozon. Обобщай вариации, если различия несущественны (размер, цвет, принт). "
-            "Если различия влияют на тип товара или комплектность - оставляй отдельно."
-        )
-        
-        # Формируем контекст
-        context_lines = []
-        if title:
-            context_lines.append(f"Название товара: {title}")
-        if description:
-            context_lines.append(f"Описание: {description}")
-        
-        context_hint = "\n".join(context_lines) + "\n\n" if context_lines else ""
-        
-        user_prompt = (
-            f"{context_hint}"
-            "Ниже приведён JSON-массив позиций с переводами и ценами:\n"
-            f"{payload}\n\n"
-            "⚠️ КРИТИЧЕСКИ ВАЖНО - ГРУППИРОВКА ПО ТИПУ ТОВАРА, НЕ ПО ПРИНТУ!\n\n"
-            "ПРАВИЛА СУММАРИЗАЦИИ (стиль маркетплейса Wildberries/Ozon):\n\n"
-            "1. ОПРЕДЕЛИ ТИП ТОВАРА из названия (майка, футболка, шорты, брюки, штаны, рубашка и т.д.)\n"
-            "   - 'длинная футболка, принт X' → ТИП = 'футболка' или 'майка'\n"
-            "   - 'короткие штаны, цвет Y' → ТИП = 'шорты'\n"
-            "   - 'длинные штаны, принт Z' → ТИП = 'брюки'\n"
-            "   - 'рубашка с пайетками' → ТИП = 'рубашка'\n\n"
-            "2. ГРУППИРУЙ по ТИПУ товара + ЦЕНЕ (игнорируй принты, цвета, размеры!):\n"
-            "   - Все 'футболка [любой принт]' с ценой 158 ¥ → 'майка с принтом в ассортименте'\n"
-            "   - Все 'короткие штаны [любой цвет]' с ценой 118 ¥ → 'шорты в ассортименте'\n"
-            "   - НЕ группируй по принтам! 'марморный принт' - НЕ тип товара!\n\n"
-            "3. НОРМАЛИЗУЙ названия типов товара:\n"
-            "   - 'длинная футболка' / 'длинный рукав' → 'майка'\n"
-            "   - 'короткие штаны' / 'короткие брюки' → 'шорты'\n"
-            "   - 'длинные штаны' / 'длинные брюки' → 'брюки'\n"
-            "   - 'футболка' / 'топ' → 'футболка'\n\n"
-            "4. ФОРМАТ описания (2-4 слова):\n"
-            "   - Если разные принты: 'майка с принтом в ассортименте'\n"
-            "   - Если один цвет: 'шорты чёрные'\n"
-            "   - Если один тип без вариаций: 'брюки'\n\n"
-            "⚠️⚠️⚠️ ПРИМЕРЫ С ПРИНТАМИ (как в вашем случае) ⚠️⚠️⚠️\n\n"
-            "Пример 1 - ПРАВИЛЬНАЯ группировка комплекта с принтами SKIMS:\n"
-            "Вход: [\n"
-            "  {\"label\": \"Принт MARBLE MUSHROOM, цвет нежно-розовый с красным грибком, длинная футболка\", \"price\": 158},\n"
-            "  {\"label\": \"Принт CARAMEL GINGERBREAD, цвет карамельный имбирный пряник, длинная футболка\", \"price\": 158},\n"
-            "  {\"label\": \"Принт WASHED ONYX SKI, цвет вымытый чёрный, длинная футболка\", \"price\": 158},\n"
-            "  {\"label\": \"Принт MARBLE MUSHROOM, цвет нежно-розовый с красным грибком, короткие штаны\", \"price\": 118},\n"
-            "  {\"label\": \"Принт WASHED ONYX SKI, цвет вымытый чёрный, короткие штаны\", \"price\": 118},\n"
-            "  {\"label\": \"Принт CARAMEL GINGERBREAD, цвет карамельный, короткие штаны\", \"price\": 118},\n"
-            "  {\"label\": \"Принт MARBLE MUSHROOM, цвет нежно-розовый, длинные штаны\", \"price\": 188},\n"
-            "  {\"label\": \"Принт WASHED ONYX SKI, длинные штаны\", \"price\": 188}\n"
-            "]\n"
-            "Выход: [\n"
-            "  {\"label\": \"майка с принтом в ассортименте\", \"price\": 158},\n"
-            "  {\"label\": \"шорты с принтом в ассортименте\", \"price\": 118},\n"
-            "  {\"label\": \"брюки с принтом в ассортименте\", \"price\": 188}\n"
-            "]\n"
-            "Логика: Группировка по ТИПУ товара (майка, шорты, брюки), НЕ по принту!\n\n"
-            "Пример 2 - НЕПРАВИЛЬНАЯ группировка (так делать НЕЛЬЗЯ):\n"
-            "Выход НЕПРАВИЛЬНЫЙ: [\n"
-            "  {\"label\": \"марморный грибной принт\", \"price\": 158},  ← ОШИБКА! Принт - не тип товара!\n"
-            "  {\"label\": \"карамельный имбирный печенье\", \"price\": 158},  ← ОШИБКА!\n"
-            "  {\"label\": \"принт ски оникса в ассортименте\", \"price\": 118}  ← ОШИБКА!\n"
-            "]\n\n"
-            "Пример 3 - Рубашка и брюки:\n"
-            "Вход: [\n"
-            "  {\"label\": \"XS брюки чёрные\", \"price\": 128},\n"
-            "  {\"label\": \"S брюки чёрные\", \"price\": 128},\n"
-            "  {\"label\": \"XS рубашка с пайетками белая\", \"price\": 148},\n"
-            "  {\"label\": \"S рубашка с пайетками белая\", \"price\": 148}\n"
-            "]\n"
-            "Выход: [\n"
-            "  {\"label\": \"брюки\", \"price\": 128},\n"
-            "  {\"label\": \"рубашка с пайетками\", \"price\": 148}\n"
-            "]\n\n"
-            "АЛГОРИТМ:\n"
-            "Шаг 1: Для каждого элемента извлеки ТИП товара (майка/шорты/брюки/рубашка)\n"
-            "Шаг 2: Сгруппируй по (ТИП товара, ЦЕНА)\n"
-            "Шаг 3: Для каждой группы создай краткое описание БЕЗ принтов/цветов/размеров\n"
-            "Шаг 4: Если в группе >1 вариант с разными принтами/цветами → добавь 'в ассортименте'\n\n"
-            "Верни JSON-массив [{\"label\": \"описание\", \"price\": число}]. "
-            "Описание: 2-4 слова, ТИП товара + (опционально) 'с принтом в ассортименте'. "
-            "Группируй ТОЛЬКО по типу товара и цене!"
-        )
-        token_limit = max(2000, len(items) * 40)
-        last_error = None
-
-        for attempt in range(2):
+            logger.error(
+                "[Prices][translate] Ошибка LLM перевода цен: %s | payload_len=%s",
+                last_error,
+                len(payload),
+            )
+            # Fallback для тестов и устойчивости: вернём честный перевод через generic-переводчик
+            # (без группировки и без претензий к JSON-формату).
             try:
-                result = await self._call_translation_json(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    token_limit=token_limit,
-                    temperature=0.0,
-                )
-                # Собираем статистику токенов, если возвращена новая сигнатура
-                if isinstance(result, tuple):
-                    response_text, tokens_usage = result
-                    if self._current_tokens_usage:
-                        self._current_tokens_usage += tokens_usage
-                else:
-                    response_text = result
-                data = self._parse_json_response(response_text)
-                result = []
-                seen = set()
-                for item in data if isinstance(data, list) else []:
-                    label = str(item.get('label') or "").strip()
-                    price = item.get('price')
+                unique_names = list({e["name"] for e in entries if e.get("name")})[:20]
+                translated = []
+                for name in unique_names:
+                    t = await self._translate_text_generic(name, target_language="ru")
+                    translated.append(t or name)
+                fallback = []
+                for e in entries:
+                    nm = e.get("name") or ""
+                    pr = e.get("price")
+                    if pr is None:
+                        continue
                     try:
-                        price_value = float(price)
+                        pr_f = float(pr)
                     except (TypeError, ValueError):
                         continue
-                    if not label:
-                        continue
-                    key = (label, price_value)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    result.append({"label": label, "price": price_value})
-
-                if result:
-                    price_groups: OrderedDict[float, list[str]] = OrderedDict()
-                    for entry in sorted(result, key=lambda e: e['price']):
-                        price_groups.setdefault(entry['price'], []).append(entry['label'])
-
-                    merged: list[dict] = []
-                    for price_value, labels in price_groups.items():
-                        if not labels:
-                            continue
-                        merged_label = self._merge_price_labels(labels)
-                        if isinstance(merged_label, list):
-                            for lbl in merged_label:
-                                cleaned = (lbl or "").strip()
-                                if cleaned:
-                                    merged.append({"label": cleaned, "price": price_value})
-                        else:
-                            cleaned = (merged_label or "").strip()
-                            if cleaned:
-                                merged.append({"label": cleaned, "price": price_value})
-
-                    return merged
-                last_error = ValueError("LLM вернул пустой список после суммаризации цен.")
-            except json.JSONDecodeError as exc:
-                last_error = exc
-                token_limit = int(token_limit * 1.5) + 500
-                continue
-
-        if last_error:
+                    tr = translated[unique_names.index(nm)] if nm in unique_names else nm
+                    fallback.append({"label": tr, "price": pr_f})
+                if fallback:
+                    logger.warning("[Prices][translate] Использован fallback-перевод (generic).")
+                    return fallback
+            except Exception:
+                pass
             raise last_error
         return []
+
+    def _summarize_translated_prices_locally(self, items: list[dict]) -> list[dict]:
+        """
+        Локальная суммаризация переведённых позиций по ценам без LLM.
+
+        Идея:
+        - извлекаем тип товара из label через _extract_product_type();
+        - группируем по (тип, цена);
+        - если в группе несколько вариантов (обычно размеры/цвета) — не добавляем никаких пометок,
+          оставляем только тип товара.
+
+        Важно: это сознательно заменяет LLM-суммаризацию, чтобы сократить токены и убрать лишние запросы.
+        """
+        grouped: dict[tuple[float, str], int] = {}
+
+        for it in items or []:
+            label = str(it.get("label") or "").strip()
+            price = it.get("price")
+            if not label:
+                continue
+            try:
+                price_f = float(price)
+            except (TypeError, ValueError):
+                continue
+
+            product_type = self._extract_product_type(label)
+            if not product_type or product_type == "__INVALID__":
+                product_type = "вариант"
+
+            key = (price_f, product_type)
+            grouped[key] = grouped.get(key, 0) + 1
+
+        result: list[dict] = []
+        for (price_f, product_type), cnt in sorted(grouped.items(), key=lambda x: x[0][0]):
+            # ВАЖНО: не добавляем никаких «ассортиментных» пометок — пользователю достаточно типа товара.
+            result.append({"label": product_type, "price": price_f})
+
+        # финальная дедупликация
+        unique: list[dict] = []
+        seen_pairs = set()
+        for item in result:
+            key = (str(item.get("label") or "").lower(), float(item.get("price")))
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            unique.append(item)
+        return unique
 
     async def _prepare_price_entries_fallback(self, entries: list[dict]) -> list[dict]:
         grouped: OrderedDict[float, list[str]] = OrderedDict()
@@ -1939,10 +1996,8 @@ class Scraper:
                         token_limit=token_limit,
                         temperature=0.0,
                     )
-                    # Собираем статистику токенов, если возвращена новая сигнатура
                     if isinstance(result, tuple):
                         response_text, tokens_usage = result
-                        total_tokens_usage += tokens_usage
                     else:
                         response_text = result
                     data = self._parse_json_response(response_text)
@@ -1957,8 +2012,18 @@ class Scraper:
                             if label:
                                 translated_map[idx] = label
                     if len(translated_map) == len(names):
+                        if isinstance(result, tuple) and self._current_tokens_usage:
+                            try:
+                                self._current_tokens_usage += tokens_usage
+                            except Exception:
+                                pass
                         return [translated_map[idx] for idx in range(len(names))]
                 except json.JSONDecodeError as exc:
+                    logger.error(
+                        "[Prices][variants] JSONDecodeError: %s | response_sample=%s",
+                        exc,
+                        (response_text[:500] if 'response_text' in locals() else 'N/A'),
+                    )
                     if settings.DEBUG_MODE:
                         print(f"[Scraper] Ошибка группового перевода вариантов: {exc}")
                     token_limit = int(token_limit * 1.5) + 200
@@ -1982,7 +2047,14 @@ class Scraper:
                 print(f"[Scraper] Ошибка группового перевода вариантов: {exc}")
 
         if translated_block:
-            splitted = [line.strip() for line in translated_block.split("\n")]
+            # translated_block может быть (text, tokens_usage)
+            text_only = translated_block[0] if isinstance(translated_block, tuple) else translated_block
+            if isinstance(translated_block, tuple) and self._current_tokens_usage:
+                try:
+                    self._current_tokens_usage += translated_block[1]
+                except Exception:
+                    pass
+            splitted = [line.strip() for line in str(text_only).split("\n")]
             if len(splitted) == len(names):
                 return [segment or original for segment, original in zip(splitted, names)]
 
@@ -2048,12 +2120,15 @@ class Scraper:
                     return "__INVALID__"
         
         # Словарь маркеров типов товара (важнее всего!)
+        # Важно: не смешиваем близкие, но разные типы (например, "пиджак" != "куртка"),
+        # иначе локальная группировка по ценам будет давать неверные подписи.
         type_markers = {
             'майка': ['майка', 'футболка', 'длинная футболка', 'длинный рукав', 'топ', 'блуза'],
             'шорты': ['шорты', 'короткие штаны', 'короткие брюки'],
             'брюки': ['брюки', 'длинные штаны', 'длинные брюки', 'штаны'],
             'рубашка': ['рубашка', 'сорочка'],
-            'куртка': ['куртка', 'пиджак', 'жакет'],
+            'пиджак': ['пиджак', 'жакет', 'блейзер'],
+            'куртка': ['куртка'],
             'свитер': ['свитер', 'джемпер', 'кофта', 'худи', 'толстовка'],
             'платье': ['платье'],
             'юбка': ['юбка'],
@@ -2173,7 +2248,8 @@ class Scraper:
         1. Удаляет размеры из всех названий
         2. Группирует по типу товара
         3. Если все варианты одного типа (только размеры/цвета отличаются) → возвращает один тип товара
-        4. Если варианты разных типов → перечисляет типы, для повторяющихся типов → "в ассортименте"
+        4. Если варианты разных типов → перечисляет типы.
+           ВАЖНО: не добавляем никаких «ассортиментных» пометок.
         """
         if not names:
             return []
@@ -2227,9 +2303,7 @@ class Scraper:
                 result.append(product_type)
             else:
                 # Несколько вариантов одного типа (разные размеры/цвета)
-                # Проверяем, отличаются ли они только размерами
-                # Если варианты отличаются только размерами - указываем тип товара
-                # Если отличаются цветами/другими характеристиками - указываем "в ассортименте"
+                # ВАЖНО: не добавляем никаких «ассортиментных» пометок.
                 
                 # Простая эвристика: если все оригинальные названия содержат тип товара и отличаются только префиксом
                 all_contain_type = all(product_type in orig.lower() for orig in unique_originals)
@@ -2237,8 +2311,9 @@ class Scraper:
                     # Все варианты содержат тип товара - скорее всего отличаются только размерами
                     result.append(product_type)
                 else:
-                    # Варианты отличаются не только размерами
-                    result.append(f"{product_type} в ассортименте")
+                    # Варианты отличаются не только размерами, но пользователю это не нужно в подписи.
+                    # Оставляем просто тип товара.
+                    result.append(product_type)
         
         # Убираем дубликаты, сохраняя порядок
         unique_result = []
@@ -2295,6 +2370,8 @@ class Scraper:
         apparel_markers = (
             "плать", "юбк", "джинс", "брюк", "рубаш", "футболк", "толстов",
             "худи", "костюм", "жилет", "куртк", "пальт", "шорт", "леггинс",
+            # Штаны/термоштаны часто встречаются в детской одежде и должны попадать в apparel-ветку
+            "штан",
             "обув", "ботин", "кроссов", "туфл", "кеды", "носк", "бель",
             "колгот", "пижам", "комбинез", "скинни", "sneaker", "coat", "hoodie",
             "靴", "衣", "裙", "裤", "衫"
@@ -2379,14 +2456,72 @@ class Scraper:
 
         # Поле 2: Цвета (всегда список, если удаётся)
         if colors_value:
+            def _sanitize_color_item(item: str) -> str | None:
+                # Убираем упоминания пола/возраста и SKU-коды из "цветов".
+                # Примеры, которые должны исчезнуть:
+                # - "мужской-02", "женский-31"
+                # Примеры, которые должны остаться:
+                # - "светло-серый" (в т.ч. если было "мужской-16 (светло-серый)")
+                s = (item or "").strip()
+                if not s:
+                    return None
+                try:
+                    import re
+
+                    # 1) Если есть скобки с реальным цветом — берём содержимое скобок
+                    m = re.search(r"\(([^)]+)\)", s)
+                    if m:
+                        inside = (m.group(1) or "").strip()
+                        if inside and (self.COLOR_REGEX.search(inside.lower()) or any(x in inside.lower() for x in ("принт", "узор", "рисунок", "клетк", "полоск", "мрамор", "камуфляж"))):
+                            s = inside
+
+                    # 2) Удаляем гендер/возраст (и их производные) + англ. варианты
+                    s = re.sub(
+                        r"(?i)\b(мужск\w*|женск\w*|унисекс|для\s+мальчик\w*|для\s+девочк\w*|детск\w*|подрост\w*|kids?|child(?:ren)?|baby|boy(?:s)?|girl(?:s)?|men|women|male|female)\b",
+                        "",
+                        s,
+                    )
+                    # 3) Удаляем типичные SKU-хвосты: "-02", "_08", " 13" и т.п.
+                    s = re.sub(r"(?i)[-_ ]?\d{1,4}\b", "", s)
+                    # 4) Схлопываем мусор
+                    s = re.sub(r"\s{2,}", " ", s).strip(" -_/;:,").strip()
+
+                    # 5) Оставляем только если похоже на цвет/принт
+                    low = s.lower()
+                    if not low:
+                        return None
+                    if self.COLOR_REGEX.search(low):
+                        return s
+                    if any(mrk in low for mrk in ("принт", "узор", "рисунок", "клетк", "полоск", "мрамор", "камуфляж", "градиент")):
+                        return s
+                    return None
+                except Exception:
+                    # В случае ошибки — лучше выкинуть, чем протащить "мужской-02" в пост.
+                    return None
+
             if isinstance(colors_value, str):
-                s = colors_value.strip()
-                if s:
-                    normalized["Цвета"] = [s]
+                cleaned = _sanitize_color_item(colors_value)
+                if cleaned:
+                    normalized["Цвета"] = [cleaned]
             elif isinstance(colors_value, list):
-                filtered = [c for c in colors_value if isinstance(c, str) and c.strip()]
-                if filtered:
-                    normalized["Цвета"] = filtered
+                out: list[str] = []
+                for c in colors_value:
+                    if not isinstance(c, str):
+                        continue
+                    cleaned = _sanitize_color_item(c)
+                    if cleaned:
+                        out.append(cleaned)
+                if out:
+                    # Убираем дубликаты, сохраняя порядок
+                    seen = set()
+                    uniq: list[str] = []
+                    for x in out:
+                        k = x.strip().lower()
+                        if k and k not in seen:
+                            seen.add(k)
+                            uniq.append(x)
+                    if uniq:
+                        normalized["Цвета"] = uniq
 
         # Поле 3: Размеры (строка)
         if sizes_value:
@@ -2463,13 +2598,48 @@ class Scraper:
         # - Если несколько — через ", "
         return ", ".join(parts)
 
-    @staticmethod
-    def _common_prefix(lhs: str, rhs: str) -> str:
-        limit = min(len(lhs), len(rhs))
-        idx = 0
-        while idx < limit and lhs[idx] == rhs[idx]:
-            idx += 1
-        return lhs[:idx]
+    def _sanitize_gender_age_from_title(self, text: str) -> str:
+        """
+        Убирает из заголовка любые упоминания пола/возраста (по требованиям).
+
+        Примеры:
+        - "брюки для детей" -> "брюки"
+        - "женские кроссовки" -> "кроссовки"
+        """
+        s = (text or "").strip()
+        if not s:
+            return s
+        try:
+            import re
+            # удаляем "для детей/мальчиков/девочек" целиком
+            s = re.sub(r"(?i)\bдля\s+(детей|реб[её]нк\w*|мальчик\w*|девочк\w*)\b", "", s)
+            # удаляем прилагательные/маркеры пола и возраста
+            s = re.sub(r"(?i)\b(мужск\w*|женск\w*|унисекс|детск\w*|подрост\w*)\b", "", s)
+            s = re.sub(r"\s{2,}", " ", s).strip(" -—,:;").strip()
+            return s or (text or "").strip()
+        except Exception:
+            return (text or "").strip()
+
+    def _strip_gender_age_sentences(self, text: str) -> str:
+        """
+        Для description: удаляем предложения, которые содержат упоминания пола/возраста.
+        Это безопаснее, чем "вырезать слова" (чтобы не получить ломаный текст).
+        """
+        s = (text or "").strip()
+        if not s:
+            return s
+        try:
+            import re
+            parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", s) if p.strip()]
+            if not parts:
+                return s
+            bad = re.compile(
+                r"(?i)\b(мужск\w*|женск\w*|унисекс|детск\w*|подрост\w*|для\s+(детей|реб[её]нк\w*|мальчик\w*|девочк\w*)|kids?|child(?:ren)?|baby|boy(?:s)?|girl(?:s)?|men|women|male|female)\b"
+            )
+            kept = [p for p in parts if not bad.search(p)]
+            return " ".join(kept).strip() or s
+        except Exception:
+            return s
 
     def _remove_color_words(self, text: str) -> str:
         if not text:
@@ -2478,44 +2648,6 @@ class Scraper:
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
         cleaned = cleaned.replace(" ,", ",").replace(" /", "/")
         return cleaned.strip(" ,./-")
-
-    def _merge_price_labels(self, labels: list[str]) -> str | list[str]:
-        if not labels:
-            return []
-        if len(labels) == 1:
-            return labels[0]
-
-        prefix = labels[0]
-        for lbl in labels[1:]:
-            prefix = self._common_prefix(prefix, lbl)
-            if not prefix:
-                break
-
-        prefix = prefix.rstrip(" -—:,()/").strip()
-        if prefix and len(prefix) >= 12:
-            suffixes = []
-            for lbl in labels:
-                suffix = lbl[len(prefix):].lstrip(" -—:,()").strip()
-                suffix = self._remove_color_words(suffix)
-                if not suffix:
-                    suffix = "вариант"
-                suffixes.append(suffix)
-            unique_suffixes = []
-            seen = set()
-            for suf in suffixes:
-                normalized = suf.lower()
-                if normalized not in seen:
-                    seen.add(normalized)
-                    unique_suffixes.append(suf)
-            if unique_suffixes:
-                joined = ", ".join(unique_suffixes[:6])
-                if len(unique_suffixes) > 6:
-                    joined += ", и др."
-                return f"{prefix} (в ассортименте: {joined})"
-            return prefix
-
-        # Нет общего префикса — оставляем элементы отдельно
-        return labels
 
     def _translation_supports_structured_tasks(self) -> bool:
         """
@@ -2581,6 +2713,11 @@ class Scraper:
         if not callable(generator):
             raise RuntimeError("Активный переводческий провайдер не поддерживает JSON-ответы.")
 
+        # Централизованно ограничиваем max_output_tokens, чтобы не раздувать вызовы.
+        max_tokens_cap = int(getattr(settings, "OPENAI_MAX_OUTPUT_TOKENS", 2400) or 2400)
+        if max_tokens_cap > 0:
+            token_limit = min(token_limit, max_tokens_cap)
+
         kwargs = {
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
@@ -2597,35 +2734,63 @@ class Scraper:
         except (TypeError, ValueError):
             kwargs["max_tokens"] = token_limit
 
+        if settings.DEBUG_MODE:
+            try:
+                logger.debug(
+                    "[Translation][request] max_tokens=%s, temperature=%s\n--- system ---\n%s\n--- user ---\n%s\n",
+                    kwargs.get("max_output_tokens") or kwargs.get("max_tokens"),
+                    kwargs.get("temperature"),
+                    (system_prompt or "")[:1200],
+                    (user_prompt or "")[:1200],
+                )
+            except Exception:
+                pass
+
         result = await generator(**kwargs)
         # Новая сигнатура: возвращает кортеж (text, tokens_usage) для OpenAI/ProxyAPI
+        if settings.DEBUG_MODE:
+            try:
+                if isinstance(result, tuple):
+                    text_part = result[0]
+                else:
+                    text_part = result
+                logger.debug(
+                    "[Translation][response] len=%s | preview:\n%s",
+                    len(text_part) if hasattr(text_part, "__len__") else "-",
+                    str(text_part)[:1200],
+                )
+            except Exception:
+                pass
         return result
 
     async def _translate_text_generic(
         self, text: str, target_language: str = "ru"
-    ) -> str | tuple[str, TokensUsage]:
+    ) -> str:
         """
         Универсальный переводчик: использует выбранный translation_client.
         
         Returns:
-            str: Переведённый текст (старая сигнатура)
-            tuple[str, TokensUsage]: Переведённый текст и статистика токенов (новая сигнатура для OpenAI/ProxyAPI)
+            str: Переведённый текст
         """
         if not text:
-            return text, TokensUsage()
+            return text
 
         translator = getattr(self.translation_client, "translate_text", None)
         if callable(translator):
             try:
                 result = await translator(text, target_language=target_language)
-                # Новая сигнатура: возвращает кортеж (text, tokens_usage) для OpenAI/ProxyAPI
+                # Поддержка кортежа (text, tokens_usage)
                 if isinstance(result, tuple):
                     translated, tokens_usage = result
+                    if self._current_tokens_usage:
+                        try:
+                            self._current_tokens_usage += tokens_usage
+                        except Exception:
+                            pass
                 else:
                     translated = result
-                    tokens_usage = TokensUsage()
                 if translated:
-                    return translated, tokens_usage
+                    return translated
             except Exception as e:
                 if settings.DEBUG_MODE:
                     print(f"[Scraper] Ошибка перевода: {e}")
@@ -2643,12 +2808,47 @@ class Scraper:
         """
         if not sizes_str or not sizes_str.strip():
             return sizes_str
+
+        # Нормализация странных кодов размеров из некоторых источников (TMAPI):
+        # "u?k4,u?k6,uk?8,uk?10,u?k12" -> "UK4 UK6 UK8 UK10 UK12"
+        try:
+            import re
+
+            normalized = sizes_str
+            normalized = re.sub(r"(?i)\bu\?k(\d+)\b", r"UK\1", normalized)
+            normalized = re.sub(r"(?i)\buk\?(\d+)\b", r"UK\1", normalized)
+            sizes_str = normalized
+        except Exception:
+            pass
             
         # Стандартные размеры одежды в порядке
         standard_sizes = ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL']
         
         # Разбиваем строку на части и очищаем
         sizes_raw = [s.strip() for s in sizes_str.replace(',', ' ').split() if s.strip()]
+
+        # Обработка UK-размеров: UK4, UK6, UK8... -> UK4-UK12
+        try:
+            import re
+
+            uk_nums: list[int] = []
+            for token in sizes_raw:
+                m = re.fullmatch(r"(?i)UK(\d{1,3})", token.strip())
+                if not m:
+                    uk_nums = []
+                    break
+                uk_nums.append(int(m.group(1)))
+            if uk_nums:
+                uk_sorted = sorted(set(uk_nums))
+                if len(uk_sorted) >= 3:
+                    # Если размеры идут с шагом 1 или 2 (UK часто чётные), показываем диапазон
+                    step_ok = all((uk_sorted[i + 1] - uk_sorted[i]) in (1, 2) for i in range(len(uk_sorted) - 1))
+                    if step_ok:
+                        return f"UK{uk_sorted[0]}-UK{uk_sorted[-1]}"
+                # Иначе перечисляем как есть в порядке
+                return ", ".join(f"UK{n}" for n in uk_sorted)
+        except Exception:
+            pass
         
         # Попытка обработать числовые размеры (обувь)
         try:
@@ -2758,7 +2958,16 @@ class Scraper:
             lines = ["<i>💰 <b>Цены:</b></i>"]
             for entry in price_lines:
                 amount = self._format_price_amount(entry['price'], currency, exchange_rate)
-                label = self._ensure_lowercase_bullet(entry['label'])
+                # Запрещаем любые «ассортиментные» пометки в пользовательском тексте
+                label_raw = str(entry.get("label") or "")
+                try:
+                    import re
+                    label_raw = re.sub(r"(?i)\s*\(.*?в\s+ассортименте.*?\)\s*", " ", label_raw)
+                    label_raw = re.sub(r"(?i)\bв\s+ассортименте\b", "", label_raw)
+                    label_raw = re.sub(r"\s{2,}", " ", label_raw).strip(" ,;:-").strip()
+                except Exception:
+                    pass
+                label = self._ensure_lowercase_bullet(label_raw)
                 lines.append(f"<i>  • {label} - {amount}</i>")
             return "\n".join(lines)
 
@@ -2845,6 +3054,43 @@ class Scraper:
         additional_info = llm_content.get('additional_info', {})
         hashtags = llm_content.get('hashtags', [])
         emoji = llm_content.get('emoji', '')
+
+        # По требованиям: запрещены любые упоминания пола/возраста.
+        # Чистим сразу, чтобы не протащить это в финальный пост даже при ошибке LLM.
+        try:
+            if isinstance(title, str):
+                title = self._sanitize_gender_age_from_title(title)
+            if isinstance(description, str):
+                description = self._strip_gender_age_sentences(description)
+            # Если LLM вдруг добавил "мужской/женский/детский" в названия характеристик — выкидываем такие поля.
+            if isinstance(main_characteristics, dict) and main_characteristics:
+                import re
+                bad_key = re.compile(r"(?i)\b(мужск\w*|женск\w*|унисекс|детск\w*|подрост\w*)\b")
+                for k in list(main_characteristics.keys()):
+                    if bad_key.search(str(k)):
+                        main_characteristics.pop(k, None)
+                # Также запрещены гендерные/возрастные упоминания в ЗНАЧЕНИЯХ характеристик
+                # (особенно в "Цвета", где модель иногда вставляет "для мальчиков/для девочек").
+                bad_value = re.compile(r"(?i)\b(для\s+мальчик\w*|для\s+девочк\w*|мальчик\w*|девочк\w*|мужск\w*|женск\w*|унисекс)\b")
+                for k in list(main_characteristics.keys()):
+                    v = main_characteristics.get(k)
+                    if isinstance(v, str):
+                        if bad_value.search(v):
+                            main_characteristics.pop(k, None)
+                    elif isinstance(v, list):
+                        cleaned_list = []
+                        for item in v:
+                            if not isinstance(item, str):
+                                continue
+                            if bad_value.search(item):
+                                continue
+                            cleaned_list.append(item)
+                        if cleaned_list:
+                            main_characteristics[k] = cleaned_list
+                        else:
+                            main_characteristics.pop(k, None)
+        except Exception:
+            pass
 
         # Для одежды/обуви фиксируем строгий формат характеристик:
         # допускаются только (и строго в этом порядке при выводе):
@@ -2946,6 +3192,12 @@ class Scraper:
                         r"(?i)\bдля\s+близких\b",
                         r"(?i)\bдля\s+родных\b",
                         r"(?i)\bтуристическ(ий|ая|ое)\b",
+                        # Канцелярит и неестественные формулировки (встречались в compact_v2)
+                        r"(?i)\bформат\s+исполнени[яе]\b",
+                        r"(?i)\bпредставлен[ао]?\s+вариантами\b",
+                        r"(?i)\bкак\s+по\s+отдельности\b",
+                        r"(?i)\bреализует(ся|ься)\s+отдельно\b",
+                        r"(?i)\bвариант(ы|ов)\s+отдельн(ых|ые)\s+позиц",
                     ]
 
                     filtered: list[str] = []
@@ -3023,6 +3275,11 @@ class Scraper:
                 'другие материалы', 'прочие материалы', 'неизвестно', 
                 'смешанные материалы', 'other materials', 'unknown', 
                 'mixed', 'various', 'прочие', 'другие', 'не указано',
+                'другое', 'иной', 'иное', 'другой', 'прочее',
+                # Частые «мусорные» формулировки про ткань/материал, которые нельзя показывать пользователю
+                'другая ткань', 'другие ткани', 'иная ткань', 'прочая ткань',
+                # Слишком общие значения — это НЕ состав
+                'ткань', 'материал', 'текстиль',
                 'не указан', 'не указана', 'не указаны',
                 'нет информации', 'нет данных', 'no information',
                 'not specified', 'н/д', 'n/a', '', 'нет', 'none', 'null', 'не применимо', 'отсутствует'
@@ -3037,7 +3294,20 @@ class Scraper:
                 if 'материал' in key.lower() or 'состав' in key.lower():
                     value = main_characteristics[key]
                     # Проверяем что значение не пустое и не из списка неопределенных
-                    if value and isinstance(value, str) and value.strip() and value.lower().strip() not in invalid_values:
+                    if value and isinstance(value, str) and value.strip():
+                        v0 = value.lower().strip()
+                        if v0 in invalid_values:
+                            continue
+                        # Дополнительная страховка: «другая/прочая/иная ткань/материал» в разных вариациях
+                        try:
+                            import re
+                            if re.search(r"(?i)\b(друг\w*|проч\w*|ин\w*)\b.*\b(ткан|материал)\b", value):
+                                continue
+                            # «Состав: ткань/материал/текстиль» — слишком общее, пропускаем
+                            if re.fullmatch(r"(?i)\s*(ткань|материал|текстиль)\s*", value):
+                                continue
+                        except Exception:
+                            pass
                         ordered_keys.append(key)
             
             # Затем цвета
@@ -3096,7 +3366,9 @@ class Scraper:
 
                 # Доп. фильтр цветов на этапе рендера (страховка, если что-то проскочило в LLM)
                 try:
-                    if (key or "").strip().lower() == "цвета":
+                    key_lc = (key or "").strip().lower()
+                    # Иногда модель/данные дают ключи "Цвет", "Цвета", "Цвета товара" и т.п.
+                    if "цвет" in key_lc:
                         val = main_characteristics.get(key)
                         if isinstance(val, list):
                             filtered = []
@@ -3104,11 +3376,71 @@ class Scraper:
                                 if not isinstance(item, str):
                                     continue
                                 s = item.strip().lower()
+                                # Гендерные/возрастные маркеры в "Цвета" запрещены — это не цвет.
+                                if any(
+                                    g in s
+                                    for g in (
+                                        "для мальчиков",
+                                        "для девочек",
+                                        "мальчик",
+                                        "мальчиков",
+                                        "девочк",
+                                        "девочек",
+                                        "мужск",
+                                        "женск",
+                                        "унисекс",
+                                        "для мужчин",
+                                        "для женщин",
+                                    )
+                                ):
+                                    continue
+                                # Убираем «не-цветовые» слова и хвосты вроде «пиджак/брюки», «на фото» и т.п.
+                                # Это частая ошибка LLM: "верблюжий пиджак" вместо "верблюжий".
+                                bad_tokens = (
+                                    "пиджак", "брюки", "штаны", "костюм", "жакет", "куртка", "рубашк",
+                                    "цвет на фото", "на фото", "как на фото", "изображ", "图片色",
+                                    "цвет", "подарок", "сувенир", "упаков", "игрушк", "кукла",
+                                    # Гендерные/возрастные упоминания в "Цвета" запрещены
+                                    "мальчик", "мальчиков", "для мальчиков", "девочк", "девочек", "для девочек",
+                                    "мужск", "женск", "для мужчин", "для женщин", "унисекс",
+                                )
+                                if any(x in s for x in bad_tokens):
+                                    # Пробуем «аккуратно» вычистить тип товара/служебные слова,
+                                    # а не просто выкинуть значение целиком.
+                                    try:
+                                        import re
+                                        cleaned = s
+                                        cleaned = re.sub(r"(?i)\b(цвет(а|ов)?|на фото|как на фото)\b", "", cleaned)
+                                        cleaned = re.sub(r"(?i)\b(пиджак|брюки|штаны|костюм|жакет|куртка|рубашка)\b", "", cleaned)
+                                        cleaned = re.sub(r"(?i)图片色", "", cleaned)
+                                        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;:-").strip()
+                                        if not cleaned:
+                                            continue
+                                        s = cleaned
+                                    except Exception:
+                                        continue
+                                # После чистки всё ещё мусор — выкидываем
                                 if any(x in s for x in ("кукла", "игрушк", "упаков", "подарок", "сувенир")):
                                     continue
-                                filtered.append(item)
+                                if not s or s in {"цвет", "цвета"}:
+                                    continue
+                                # После всех чисток ещё раз гарантируем, что гендер не проскочил
+                                if any(x in s for x in ("для мальчиков", "для девочек", "мальчик", "девочк", "мужск", "женск", "унисекс")):
+                                    continue
+
+                                # Возвращаем уже очищенное значение
+                                filtered.append(s)
                             if filtered:
-                                main_characteristics[key] = filtered
+                                # Дедуп + порядок
+                                seen = set()
+                                uniq_colors = []
+                                for c in filtered:
+                                    c0 = str(c).strip().lower()
+                                    if not c0 or c0 in seen:
+                                        continue
+                                    seen.add(c0)
+                                    uniq_colors.append(c0)
+                                main_characteristics[key] = uniq_colors
                             else:
                                 continue
                 except Exception:

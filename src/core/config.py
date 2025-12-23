@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     TMAPI_BILLING_CHAT_ID: str = ""  # ID чата ответственного за оплату TMAPI для уведомлений об ошибке 439 (необязательно)
     YANDEX_GPT_MODEL: str = "yandexgpt-lite"  # Модель YandexGPT для использования
     OPENAI_MODEL: str = "gpt-4o-mini"  # Модель OpenAI по умолчанию
+    # Responses API используется для всех моделей OpenAI (gpt-4 и gpt-5) согласно документации
+    # Если False, используется устаревший Chat Completions API (не рекомендуется)
+    OPENAI_USE_RESPONSES_API: bool = True
+    # Уровень рассуждений для моделей семейства gpt-5
+    # Используется только для gpt-5 моделей, для остальных игнорируется
+    # Поддерживаемые значения зависят от модели:
+    #   - gpt-5, gpt-5-mini, gpt-5-nano: minimal, low, medium, high
+    #   - gpt-5.1, gpt-5.1-mini, gpt-5.1-nano: none, low, medium, high
+    #   - gpt-5.2 и выше: none, low, medium, high
+    # Если значение не поддерживается моделью, будет автоматически конвертировано
+    # Пустое значение = автоматический выбор по умолчанию для модели
+    OPENAI_REASONING_EFFORT: str = ""
     # Если указана gpt-5* модель, но Responses API отключён (мы используем Chat Completions),
     # переключаемся на совместимую fallback-модель, чтобы избежать пустых ответов.
     OPENAI_FALLBACK_CHAT_MODEL: str = "gpt-4o-mini"

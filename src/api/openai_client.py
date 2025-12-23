@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Iterable
 
 from openai import AsyncOpenAI, OpenAIError
@@ -11,6 +13,40 @@ from src.api.tokens_stats import TokensUsage, calculate_cost
 from src.api.openai_pricing import get_effective_pricing
 
 logger = logging.getLogger(__name__)
+
+
+def _write_boot_debug(title: str, body: str) -> None:
+    """
+    Пишет подробный лог в other/boot_debug.log без усечений (только в DEBUG_MODE).
+    """
+    if not getattr(settings, "DEBUG_MODE", False):
+        return
+    try:
+        base_dir = Path(__file__).resolve().parents[2]
+        log_path = base_dir / "other" / "boot_debug.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ограничиваем размер debug-лога, чтобы не разрастался бесконечно.
+        # По требованиям проекта: общий размер логов не должен превышать ~100 МБ, старое можно удалять.
+        max_bytes = 100 * 1024 * 1024
+        try:
+            if log_path.exists() and log_path.stat().st_size > max_bytes:
+                rotated = log_path.with_suffix(".log.1")
+                # Удаляем более старую ротацию (держим максимум 2 файла: текущий и .1)
+                if rotated.exists():
+                    rotated.unlink(missing_ok=True)
+                log_path.rename(rotated)
+        except Exception:
+            # Если ротация не удалась — лучше продолжить, чем падать
+            pass
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.now().isoformat()}] {title}\n")
+            f.write(body)
+            if not body.endswith("\n"):
+                f.write("\n")
+            f.write("-" * 80 + "\n")
+    except Exception:
+        # Не падаем из-за проблем с логом
+        pass
 
 
 class OpenAIClient:
@@ -34,7 +70,8 @@ class OpenAIClient:
 - Пиши ТОЛЬКО на русском. Никаких английских слов и китайских иероглифов.
 - Не выдумывай характеристики. Используй только входные данные.
 - Без «воды» и продающих формулировок.
-- Нельзя указывать пол/гендер и возраст (даже если они есть во входных данных).
+- Нельзя указывать конкретный пол/гендер (мужской, женский, для мужчин, для женщин и т.п.), даже если они есть во входных данных. ИСКЛЮЧЕНИЕ: можно указывать "для детей", "детское" и т.п., если это указано в оригинальном описании товара.
+- Запрещено добавлять гендерные/возрастные формулировки в любые поля, особенно в "Цвета" и "Размеры". Нельзя: «для мальчиков», «для девочек», «мужской/женский», «унисекс». Если такие фразы встречаются во входе — УДАЛИ их.
 - Не упоминай артикулы, SKU, ID, коды.
 - additional_info всегда {}.
 
@@ -70,27 +107,36 @@ class OpenAIClient:
 - Пиши ТОЛЬКО на русском. Никаких английских слов и китайских иероглифов.
 - НИЧЕГО не выдумывай. Каждая фраза должна опираться на входные данные.
 - Убери «воду» и общие слова (модульный/унифицированный/предусматривает/конструкция позволяет и т.п.), если это прямо не подтверждено данными.
-- Нельзя указывать пол/гендер и возраст (даже если они есть во входных данных).
+- Запрещён канцелярит/казённые формулировки. НЕ используй фразы (или их вариации): «формат исполнения», «представлен вариантами», «данный товар», «имеет место», «осуществляется», «в рамках», «выполнен в формате», «предусматривает», «как по отдельности», «реализуется отдельно».
+- Нельзя указывать конкретный пол/гендер (мужской, женский, для мужчин, для женщин и т.п.), даже если они есть во входных данных. ИСКЛЮЧЕНИЕ: можно указывать "для детей", "детское" и т.п., если это указано в оригинальном описании товара.
 - Не упоминай артикулы, SKU, ID, коды.
 - Не добавляй поля со значениями «прочее/другое/other/其他/не указан/нет данных» — такие поля нужно ПРОПУСТИТЬ.
+- КРИТИЧЕСКИ: если материал/состав неопределённый или слишком общий, поле "Состав"/"Материал" НЕЛЬЗЯ добавлять. Запрещены значения и формулировки: «ткань», «материал», «текстиль», «другая ткань», «другие ткани», «прочая ткань», «иная ткань», «другие материалы», «прочие материалы», «смесь материалов», «неизвестно», «не указан(о)».
 - Не выводи «Сертификаты» (и любые поля про сертификаты/3C/CQC), если значение не конкретное.
 - Не добавляй «Диапазон цен» и «Варианты комплектов» как характеристики: цены и варианты будут оформлены вне JSON в готовом посте.
 - Не добавляй «Гарантия»/«Срок службы» и любые гарантийные условия: это не выводим в постах.
 - Не добавляй «Источник»/«Платформа»/«Маркетплейс»/«Ссылка»: это не выводим в постах.
+- Если переданы price_entries или translated_sku_prices (режим цен advanced) — это уже готовые позиции с ценами. Не придумывай новые, не суммаризируй их и не вставляй цены в description/main_characteristics. Эти цены будут показаны системой отдельно; используй их только как контекст для понимания ассортимента.
+- Запрещено использовать фразы «в ассортименте», «в ассортименте: …», «в наличии в ассортименте» и любые вариации. В тексте и характеристиках такие пометки не нужны.
 - В description НЕЛЬЗЯ указывать любые измеримые конкретики (цена, объём, размеры, вес, количество элементов/предметов, диапазоны). Это должно быть в main_characteristics или будет добавлено системой ниже.
 - В description НЕ пиши цифры, если это не часть официального названия модели/серии (и то по возможности избегай).
 - Не добавляй характеристику «Упаковка», если это обычная товарная упаковка (коробка/пакет/картон). Упаковку указывай только если она реально отличает товар (например: подарочная коробка-матрёшка, футляр, кейс, тканевый мешок с вышивкой).
 - Запрещены «рассуждения» и классификации: не пиши фразы вида «относится к категории…», «является сувениром», «подходит для близких/родных/подарка» и т.п., даже если во входных данных есть поля про категории/адресатов.
 - Не делай вывод «туристический сувенир»/«сувенирный» без прямого подтверждения в названии товара.
+- КРИТИЧЕСКИ ВАЖНО: НИКОГДА не указывай назначение товара, варианты использования и условия применения. Запрещены фразы вида: «подходит для…», «для домашнего использования», «для холодной погоды», «для…», «используется для…», «предназначен для…», «подходит для…», «кому подходит», «как использовать» и т.п. Описывай товар таким, какой он есть (материалы, конструкция, свойства), БЕЗ указания для чего, кому и как его использовать. Пользователь сам решает, как использовать товар.
 - Если есть характеристика «Цвета», перечисляй ТОЛЬКО реальные цвета/цветовые сочетания/принты. Игнорируй значения, которые выглядят как название объекта/персонажа/серии (например «корейская кукла»).
+- В «Цвета» НЕЛЬЗЯ добавлять тип товара: нельзя «верблюжий пиджак/чёрные брюки». Цвет = только цвет (например «верблюжий», «чёрный»).
+- Если размеры приходят в виде кодов (например u?k4, uk?10) — нормализуй их в «UK4, UK6, …» и если их много — укажи диапазон «UK4-UK12».
 - КРИТИЧЕСКИ: в ответе не должно быть китайских иероглифов. Если во входных значениях есть китайский текст — переведи на русский или удали поле целиком.
 - Запрещено указывать дату/время изготовления/производства/партию/сроки (например «произведён в ноябре», «дата производства», «2024-11»). Если во входных данных есть такие фрагменты — игнорируй их.
+- Запрещено указывать сезоны и времена года (весна, лето, осень, зима, осенний, зимний и т.п.), даже если это указано во входных данных. Не пиши фразы вида «сезонность осень», «для осени», «осенняя коллекция» и т.п.
+- Запрещено указывать формат выпуска, заявления производителя, маркетинговые формулировки (например «не сетевой формат», «заявлен как…», «выпуск заявлен как…» и т.п.). Такая информация не относится к описанию товара и не должна упоминаться.
 
 Формат ответа:
 Верни ТОЛЬКО JSON (без markdown) со структурой:
 {
   "title": "до 60 символов, БЕЗ перечислений (без двоеточий и списков)",
-  "description": "2–4 коротких предложения (до 640 символов суммарно), сухо и по делу. Добавь 3–5 КОНКРЕТНЫХ фактов из входных данных.",
+  "description": "2–4 коротких предложения (до 640 символов суммарно), сухо и по делу. Добавь 3–5 КОНКРЕТНЫХ фактов из входных данных. Описывай товар таким, какой он есть (материалы, конструкция, свойства), БЕЗ указания назначения, вариантов использования и условий применения.",
   "main_characteristics": { "Название": "значение/список" },
   "additional_info": {},
   "hashtags": ["2-3шт, одно слово, без # и пробелов"],
@@ -109,6 +155,7 @@ class OpenAIClient:
 - Никаких других полей (запрещены "Стиль", "Длина", "Назначение" и т.п.).
 - Если в размерах указан ТОЛЬКО "универсальный/one size/均码/единый размер" — поле "Размеры" НЕ добавляй.
 - Если размеры смешанные (например, "универсальный/42-48") — убери "универсальный" и оставь только "42-48".
+- КРИТИЧЕСКИ ВАЖНО: Если есть несколько размеров (например, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180), ВСЕГДА указывай диапазон (например, "80-180"). НЕ перечисляй размеры списком через запятую или маркерами. Если размеры идут подряд — всегда используй формат "минимум-максимум".
 - В description НЕ упоминай состав/материал, цвета и размеры (они только в характеристиках).
 
 Правило про цвета:
@@ -136,10 +183,11 @@ class OpenAIClient:
 {product_data}
 """.strip()
 
-    # Константы для Responses API (отключено, используется только Chat Completions)
-    RESPONSES_PREFIXES = ("gpt-5",)  # Не используется - Responses API отключён
-    RESPONSES_JSON_TOKENS = 4500  # Не используется
-    RESPONSES_TRANSLATE_TOKENS = 500  # Используется как max_tokens для переводов
+    # Константы для Responses API
+    # Responses API используется для всех моделей OpenAI (gpt-4 и gpt-5) согласно документации
+    GPT5_PREFIXES = ("gpt-5", "o3", "o4")  # Модели, поддерживающие reasoning
+    RESPONSES_JSON_TOKENS = 4500  # Лимит токенов для JSON-ответов
+    RESPONSES_TRANSLATE_TOKENS = 500  # Лимит токенов для переводов
 
     def __init__(self, model_name: str | None = None):
         if not settings.OPENAI_API_KEY:
@@ -150,14 +198,25 @@ class OpenAIClient:
         source_model = model_name or settings.OPENAI_MODEL or "gpt-4o-mini"
         model_raw = source_model.strip()
         self.model = model_raw or "gpt-4o-mini"
-        # Отключено использование Responses API - всегда используем Chat Completions API
-        # Responses API слишком медленный из-за reasoning-запросов
-        self.use_responses_api = False
+        # Responses API используется для всех моделей OpenAI согласно документации
+        # Если отключён, используется устаревший Chat Completions API
+        self.use_responses_api = getattr(settings, "OPENAI_USE_RESPONSES_API", True)
+        
+        # Уровень рассуждений для gpt-5 моделей
+        # Автоматически определяется поддерживаемые значения для конкретной модели
+        reasoning_effort_raw = (getattr(settings, "OPENAI_REASONING_EFFORT", "") or "").strip()
+        if reasoning_effort_raw:
+            # Нормализуем значение для конкретной модели
+            self.reasoning_effort = self._normalize_reasoning_effort(self.model, reasoning_effort_raw)
+        else:
+            # Используем значение по умолчанию для модели
+            _, default_value = self._get_supported_reasoning_effort_values(self.model)
+            self.reasoning_effort = default_value
 
-        # ВАЖНО: модели семейства gpt-5 корректно работают через Responses API.
-        # Поскольку в проекте Responses API отключён, делаем безопасный fallback на совместимую модель
+        # ВАЖНО: модели семейства gpt-5 требуют Responses API.
+        # Если Responses API отключён, делаем безопасный fallback на совместимую модель
         # для Chat Completions, чтобы избежать «пустых» ответов (content=None).
-        if self._requires_responses_api(self.model) and not self.use_responses_api:
+        if self._is_gpt5_model(self.model) and not self.use_responses_api:
             fallback = (getattr(settings, "OPENAI_FALLBACK_CHAT_MODEL", "") or "gpt-4o-mini").strip() or "gpt-4o-mini"
             logger.warning(
                 "Выбрана модель OpenAI '%s' (семейство gpt-5), но Responses API отключён. "
@@ -179,15 +238,95 @@ class OpenAIClient:
             base_url=base_url,
             default_headers=extra_headers or None,
         )
-        # Для моделей gpt-5 не поддерживается temperature, используется max_completion_tokens вместо max_tokens
-        is_gpt5 = self._requires_responses_api(self.model)
-        self.supports_temperature = not is_gpt5
-        self.supports_max_tokens = not is_gpt5  # Для gpt-5 используется max_completion_tokens
 
     @classmethod
-    def _requires_responses_api(cls, model_name: str) -> bool:
+    def _is_gpt5_model(cls, model_name: str) -> bool:
+        """
+        Проверяет, является ли модель семейства gpt-5 (поддерживает reasoning).
+        """
         normalized = (model_name or "").strip().lower()
-        return any(normalized.startswith(prefix) for prefix in cls.RESPONSES_PREFIXES)
+        return any(normalized.startswith(prefix) for prefix in cls.GPT5_PREFIXES)
+    
+    @classmethod
+    def _get_supported_reasoning_effort_values(cls, model_name: str) -> tuple[list[str], str]:
+        """
+        Возвращает поддерживаемые значения reasoning.effort для конкретной модели и значение по умолчанию.
+        
+        Согласно документации OpenAI:
+        - gpt-5, gpt-5-mini, gpt-5-nano: minimal, low, medium, high (по умолчанию: minimal)
+        - gpt-5.1, gpt-5.1-mini, gpt-5.1-nano: none, low, medium, high (по умолчанию: low)
+        - gpt-5.2 и другие новые версии: могут иметь свои значения
+        
+        Returns:
+            tuple[list[str], str]: (список поддерживаемых значений, значение по умолчанию)
+        """
+        normalized = (model_name or "").strip().lower()
+        
+        # Модели gpt-5.1 и выше используют none вместо minimal
+        if normalized.startswith("gpt-5.1") or normalized.startswith("gpt-5.2"):
+            return (["none", "low", "medium", "high"], "low")
+        
+        # Модели gpt-5 (без версии) используют minimal
+        if normalized.startswith("gpt-5"):
+            return (["minimal", "low", "medium", "high"], "minimal")
+        
+        # Для остальных gpt-5 моделей (o3, o4 и т.д.) используем значения для gpt-5.1
+        if normalized.startswith("o3") or normalized.startswith("o4"):
+            return (["none", "low", "medium", "high"], "low")
+        
+        # По умолчанию (не должно использоваться для не-gpt5 моделей)
+        return (["low", "medium", "high"], "low")
+    
+    def _normalize_reasoning_effort(self, model_name: str, user_value: str) -> str:
+        """
+        Нормализует значение reasoning.effort для конкретной модели.
+        Автоматически конвертирует значения между разными версиями моделей.
+        
+        Args:
+            model_name: Название модели
+            user_value: Значение из настроек пользователя
+        
+        Returns:
+            str: Нормализованное значение, поддерживаемое моделью
+        """
+        supported_values, default_value = self._get_supported_reasoning_effort_values(model_name)
+        user_value_lower = (user_value or "").strip().lower()
+        
+        # Если значение уже поддерживается, возвращаем его
+        if user_value_lower in supported_values:
+            return user_value_lower
+        
+        # Автоматическая конвертация между версиями
+        conversion_map = {
+            "minimal": "low",  # minimal -> low для моделей 5.1+
+            "none": "minimal",  # none -> minimal для моделей 5.0
+            "low": "low",      # low поддерживается везде
+            "medium": "medium",  # medium поддерживается везде
+            "high": "high",    # high поддерживается везде
+        }
+        
+        # Пытаемся конвертировать
+        if user_value_lower in conversion_map:
+            converted = conversion_map[user_value_lower]
+            if converted in supported_values:
+                logger.info(
+                    "Конвертировано значение reasoning.effort: '%s' -> '%s' для модели '%s'",
+                    user_value_lower,
+                    converted,
+                    model_name,
+                )
+                return converted
+        
+        # Если конвертация не удалась, используем значение по умолчанию
+        logger.warning(
+            "Значение reasoning.effort '%s' не поддерживается моделью '%s'. "
+            "Поддерживаемые значения: %s. Используется значение по умолчанию: '%s'.",
+            user_value_lower,
+            model_name,
+            supported_values,
+            default_value,
+        )
+        return default_value
 
     async def generate_post_content(
         self, product_data: dict
@@ -201,6 +340,24 @@ class OpenAIClient:
         """
         # Важно: используем компактный JSON, чтобы не тратить токены на пробелы/переносы строк
         product_info_str = json.dumps(product_data, ensure_ascii=False, separators=(",", ":"))
+        
+        # Логирование для анализа количества токенов (только в DEBUG режиме)
+        if settings.DEBUG_MODE:
+            try:
+                import tiktoken
+                encoding = tiktoken.encoding_for_model(self.model if self.model.startswith("gpt-") else "gpt-4o")
+                prompt_tokens = len(encoding.encode(prompt))
+                data_tokens = len(encoding.encode(product_info_str))
+                logger.info(
+                    f"[OpenAI] Размер промпта: ~{prompt_tokens} токенов, размер данных: ~{data_tokens} токенов, "
+                    f"размер JSON данных: {len(product_info_str)} символов"
+                )
+            except ImportError:
+                # Если tiktoken не установлен, просто пропускаем логирование
+                pass
+            except Exception:
+                # Другие ошибки тоже игнорируем, чтобы не ломать основной функционал
+                pass
 
         # Вариант промпта выбирается ТОЛЬКО для OpenAI через .env,
         # чтобы можно было безопасно сравнивать качество/стоимость и быстро откатываться.
@@ -216,73 +373,155 @@ class OpenAIClient:
         if settings.DEBUG_MODE:
             print(f"[OpenAI] Отправляем промпт ({self.model}):\n{prompt[:500]}...")
 
-        try:
-            # Лимит выходных токенов задаём через настройки, чтобы контролировать стоимость.
-            max_out = int(getattr(settings, "OPENAI_MAX_OUTPUT_TOKENS", 2400) or 2400)
-            result = await self.generate_json_response(
-                system_prompt=self.SYSTEM_PROMPT,
-                user_prompt=prompt,
-                max_output_tokens=max_out,
-            )
-            # Новая сигнатура: возвращает кортеж (text, tokens_usage)
-            if isinstance(result, tuple):
-                llm_response, tokens_usage = result
-            else:
-                # Обратная совместимость
-                llm_response = result
-                tokens_usage = TokensUsage()
-        except OpenAIError as exc:
-            raise RuntimeError(f"OpenAI вернул ошибку: {exc}") from exc
+        def _strip_fences(text: str) -> str:
+            cleaned = (text or "").strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            if cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            return cleaned.strip()
 
-        if settings.DEBUG_MODE:
-            print(f"[OpenAI] Получен ответ:\n{llm_response}")
-            if tokens_usage.total_tokens > 0:
-                print(f"[OpenAI] Использовано токенов: {tokens_usage.prompt_tokens} входных, {tokens_usage.completion_tokens} выходных, стоимость: ${tokens_usage.total_cost:.6f}")
+        def _extract_first_json_object(text: str) -> str | None:
+            """
+            Пытается извлечь первый валидный JSON-объект из текста по балансу фигурных скобок.
+            Это страховка на случай, если модель вернула лишний текст или оборвала хвост.
+            """
+            s = (text or "")
+            start = s.find("{")
+            if start < 0:
+                return None
+            depth = 0
+            in_str = False
+            escape = False
+            for i in range(start, len(s)):
+                ch = s[i]
+                if in_str:
+                    if escape:
+                        escape = False
+                        continue
+                    if ch == "\\":
+                        escape = True
+                        continue
+                    if ch == '"':
+                        in_str = False
+                    continue
+                else:
+                    if ch == '"':
+                        in_str = True
+                        continue
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            return s[start : i + 1]
+            return None
 
-        try:
-            cleaned_response = llm_response.strip()
-            if cleaned_response.startswith("```json"):
-                cleaned_response = cleaned_response[7:]
-            if cleaned_response.startswith("```"):
-                cleaned_response = cleaned_response[3:]
-            if cleaned_response.endswith("```"):
-                cleaned_response = cleaned_response[:-3]
-            cleaned_response = cleaned_response.strip()
+        # Ретраим, если модель обрезала JSON (часто случается при max_output_tokens близко к лимиту)
+        max_out = int(getattr(settings, "OPENAI_MAX_OUTPUT_TOKENS", 2400) or 2400)
+        max_cap = 6000
+        last_exc: Exception | None = None
+        last_response_text: str = ""
+        last_tokens_usage = TokensUsage()
 
-            parsed_content = json.loads(cleaned_response)
-            # Возвращаем кортеж для совместимости с новой сигнатурой
-            return parsed_content, tokens_usage
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"OpenAI вернул невалидный JSON: {exc}") from exc
+        for attempt in range(3):
+            try:
+                result = await self.generate_json_response(
+                    system_prompt=self.SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    max_output_tokens=max_out,
+                    temperature=0.1,  # Низкая температура для детерминированных ответов
+                )
+                if isinstance(result, tuple):
+                    llm_response, tokens_usage = result
+                else:
+                    llm_response = result
+                    tokens_usage = TokensUsage()
+
+                last_response_text = llm_response or ""
+                last_tokens_usage = tokens_usage
+
+                if settings.DEBUG_MODE:
+                    print(f"[OpenAI] Получен ответ:\n{llm_response}")
+                    if tokens_usage.total_tokens > 0:
+                        print(
+                            f"[OpenAI] Использовано токенов: {tokens_usage.prompt_tokens} входных, "
+                            f"{tokens_usage.completion_tokens} выходных, стоимость: ${tokens_usage.total_cost:.6f}"
+                        )
+
+                cleaned_response = _strip_fences(llm_response)
+                try:
+                    parsed_content = json.loads(cleaned_response)
+                    return parsed_content, tokens_usage
+                except json.JSONDecodeError as exc:
+                    # 1) Пробуем вытащить первый JSON-объект (если есть мусор/лишний текст)
+                    extracted = _extract_first_json_object(cleaned_response)
+                    if extracted:
+                        try:
+                            parsed_content = json.loads(extracted)
+                            return parsed_content, tokens_usage
+                        except Exception:
+                            pass
+
+                    last_exc = exc
+                    # 2) Если похоже на обрезку по лимиту — увеличим max_out и повторим
+                    if max_out < max_cap:
+                        # Делаем мягкое увеличение: x1.4 + 400
+                        max_out = min(max_cap, int(max_out * 1.4) + 400)
+                        continue
+                    break
+            except OpenAIError as exc:
+                raise RuntimeError(f"OpenAI вернул ошибку: {exc}") from exc
+            except Exception as exc:
+                last_exc = exc
+                break
+
+        # Если дошли сюда — не смогли получить валидный JSON
+        sample = _strip_fences(last_response_text)[:1500]
+        raise ValueError(f"OpenAI вернул невалидный JSON: {last_exc}. Response sample:\n{sample}") from last_exc
 
     async def generate_json_response(
         self,
         system_prompt: str,
         user_prompt: str,
-        max_output_tokens: int | None = None
+        max_output_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> str | tuple[str, TokensUsage]:
         """
         Универсальный метод получения структурированного ответа (JSON) от модели.
-        Всегда использует Chat Completions API для быстрой работы.
+        Использует Responses API для всех моделей согласно документации OpenAI.
         
         Returns:
             str: Текст ответа (старая сигнатура для обратной совместимости)
             tuple[str, TokensUsage]: Текст ответа и статистика токенов (новая сигнатура)
         """
-        # Всегда используем Chat Completions API (быстрее, чем Responses API)
-        result = await self._call_chat_completions(
-            user_prompt,
-            system_prompt=system_prompt,
-            expect_json=True,
-            max_tokens=max_output_tokens
-        )
-        
-        # Новая сигнатура: возвращает кортеж (text, tokens_usage)
-        if isinstance(result, tuple):
-            text, tokens_usage = result
+        # Responses API используется для всех моделей согласно документации
+        if self.use_responses_api:
+            text, tokens_usage = await self._call_responses_api(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                expect_json=True,
+            )
         else:
-            text = result
-            tokens_usage = TokensUsage()
+            # Fallback на Chat Completions API (устаревший, не рекомендуется)
+            result = await self._call_chat_completions(
+                user_prompt,
+                system_prompt=system_prompt,
+                expect_json=True,
+                max_tokens=max_output_tokens,
+                temperature=temperature,
+            )
+            
+            # Новая сигнатура: возвращает кортеж (text, tokens_usage)
+            if isinstance(result, tuple):
+                text, tokens_usage = result
+            else:
+                text = result
+                tokens_usage = TokensUsage()
         
         if not text:
             raise ValueError("OpenAI вернул пустой ответ.")
@@ -314,7 +553,7 @@ class OpenAIClient:
             {"role": "user", "content": prompt},
         ]
         model_name = model_override or self.model
-        is_gpt5_model = self._requires_responses_api(model_name)  # Проверяем, является ли модель gpt-5
+        is_gpt5_model = self._is_gpt5_model(model_name)  # Проверяем, является ли модель gpt-5
         
         kwargs = {
             "model": model_name,
@@ -421,50 +660,204 @@ class OpenAIClient:
         self,
         prompt: str,
         system_prompt: str | None = None,
-        max_output_tokens: int | None = None
-    ) -> str:
+        max_output_tokens: int | None = None,
+        temperature: float | None = None,
+        expect_json: bool = True,
+    ) -> tuple[str, TokensUsage]:
         """
-        Вызов Responses API (семейство gpt-5.x) с автоувеличением лимита токенов.
+        Вызов Responses API для всех моделей OpenAI (gpt-4 и gpt-5).
+        Согласно документации OpenAI, Responses API - унифицированный интерфейс для всех моделей.
         
-        ВНИМАНИЕ: Этот метод отключён и не используется.
-        Responses API слишком медленный из-за reasoning-запросов.
-        Всегда используется Chat Completions API вместо этого.
+        Args:
+            prompt: Пользовательский промпт
+            system_prompt: Системный промпт (инструкции)
+            max_output_tokens: Максимальное количество выходных токенов
+            temperature: Температура выборки (0-2, поддерживается только для gpt-4 моделей, для gpt-5 игнорируется)
+            expect_json: Ожидать JSON-ответ (использует text.format.type: "json_object")
+        
+        Returns:
+            tuple[str, TokensUsage]: Текст ответа и статистика токенов
         """
         max_tokens = max_output_tokens or self.RESPONSES_JSON_TOKENS
         max_cap = 6000
         last_dump = ""
+        
+        # Формируем input для Responses API
+        # Согласно документации, можно использовать instructions для system prompt
+        # и input для user prompt (может быть строкой или массивом input items)
+        instructions_text = system_prompt or self.SYSTEM_PROMPT
+        input_text = prompt  # Может быть строкой или массивом input items
+        
+        # Параметры запроса
+        kwargs: dict = {
+            "model": self.model,
+            "instructions": instructions_text,  # System prompt через instructions
+            "input": input_text,  # User prompt через input (строка)
+        }
+        
+        # max_output_tokens поддерживается для всех моделей
+        if max_tokens:
+            kwargs["max_output_tokens"] = max_tokens
+        
+        # reasoning только для gpt-5 моделей
+        is_gpt5 = self._is_gpt5_model(self.model)
+        if is_gpt5:
+            kwargs["reasoning"] = {"effort": self.reasoning_effort}
+            # Для gpt-5 моделей temperature НЕ поддерживается
+        else:
+            # temperature поддерживается только для gpt-4 моделей
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            else:
+                # По умолчанию используем низкую температуру для детерминированных ответов
+                kwargs["temperature"] = 0.1
+        
+        # JSON формат ответа (text.format.type: "json_object")
+        if expect_json:
+            kwargs["text"] = {"format": {"type": "json_object"}}
+
+        # Детальный лог запроса в DEBUG (без ключей, с усечёнными промптами)
+        if settings.DEBUG_MODE:
+            try:
+                preview_instructions = (instructions_text or "")[:1200]
+                preview_input = (input_text or "")[:1200]
+                logger.debug(
+                    "[OpenAI][request] model=%s | reasoning=%s | max_out=%s | temperature=%s\n--- instructions ---\n%s\n--- input ---\n%s\n",
+                    self.model,
+                    (kwargs.get("reasoning", {}).get("effort") if is_gpt5 else "-"),
+                    kwargs.get("max_output_tokens"),
+                    kwargs.get("temperature"),
+                    preview_instructions,
+                    preview_input,
+                )
+                _write_boot_debug(
+                    "OpenAI request (responses)",
+                    f"model={self.model}\nreasoning={kwargs.get('reasoning')}\nmax_out={kwargs.get('max_output_tokens')}\n"
+                    f"temperature={kwargs.get('temperature')}\n\n--- instructions ---\n{instructions_text}\n\n--- input ---\n{input_text}\n",
+                )
+            except Exception:
+                pass
+
+        # Логируем ключевые параметры вызова LLM (без промптов и данных)
+        try:
+            logger.info(
+                "OpenAI call: model=%s, api=responses, prompt_variant=%s, reasoning=%s, temperature=%s, max_output_tokens=%s",
+                self.model,
+                (getattr(settings, "OPENAI_PROMPT_VARIANT", "compact_v2") or "compact_v2"),
+                (kwargs.get("reasoning", {}).get("effort") if is_gpt5 else "-"),
+                kwargs.get("temperature"),
+                kwargs.get("max_output_tokens"),
+            )
+        except Exception:
+            pass
 
         for attempt in range(3):
-            response = await self.client.responses.create(
-                model=self.model,
-                input=self._build_responses_input(system_prompt or self.SYSTEM_PROMPT, prompt),
-                max_output_tokens=max_tokens,
-                reasoning={"effort": "medium"},
-            )
-            text = self._extract_text_from_response(response)
-            if text:
-                return text
-
             try:
-                last_dump = json.dumps(response.model_dump(), ensure_ascii=False, indent=2)[:1500]
+                response = await self.client.responses.create(**kwargs)
+                
+                # Извлекаем текст из ответа
+                text = self._extract_text_from_response(response)
+                if text:
+                    if settings.DEBUG_MODE:
+                        try:
+                            logger.debug(
+                                "[OpenAI][response] model=%s | len=%s | preview:\n%s",
+                                self.model,
+                                len(text),
+                                text[:1200],
+                            )
+                            _write_boot_debug(
+                                "OpenAI response (responses)",
+                                f"model={self.model}\nlen={len(text)}\n\n--- full text ---\n{text}\n",
+                            )
+                        except Exception:
+                            pass
+                    # Извлекаем статистику токенов из response.usage
+                    tokens_usage = self._extract_tokens_usage_from_response(response)
+                    return text, tokens_usage
+
+                # Если текст пустой, проверяем причину
+                try:
+                    last_dump = json.dumps(response.model_dump(), ensure_ascii=False, indent=2)[:1500]
+                except Exception:
+                    last_dump = repr(response)
+
+                details = getattr(response, "incomplete_details", None) or {}
+                reason = getattr(details, "reason", None) or details.get("reason")
+
+                # Автоувеличение лимита токенов при необходимости
+                if reason == "max_output_tokens" and max_tokens < max_cap:
+                    max_tokens = min(max_cap, int(max_tokens * 1.8))
+                    kwargs["max_output_tokens"] = max_tokens
+                    await asyncio.sleep(0.2)
+                    continue
+
+                if attempt < 2:
+                    await asyncio.sleep(0.2)
             except Exception:
-                last_dump = repr(response)
-
-            details = getattr(response, "incomplete_details", None) or {}
-            reason = getattr(details, "reason", None) or details.get("reason")
-
-            if reason == "max_output_tokens" and max_tokens < max_cap:
-                max_tokens = min(max_cap, int(max_tokens * 1.8))
-                await asyncio.sleep(0.2)
-                continue
-
-            if attempt < 2:
-                await asyncio.sleep(0.2)
+                if attempt < 2:
+                    await asyncio.sleep(0.2)
+                    continue
+                raise
 
         raise ValueError(
             "OpenAI вернул пустой ответ для Responses API. Raw fragment:\n"
             f"{last_dump}"
         )
+    
+    def _extract_tokens_usage_from_response(self, response) -> TokensUsage:
+        """
+        Извлекает статистику токенов из ответа Responses API.
+        
+        Согласно документации, usage содержит:
+        - input_tokens: количество входных токенов
+        - output_tokens: количество выходных токенов
+        - output_tokens_details.reasoning_tokens: токены рассуждений (для gpt-5)
+        - total_tokens: общее количество токенов
+        """
+        tokens_usage = TokensUsage()
+        
+        try:
+            usage = getattr(response, "usage", None)
+            if not usage:
+                return tokens_usage
+            
+            # Извлекаем токены
+            input_tokens = getattr(usage, "input_tokens", 0) or 0
+            output_tokens = getattr(usage, "output_tokens", 0) or 0
+            total_tokens = getattr(usage, "total_tokens", 0) or 0
+            
+            # Если total_tokens не указан, вычисляем
+            if not total_tokens:
+                total_tokens = input_tokens + output_tokens
+            
+            # Получаем цены токенов (автоматически из openai_pricing.py, если не указаны в .env)
+            prompt_price, completion_price = get_effective_pricing(
+                model_name=self.model,
+                prompt_price_override=getattr(settings, "OPENAI_PROMPT_PRICE_PER_1M", 0.0),
+                completion_price_override=getattr(settings, "OPENAI_COMPLETION_PRICE_PER_1M", 0.0),
+            )
+            
+            # Вычисляем стоимость
+            if prompt_price > 0 or completion_price > 0:
+                tokens_usage = calculate_cost(
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    prompt_price_per_1m=prompt_price if prompt_price > 0 else 0.0,
+                    completion_price_per_1m=completion_price if completion_price > 0 else 0.0,
+                )
+            else:
+                # Сохраняем только количество токенов без стоимости
+                tokens_usage = TokensUsage(
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    total_tokens=total_tokens,
+                )
+        except (AttributeError, TypeError) as exc:
+            if settings.DEBUG_MODE:
+                logger.warning(f"[OpenAI] Ошибка при извлечении статистики токенов: {exc}")
+        
+        return tokens_usage
 
     async def translate_text(
         self, text: str, target_language: str = "ru"
@@ -485,23 +878,30 @@ class OpenAIClient:
             f"{text}"
         )
 
-        # Всегда используем Chat Completions API для перевода (быстрее и надёжнее)
-        # Для моделей gpt-5 temperature не передаётся (не поддерживается)
-        result = await self._call_chat_completions(
-            user_prompt,
-            system_prompt="Ты профессиональный переводчик.",
-            expect_json=False,
-            max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
-            temperature=0.1 if not self._requires_responses_api(self.model) else None,
-        )
-        
-        # Новая сигнатура: возвращает кортеж (text, tokens_usage)
-        if isinstance(result, tuple):
-            translated, tokens_usage = result
+        # Используем Responses API для переводов (если включено)
+        if self.use_responses_api:
+            translated, tokens_usage = await self._call_responses_api(
+                prompt=user_prompt,
+                system_prompt="Ты профессиональный переводчик.",
+                max_output_tokens=self.RESPONSES_TRANSLATE_TOKENS,
+                temperature=0.1,
+                expect_json=False,
+            )
         else:
-            translated = result
-            tokens_usage = TokensUsage()
-
+            # Fallback на Chat Completions API (устаревший)
+            result = await self._call_chat_completions(
+                user_prompt,
+                system_prompt="Ты профессиональный переводчик.",
+                expect_json=False,
+                max_tokens=self.RESPONSES_TRANSLATE_TOKENS,
+                temperature=0.1,
+            )
+            # Новая сигнатура: возвращает кортеж (text, tokens_usage)
+            if isinstance(result, tuple):
+                translated, tokens_usage = result
+            else:
+                translated = result
+                tokens_usage = TokensUsage()
         return (translated.strip() or text), tokens_usage
 
     @staticmethod
@@ -562,6 +962,10 @@ class OpenAIClient:
 
     @staticmethod
     def _build_responses_input(system_text: str, user_text: str) -> list[dict]:
+        """
+        Формирует input items для Responses API (альтернативный способ, если не используется instructions).
+        Согласно документации, input может быть строкой или массивом input items.
+        """
         return [
             {
                 "role": "system",
