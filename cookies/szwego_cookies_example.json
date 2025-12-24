@@ -1,0 +1,29 @@
+{
+  "cookies": [
+    {
+      "name": "JSESSIONID",
+      "value": "PASTE_VALUE_HERE",
+      "domain": ".szwego.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "token",
+      "value": "PASTE_VALUE_HERE",
+      "domain": ".szwego.com",
+      "path": "/",
+      "expires": 1893456000,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "user_agent": "PASTE_USER_AGENT_HERE",
+  "saved_at": "Imported from browser",
+  "url": "https://www.szwego.com"
+}
+
+

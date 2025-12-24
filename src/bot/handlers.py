@@ -58,6 +58,8 @@ def get_enabled_platforms() -> list[str]:
         enabled.append("1688")
     if getattr(settings, "ENABLE_PINDUODUO", False):
         enabled.append("Pinduoduo")
+    if getattr(settings, "ENABLE_SZWEGO", False):
+        enabled.append("Szwego")
     return enabled
 
 
@@ -66,7 +68,7 @@ def is_platform_enabled(platform: str) -> bool:
     Проверяет, включена ли платформа.
     
     Args:
-        platform: Название платформы (taobao/tmall/1688/pinduoduo)
+        platform: Название платформы (taobao/tmall/1688/pinduoduo/szwego)
         
     Returns:
         bool: True если платформа включена, False иначе
@@ -80,6 +82,8 @@ def is_platform_enabled(platform: str) -> bool:
         return getattr(settings, "ENABLE_1688", False)
     elif platform_lower == Platform.PINDUODUO:
         return getattr(settings, "ENABLE_PINDUODUO", False)
+    elif platform_lower == Platform.SZWEGO:
+        return getattr(settings, "ENABLE_SZWEGO", False)
     return False
 
 
@@ -414,6 +418,12 @@ def split_text_chunks(text: str, limit: int) -> list[str]:
     cleaned = text.strip()
     if not cleaned:
         return []
+
+    # ВАЖНО: если текст уже помещается в лимит — не “умничаем” и не режем вообще.
+    # Иначе короткие диагностические сообщения могут неожиданно распасться на 2–3 части
+    # (например по двоеточию или последнему пробелу), как это было с Szwego shop_detail подсказкой.
+    if len(cleaned) <= limit:
+        return [cleaned]
 
     chunks: list[str] = []
     idx = 0
@@ -2171,10 +2181,20 @@ async def access_edit_blacklist(message: Message, state: FSMContext) -> None:
     await message.answer(summary)
 
 
-@router.message(F.text.regexp(r"(https?://)?(www\.)?(m\.)?(e\.)?(detail\.tmall\.com|item\.taobao\.com|a\.m\.taobao\.com|market\.m\.taobao\.com|h5\.m\.taobao\.com|s\.click\.taobao\.com|uland\.taobao\.com|tb\.cn|detail\.m\.1688\.com|detail\.1688\.com|1688\.com|m\.1688\.com|winport\.m\.1688\.com|mobile\.yangkeduo\.com|yangkeduo\.com|pinduoduo\.com|pdd\.com)/.*"))
+@router.message(
+    F.text.regexp(
+        r"(https?://)?(www\.)?(m\.)?(e\.)?("
+        r"detail\.tmall\.com|item\.taobao\.com|a\.m\.taobao\.com|market\.m\.taobao\.com|h5\.m\.taobao\.com|"
+        r"s\.click\.taobao\.com|uland\.taobao\.com|tb\.cn|"
+        r"detail\.m\.1688\.com|detail\.1688\.com|1688\.com|m\.1688\.com|winport\.m\.1688\.com|"
+        r"mobile\.yangkeduo\.com|yangkeduo\.com|pinduoduo\.com|pdd\.com|"
+        r"([\w-]+\.)*szwego\.com|([\w-]+\.)*szwego\.app"
+        r")/.*"
+    )
+)
 async def handle_product_link(message: Message, state: FSMContext) -> None:
     """
-    Обработчик сообщений, содержащих ссылки на товары Taobao/Tmall/1688/Pinduoduo.
+    Обработчик сообщений, содержащих ссылки на товары Taobao/Tmall/1688/Pinduoduo/Szwego.
     Автоматически определяет платформу, извлекает информацию о товаре,
     генерирует пост и отправляет его пользователю.
     """

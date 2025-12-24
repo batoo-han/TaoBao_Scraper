@@ -169,6 +169,25 @@ class Settings(BaseSettings):
     ENABLE_TMALL: bool = False  # Включить поддержку Tmall
     ENABLE_1688: bool = False  # Включить поддержку 1688
     ENABLE_PINDUODUO: bool = False  # Включить поддержку Pinduoduo
+    ENABLE_SZWEGO: bool = False  # Включить поддержку Szwego
+
+    # Szwego (API)
+    # Важно: Szwego API работает только с валидными cookies + user-agent.
+    # Эти данные хранятся в JSON-файле (НЕ коммитить) и должны периодически обновляться вручную.
+    SZWEGO_BASE_URL: str = "https://www.szwego.com"
+    SZWEGO_COOKIES_FILE: str = "cookies/szwego_cookies.json"  # Путь к JSON с cookies+UA (см. cookies/szwego_cookies_example.json)
+    SZWEGO_TIMEOUT: float = 30.0  # Таймаут запросов к Szwego API (секунды)
+    SZWEGO_TRANS_LANG: str = "en"  # transLang для API (обычно "en" или "zh")
+    # “Запас” в секундах: считаем токен истёкшим немного заранее, чтобы не ловить граничные состояния
+    SZWEGO_TOKEN_EXPIRE_GRACE_SEC: int = 60
+
+    # Мониторинг токена Szwego (фоновые проверки и алерты админу)
+    SZWEGO_MONITOR_ENABLED: bool = True
+    SZWEGO_MONITOR_INTERVAL_SEC: int = 3600  # раз в час
+    SZWEGO_TOKEN_EXPIRY_WARN_SEC: int = 24 * 3600  # предупреждать за 24 часа до expires
+    SZWEGO_ALERT_MIN_INTERVAL_SEC: int = 6 * 3600  # не чаще 1 раза в 6 часов (анти-спам)
+    # Опционально: URL товара для “пинга” API, если хотите проверять не только expires, но и реальную авторизацию
+    SZWEGO_HEALTHCHECK_URL: str = ""
 
     # Настройки цен токенов OpenAI (в USD за 1 000 000 токенов)
     # Если не указаны, будут использоваться стандартные цены OpenAI по модели

@@ -22,6 +22,7 @@ class Platform:
     TMALL = "tmall"
     ALI1688 = "1688"
     PINDUODUO = "pinduoduo"
+    SZWEGO = "szwego"
     UNKNOWN = "unknown"
 
 
@@ -66,6 +67,14 @@ class URLParser:
         "pdd.com"
     ]
     
+    SZWEGO_DOMAINS = [
+        "szwego.com",
+        "szwego.app",
+        "clothes.szwego.app",
+        "bags.szwego.app",
+        "luxury.szwego.app"
+    ]
+    
     @staticmethod
     def detect_platform(url: str) -> str:
         """
@@ -104,6 +113,11 @@ class URLParser:
             for pdd_domain in URLParser.PINDUODUO_DOMAINS:
                 if pdd_domain in domain:
                     return Platform.PINDUODUO
+            
+            # Проверяем Szwego
+            for szwego_domain in URLParser.SZWEGO_DOMAINS:
+                if szwego_domain in domain:
+                    return Platform.SZWEGO
             
             return Platform.UNKNOWN
             
@@ -196,6 +210,51 @@ class URLParser:
             return None
     
     @staticmethod
+    def extract_szwego_id(url: str) -> Optional[str]:
+        """
+        Извлекает item_id из URL Szwego.
+        
+        Поддерживаемые форматы (предположительно):
+        - https://clothes.szwego.app/product/123456789
+        - https://bags.szwego.app/item?id=123456789
+        - https://szwego.com/product/123456789
+        
+        Args:
+            url: URL товара Szwego
+            
+        Returns:
+            Optional[str]: ID товара или None если не найден
+        """
+        try:
+            # Парсим URL
+            parsed = urlparse(url if url.startswith('http') else f'https://{url}')
+            
+            # Пытаемся найти в query параметрах
+            query_params = parse_qs(parsed.query)
+            
+            # Возможные названия параметра ID
+            possible_id_params = ['id', 'item_id', 'product_id', 'goods_id', 'itemId', 'productId']
+            
+            for param in possible_id_params:
+                if param in query_params:
+                    item_id = query_params[param][0]
+                    # Проверяем что это число или строка с цифрами
+                    if item_id.isdigit() or (isinstance(item_id, str) and any(c.isdigit() for c in item_id)):
+                        return item_id.strip()
+            
+            # Пытаемся найти ID в пути URL (например: /product/123456789 или /item/123456789)
+            path_parts = parsed.path.split('/')
+            for part in path_parts:
+                if part and (part.isdigit() or (len(part) >= 6 and any(c.isdigit() for c in part))):
+                    # Если часть пути похожа на ID (содержит цифры и достаточно длинная)
+                    return part.strip()
+            
+            return None
+            
+        except Exception:
+            return None
+    
+    @staticmethod
     def normalize_1688_url(url: str) -> Optional[str]:
         """
         Нормализует URL 1688 до формата: https://detail.1688.com/offer/{id}.html
@@ -232,8 +291,8 @@ class URLParser:
             
         Returns:
             Tuple[str, Optional[str]]: (platform, item_id)
-            - platform: название платформы (taobao/tmall/1688/pinduoduo/unknown)
-            - item_id: ID товара (для Pinduoduo и 1688), None для Taobao/Tmall
+            - platform: название платформы (taobao/tmall/1688/pinduoduo/szwego/unknown)
+            - item_id: ID товара (для Pinduoduo, 1688, Szwego), None для Taobao/Tmall
         """
         platform = URLParser.detect_platform(url)
         
@@ -245,6 +304,11 @@ class URLParser:
         # Для 1688 извлекаем ID для нормализации URL
         if platform == Platform.ALI1688:
             item_id = URLParser.extract_1688_id(url)
+            return platform, item_id
+        
+        # Для Szwego извлекаем ID (если есть в URL)
+        if platform == Platform.SZWEGO:
+            item_id = URLParser.extract_szwego_id(url)
             return platform, item_id
         
         # Для Taobao/Tmall ID не нужен (передаём весь URL в API)

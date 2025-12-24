@@ -132,6 +132,71 @@ class Scraper:
             api_response = await pdd.fetch_product(url)
             logger.info(f"Ответ от Pinduoduo скрейпера: code={api_response.get('code')}, msg={api_response.get('msg')}")
             api_response['_platform'] = Platform.PINDUODUO
+        elif platform == Platform.SZWEGO:
+            # Szwego: работаем через API (быстро, без браузера), используя заранее подготовленные cookies+UA.
+            # Важно: cookies будут периодически протухать и их нужно обновлять вручную на сервере.
+            logger.info("Обработка Szwego через API")
+            from src.api.szwego_api import SzwegoApiClient
+            szwego_client = SzwegoApiClient()
+            api_response = await szwego_client.fetch_product(url)
+            logger.info(
+                "Ответ от Szwego API: code=%s, msg=%s",
+                api_response.get("code"),
+                api_response.get("msg"),
+            )
+            api_response["_platform"] = Platform.SZWEGO
+
+            # ВАЖНО: если Szwego API вернул ошибку (например, URL не товарный / cookies протухли),
+            # не продолжаем пайплайн и не вызываем LLM — иначе получаем пустой пост и тратим токены.
+            try:
+                code = api_response.get("code")
+                has_data = isinstance(api_response.get("data"), dict) and bool(api_response.get("data"))
+                if code != 200 or not has_data:
+                    internal_msg = str(api_response.get("msg") or "").strip()
+                    internal_low = internal_msg.lower()
+
+                    # Для пользователя скрываем детали про cookies/token.
+                    user_friendly = "Szwego временно недоступен. Попробуйте отправить запрос позже."
+
+                    # 1) Если это похоже на проблему авторизации/токена — уведомляем админа (анти-спам внутри notify_admin_system)
+                    # 2) Если это просто “ссылка не товарная” — возвращаем диагностическое сообщение пользователю
+                    looks_like_auth_issue = bool(
+                        code in {401, 403} or any(
+                            k in internal_low
+                            for k in ["токен", "token", "cookie", "cookies", "авторизац", "session", "login", "unauthor"]
+                        )
+                    )
+
+                    if looks_like_auth_issue:
+                        try:
+                            import time as _time
+                            from src.bot import error_handler as error_handler_module
+                            from src.services.szwego_monitor import get_szwego_token_status
+
+                            st = get_szwego_token_status()
+                            await error_handler_module.notify_admin_system(
+                                text=(
+                                    "⚠️ <b>Szwego: запросы временно не работают</b>\n\n"
+                                    f"<b>Причина:</b> <code>{internal_msg[:400] or 'unknown'}</code>\n"
+                                    f"<b>Код:</b> <code>{code}</code>\n"
+                                    f"<b>До expires:</b> <code>{st.seconds_left}</code> сек\n"
+                                    f"<b>Файл cookies:</b> <code>{getattr(settings, 'SZWEGO_COOKIES_FILE', '')}</code>\n"
+                                    f"<b>Время:</b> <code>{int(_time.time())}</code>\n"
+                                ),
+                                key="szwego_runtime",
+                            )
+                        except Exception:
+                            pass
+                        return user_friendly, []
+
+                    # Если это не auth-проблема, а диагностический текст по URL — его можно показывать пользователю
+                    if internal_msg:
+                        return f"❌ {internal_msg}", []
+
+                    return f"❌ {user_friendly}", []
+            except Exception:
+                # Если вдруг структура сломалась — безопасно выходим
+                return "❌ Szwego временно недоступен. Попробуйте отправить запрос позже.", []
         else:
             # Получаем данные о товаре через tmapi.top (автоопределение платформы)
             logger.info("Обработка через TMAPI")

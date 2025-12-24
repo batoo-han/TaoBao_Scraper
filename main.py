@@ -21,6 +21,7 @@ from src.core.config import settings
 from src.services.admin_settings import AdminSettingsService
 from src.services.user_settings import get_user_settings_service
 from src.webapp.server import MiniAppServer
+from src.services.szwego_monitor import SzwegoHealthMonitor
 
 # Конфигурация базового логирования (детальное логирование в error_handler.py)
 logging.basicConfig(level=logging.INFO)
@@ -45,6 +46,8 @@ async def main():
     bot = Bot(token=settings.BOT_TOKEN)
     # Инициализация диспетчера
     dp = Dispatcher()
+    # Фоновый монитор Szwego (предупреждает админа, если токен протухает)
+    szwego_monitor = SzwegoHealthMonitor()
 
     # Сервисы настроек (общие для бота и Mimi App)
     user_settings_service = get_user_settings_service()
@@ -66,6 +69,12 @@ async def main():
     
     # Включение роутера обработчиков сообщений
     dp.include_router(router)
+    # Startup / shutdown hooks для фоновых задач (aiogram 3)
+    dp.startup.register(szwego_monitor.start)
+    async def _stop_szwego_monitor(*_args) -> None:
+        await szwego_monitor.stop()
+
+    dp.shutdown.register(_stop_szwego_monitor)
 
     # Удаление вебхуков (если были) и запуск поллинга для получения обновлений
     await bot.delete_webhook(drop_pending_updates=True)

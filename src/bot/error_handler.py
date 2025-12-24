@@ -7,6 +7,8 @@ import json
 import logging
 import traceback
 import os
+import time
+import html
 from datetime import datetime
 from typing import Optional
 from logging.handlers import RotatingFileHandler
@@ -37,6 +39,9 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Анти-спам для системных алертов (не привязанных к конкретному сообщению пользователя)
+_SYSTEM_ALERT_LAST_SENT: dict[str, float] = {}
 
 
 class ErrorHandler:
@@ -226,7 +231,9 @@ class ErrorHandler:
             admin_message += f"\n💡 <b>Пояснение ProxyAPI:</b> {proxyapi_explanation}\n"
         
         if error_info['context']:
-            admin_message += f"\n🔗 <b>Контекст:</b> <code>{error_info['context'][:100]}</code>\n"
+            # Контекст может быть длинным (URL с параметрами). Показываем больше и экранируем HTML.
+            safe_context = html.escape(str(error_info["context"] or ""))[:500]
+            admin_message += f"\n🔗 <b>Контекст:</b>\n<pre>{safe_context}</pre>\n"
         
         # Отправляем traceback отдельным сообщением (если не слишком длинный)
         traceback_preview = error_info['traceback'][:3000]
@@ -359,6 +366,48 @@ class ErrorHandler:
 
 # Глобальный обработчик (будет инициализирован в autoparse.py)
 error_handler: Optional[ErrorHandler] = None
+
+
+async def notify_admin_system(*, text: str, key: str, bot: Bot | None = None, min_interval_sec: int | None = None) -> None:
+    """
+    Отправляет системное уведомление админу (health alert), например:
+    - “протух токен Szwego”
+    - “нет cookies файла”
+
+    Почему отдельная функция:
+    - У нас нет `Message` пользователя, чтобы вызывать handle_error()
+    - Это не ошибка обработки запроса, а инфраструктурный сигнал
+
+    Анти-спам:
+    - `key` используется для дедупликации (например, "szwego_monitor")
+    - `min_interval_sec` по умолчанию берётся из `SZWEGO_ALERT_MIN_INTERVAL_SEC`
+    """
+    global error_handler
+    if not error_handler or not getattr(error_handler, "admin_chat_id", None):
+        return
+
+    interval = min_interval_sec
+    if interval is None:
+        interval = int(getattr(settings, "SZWEGO_ALERT_MIN_INTERVAL_SEC", 21600) or 21600)
+
+    now = time.time()
+    last = _SYSTEM_ALERT_LAST_SENT.get(key, 0.0)
+    if (now - last) < interval:
+        return
+    _SYSTEM_ALERT_LAST_SENT[key] = now
+
+    active_bot = bot or getattr(error_handler, "bot", None)
+    if not active_bot:
+        return
+
+    try:
+        await active_bot.send_message(
+            chat_id=error_handler.admin_chat_id,
+            text=text,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning("Не удалось отправить системный алерт админу: %s", e)
 
 
 async def _test_admin_chat(bot: Bot, chat_id: int) -> bool:
