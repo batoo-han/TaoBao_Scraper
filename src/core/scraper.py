@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import logging
@@ -291,6 +292,21 @@ class Scraper:
         exchange_rate = user_exchange_rate
         if exchange_rate is None and settings.CONVERT_CURRENCY:
             exchange_rate = await self.exchange_rate_client.get_exchange_rate()
+
+        # Для taobao/tmall/1688: запускаем получение detail_images параллельно с обработкой LLM
+        # Это ускоряет общее время обработки, так как запрос к item_desc выполняется одновременно с подготовкой данных для LLM
+        detail_images_task = None
+        if platform in (Platform.TAOBAO, Platform.TMALL, Platform.ALI1688):
+            item_id = product_data.get('item_id')
+            if item_id:
+                if settings.DEBUG_MODE:
+                    print(f"[Scraper] Запускаем параллельную задачу для получения detail_images (item_id={item_id})")
+                detail_images_task = asyncio.create_task(
+                    self._get_filtered_detail_images(item_id, platform=platform, request_id=request_id)
+                )
+            else:
+                if settings.DEBUG_MODE:
+                    print(f"[Scraper] ⚠️ item_id отсутствует! Пропускаем параллельное получение detail изображений.")
 
         # В режиме расширенных цен:
         # - отключаем single_pass (он может раздувать ввод и усложнять отладку)
@@ -666,19 +682,34 @@ class Scraper:
             sku_images = self._get_unique_images_from_sku_props(product_data)
             
             # Получаем дополнительные изображения из item_desc
-            item_id = product_data.get('item_id')
+            # Если задача была запущена параллельно - ждём её завершения, иначе получаем синхронно
             detail_images = []
             
-            if settings.DEBUG_MODE:
-                print(f"[Scraper] Извлечен item_id: {item_id}")
-            
-            if item_id:
-                detail_images = await self._get_filtered_detail_images(item_id, platform=platform, request_id=request_id)
-                if settings.DEBUG_MODE:
-                    print(f"[Scraper] Получено detail изображений: {len(detail_images)}")
+            if detail_images_task:
+                # Задача была запущена параллельно - ждём завершения
+                try:
+                    detail_images = await detail_images_task
+                    if settings.DEBUG_MODE:
+                        print(f"[Scraper] Параллельная задача завершена: получено {len(detail_images)} detail изображений")
+                except Exception as e:
+                    logger.warning(f"Ошибка при получении detail_images в параллельной задаче: {e}")
+                    if settings.DEBUG_MODE:
+                        import traceback
+                        print(f"[Scraper] ❌ Ошибка в параллельной задаче detail_images:")
+                        traceback.print_exc()
+                    detail_images = []
             else:
-                if settings.DEBUG_MODE:
-                    print(f"[Scraper] ⚠️ item_id отсутствует! Пропускаем получение detail изображений.")
+                # Для других платформ или если item_id отсутствовал - получаем синхронно (fallback)
+                item_id = product_data.get('item_id')
+                if item_id:
+                    if settings.DEBUG_MODE:
+                        print(f"[Scraper] Извлечен item_id: {item_id}, получаем detail_images синхронно")
+                    detail_images = await self._get_filtered_detail_images(item_id, platform=platform, request_id=request_id)
+                    if settings.DEBUG_MODE:
+                        print(f"[Scraper] Получено detail изображений: {len(detail_images)}")
+                else:
+                    if settings.DEBUG_MODE:
+                        print(f"[Scraper] ⚠️ item_id отсутствует! Пропускаем получение detail изображений.")
         
         # Объединяем изображения: сначала из sku_props, потом из detail_html
         image_urls = sku_images + detail_images
@@ -1180,7 +1211,7 @@ class Scraper:
     async def _get_image_sizes_from_urls(self, urls: list) -> list:
         """
         Определяет размеры изображений по URL.
-        Обрабатывает по 5 изображений параллельно для предотвращения перегрузки.
+        Обрабатывает по 15 изображений параллельно для ускорения обработки.
         
         Args:
             urls: Список URL изображений
@@ -1188,12 +1219,11 @@ class Scraper:
         Returns:
             list: Список словарей с url, width, height
         """
-        import asyncio
-        
         images_with_sizes = []
         
-        # Обрабатываем порциями по 5 для предотвращения перегрузки
-        batch_size = 5
+        # Обрабатываем порциями по 15 для ускорения (было 5)
+        # Параллельная обработка позволяет увеличить размер батча без перегрузки
+        batch_size = 15
         
         for i in range(0, len(urls), batch_size):
             batch = urls[i:i+batch_size]
