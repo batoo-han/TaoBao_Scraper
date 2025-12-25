@@ -52,15 +52,18 @@ class TmapiClient:
         """
         Отправляет запрос к tmapi.top для получения информации о товаре.
         В MOCK режиме возвращает данные из result.txt.
+        Реализует retry механизм с экспоненциальной задержкой при таймаутах и сетевых ошибках.
 
         Args:
             url (str): URL товара (например, с Taobao или Tmall).
+            request_id (str, optional): ID запроса для логирования.
 
         Returns:
             dict: Словарь с информацией о товаре.
 
         Raises:
-            httpx.HTTPStatusError: Если запрос завершился с ошибкой (4xx или 5xx) в реальном режиме.
+            httpx.HTTPStatusError: Если запрос завершился с ошибкой (4xx или 5xx) после всех попыток.
+            httpx.RequestError: Если произошла сетевая ошибка после всех попыток.
         """
         if self.mock_mode:
             # Mock режим: читаем данные из локального файла вместо API
@@ -95,17 +98,51 @@ class TmapiClient:
                 # Используем certifi для корректной работы сертификатов
                 verify_ssl = ssl.create_default_context(cafile=certifi.where())
             
-            timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+            # Используем httpx.Timeout для раздельной настройки таймаутов
+            # connect: таймаут подключения (10 сек - обычно быстрое)
+            # read: таймаут чтения ответа (увеличиваем до 60 сек для больших ответов)
+            timeout_value = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+            # Для read используем больший таймаут, так как API может возвращать большие данные
+            timeout = httpx.Timeout(
+                connect=10.0,  # Таймаут подключения
+                read=max(timeout_value, 60.0),  # Таймаут чтения (минимум 60 сек)
+                write=10.0,  # Таймаут записи
+                pool=10.0  # Таймаут получения соединения из пула
+            )
+
+            # Настройки retry
+            attempts = getattr(settings, "TMAPI_RETRY_ATTEMPTS", 3) or 3
+            backoff_base = getattr(settings, "TMAPI_RETRY_BACKOFF", 0.5) or 0.5
 
             headers = {"X-Request-ID": request_id} if request_id else None
 
             async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout, headers=headers) as client:
-                # POST запрос с JSON телом
-                response = await client.post(self.api_url, json=payload, params=querystring)
-                response.raise_for_status()  # Вызывает исключение для ошибок HTTP статуса
-                logger.debug(f"TMAPI response status: {response.status_code}")
-                logger.debug(f"TMAPI raw response: {response.text[:500]}...")  # Показываем первые 500 символов
-                return response.json()  # Возвращает JSON ответ
+                for attempt in range(1, attempts + 1):
+                    await self._apply_rate_limit()
+                    try:
+                        # POST запрос с JSON телом
+                        response = await client.post(self.api_url, json=payload, params=querystring)
+                        
+                        if settings.DEBUG_MODE:
+                            print(f"[TMAPI] Статус ответа: {response.status_code}")
+                            print(f"[TMAPI] Первые 500 символов ответа: {response.text[:500]}")
+                        
+                        response.raise_for_status()  # Вызывает исключение для ошибок HTTP статуса
+                        logger.debug(f"TMAPI response status: {response.status_code}")
+                        logger.debug(f"TMAPI raw response: {response.text[:500]}...")  # Показываем первые 500 символов
+                        return response.json()  # Возвращает JSON ответ
+                    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                        is_last = attempt == attempts
+                        logger.warning(
+                            f"TMAPI get_product_info attempt {attempt}/{attempts} failed for URL={url} "
+                            f"(request_id={request_id}): {type(e).__name__}: {e}"
+                        )
+                        if is_last:
+                            raise
+                        sleep_time = backoff_base * (2 ** (attempt - 1))
+                        if settings.DEBUG_MODE:
+                            print(f"[TMAPI] Retry {attempt}/{attempts}, ждём {sleep_time:.2f} сек...")
+                        await asyncio.sleep(sleep_time)
 
     async def get_item_description(self, item_id: int, platform: str = Platform.TAOBAO, request_id: str | None = None):
         """
@@ -157,7 +194,14 @@ class TmapiClient:
             else:
                 verify_ssl = ssl.create_default_context(cafile=certifi.where())
             
-            timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+            # Используем httpx.Timeout для раздельной настройки таймаутов
+            timeout_value = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+            timeout = httpx.Timeout(
+                connect=10.0,
+                read=max(timeout_value, 60.0),  # Таймаут чтения (минимум 60 сек)
+                write=10.0,
+                pool=10.0
+            )
 
             attempts = getattr(settings, "TMAPI_RETRY_ATTEMPTS", 3) or 3
             backoff_base = getattr(settings, "TMAPI_RETRY_BACKOFF", 0.5) or 0.5
@@ -280,6 +324,18 @@ class TmapiClient:
         """
         Получает информацию о товаре 1688 по URL.
         Используется токен для 1688 (TMAPI_ALI_TOKEN или основной TMAPI_TOKEN).
+        Реализует retry механизм с экспоненциальной задержкой при таймаутах и сетевых ошибках.
+        
+        Args:
+            url (str): URL товара 1688.
+            request_id (str, optional): ID запроса для логирования.
+            
+        Returns:
+            dict: Словарь с информацией о товаре 1688.
+            
+        Raises:
+            httpx.HTTPStatusError: Если запрос завершился с ошибкой после всех попыток.
+            httpx.RequestError: Если произошла сетевая ошибка после всех попыток.
         """
         logger.info(f"Fetching 1688 product info by URL: {url}")
 
@@ -292,20 +348,63 @@ class TmapiClient:
         else:
             verify_ssl = ssl.create_default_context(cafile=certifi.where())
 
-        timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+        # Используем httpx.Timeout для раздельной настройки таймаутов
+        timeout_value = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=max(timeout_value, 60.0),  # Таймаут чтения (минимум 60 сек)
+            write=10.0,
+            pool=10.0
+        )
+
+        # Настройки retry
+        attempts = getattr(settings, "TMAPI_RETRY_ATTEMPTS", 3) or 3
+        backoff_base = getattr(settings, "TMAPI_RETRY_BACKOFF", 0.5) or 0.5
 
         headers = {"X-Request-ID": request_id} if request_id else None
 
         async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout, headers=headers) as client:
-            response = await client.post(self.ali_api_url, json=payload, params=querystring)
-            response.raise_for_status()
-            logger.debug(f"1688 TMAPI response status: {response.status_code}")
-            logger.debug(f"1688 TMAPI raw response: {response.text[:500]}...")
-            return response.json()
+            for attempt in range(1, attempts + 1):
+                await self._apply_rate_limit()
+                try:
+                    response = await client.post(self.ali_api_url, json=payload, params=querystring)
+                    
+                    if settings.DEBUG_MODE:
+                        print(f"[TMAPI] 1688 Статус ответа: {response.status_code}")
+                        print(f"[TMAPI] 1688 Первые 500 символов ответа: {response.text[:500]}")
+                    
+                    response.raise_for_status()
+                    logger.debug(f"1688 TMAPI response status: {response.status_code}")
+                    logger.debug(f"1688 TMAPI raw response: {response.text[:500]}...")
+                    return response.json()
+                except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                    is_last = attempt == attempts
+                    logger.warning(
+                        f"1688 TMAPI get_product_by_url attempt {attempt}/{attempts} failed for URL={url} "
+                        f"(request_id={request_id}): {type(e).__name__}: {e}"
+                    )
+                    if is_last:
+                        raise
+                    sleep_time = backoff_base * (2 ** (attempt - 1))
+                    if settings.DEBUG_MODE:
+                        print(f"[TMAPI] 1688 Retry {attempt}/{attempts}, ждём {sleep_time:.2f} сек...")
+                    await asyncio.sleep(sleep_time)
 
     async def get_ali_product_by_id(self, item_id: int, request_id: str | None = None):
         """
         Получает информацию о товаре 1688 по item_id (без URL).
+        Реализует retry механизм с экспоненциальной задержкой при таймаутах и сетевых ошибках.
+        
+        Args:
+            item_id (int): ID товара 1688.
+            request_id (str, optional): ID запроса для логирования.
+            
+        Returns:
+            dict: Словарь с информацией о товаре 1688.
+            
+        Raises:
+            httpx.HTTPStatusError: Если запрос завершился с ошибкой после всех попыток.
+            httpx.RequestError: Если произошла сетевая ошибка после всех попыток.
         """
         logger.info(f"Fetching 1688 product info by item_id: {item_id}")
 
@@ -320,13 +419,44 @@ class TmapiClient:
         else:
             verify_ssl = ssl.create_default_context(cafile=certifi.where())
 
-        timeout = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+        # Используем httpx.Timeout для раздельной настройки таймаутов
+        timeout_value = getattr(settings, "TMAPI_TIMEOUT", 30.0) or 30.0
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=max(timeout_value, 60.0),  # Таймаут чтения (минимум 60 сек)
+            write=10.0,
+            pool=10.0
+        )
+
+        # Настройки retry
+        attempts = getattr(settings, "TMAPI_RETRY_ATTEMPTS", 3) or 3
+        backoff_base = getattr(settings, "TMAPI_RETRY_BACKOFF", 0.5) or 0.5
 
         headers = {"X-Request-ID": request_id} if request_id else None
 
         async with httpx.AsyncClient(verify=verify_ssl, timeout=timeout, headers=headers) as client:
-            response = await client.get(self.ali_item_api_url, params=querystring)
-            response.raise_for_status()
-            logger.debug(f"1688 TMAPI (by id) response status: {response.status_code}")
-            logger.debug(f"1688 TMAPI (by id) raw response: {response.text[:500]}...")
-            return response.json()
+            for attempt in range(1, attempts + 1):
+                await self._apply_rate_limit()
+                try:
+                    response = await client.get(self.ali_item_api_url, params=querystring)
+                    
+                    if settings.DEBUG_MODE:
+                        print(f"[TMAPI] 1688 (by id) Статус ответа: {response.status_code}")
+                        print(f"[TMAPI] 1688 (by id) Первые 500 символов ответа: {response.text[:500]}")
+                    
+                    response.raise_for_status()
+                    logger.debug(f"1688 TMAPI (by id) response status: {response.status_code}")
+                    logger.debug(f"1688 TMAPI (by id) raw response: {response.text[:500]}...")
+                    return response.json()
+                except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                    is_last = attempt == attempts
+                    logger.warning(
+                        f"1688 TMAPI get_product_by_id attempt {attempt}/{attempts} failed for item_id={item_id} "
+                        f"(request_id={request_id}): {type(e).__name__}: {e}"
+                    )
+                    if is_last:
+                        raise
+                    sleep_time = backoff_base * (2 ** (attempt - 1))
+                    if settings.DEBUG_MODE:
+                        print(f"[TMAPI] 1688 (by id) Retry {attempt}/{attempts}, ждём {sleep_time:.2f} сек...")
+                    await asyncio.sleep(sleep_time)

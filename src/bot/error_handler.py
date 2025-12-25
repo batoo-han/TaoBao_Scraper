@@ -334,18 +334,33 @@ class ErrorHandler:
             Тип ошибки (ключ для USER_MESSAGES)
         """
         error_class = error.__class__.__name__
+        error_module = error.__class__.__module__
         error_message = str(error).lower()
+        error_full_name = f"{error_module}.{error_class}".lower()
         
         # Специальный кейс: ProxyAPI закончился баланс
         if "insufficient balance" in error_message or "error code: 402" in error_message or "proxyapi" in error_message:
             return 'proxyapi_balance'
         
-        # API ошибки
+        # API ошибки (проверяем перед сетевыми, чтобы не перехватить HTTP статусы)
         if any(keyword in error_message for keyword in ['api', 'tmapi', 'proxyapi', '400', '401', '402', '403', '404', '417', '422', '439', '499', '500', '502', '503']):
             return 'api_error'
         
-        # Сетевые ошибки
-        if any(keyword in error_class.lower() for keyword in ['timeout', 'connection', 'network', 'httpx']):
+        # Сетевые ошибки (таймауты, проблемы подключения)
+        # Проверяем как имя класса, так и полное имя (с модулем) для httpcore.ReadTimeout и других
+        timeout_keywords = ['timeout', 'readtimeout', 'writetimeout', 'connecttimeout', 'pooltimeout']
+        connection_keywords = ['connection', 'network', 'httpx', 'httpcore']
+        
+        # Проверяем имя класса
+        if any(keyword in error_class.lower() for keyword in timeout_keywords + connection_keywords):
+            return 'network_error'
+        
+        # Проверяем полное имя (с модулем) для httpcore.* ошибок
+        if any(keyword in error_full_name for keyword in ['httpcore.readtimeout', 'httpcore.writetimeout', 'httpx.readtimeout', 'httpx.timeout']):
+            return 'network_error'
+        
+        # Проверяем строковое представление ошибки
+        if any(keyword in error_message for keyword in ['timeout', 'timed out', 'connection', 'network']):
             return 'network_error'
         
         # Ошибки парсинга
