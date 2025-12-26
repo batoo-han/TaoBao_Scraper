@@ -496,9 +496,15 @@ class Scraper:
 
                         Примеры, которые ДОЛЖНЫ быть удалены:
                         - "корейская кукла" (скорее рисунок/сувенир/маркетинг, не цвет)
+                        - "белый f0045", "d0004+f0045" (технические коды)
                         """
                         s = (val or "").strip().lower()
                         if not s:
+                            return False
+
+                        # 0) Если содержит технические коды типа f00xx, d00xx - не является цветом
+                        import re
+                        if re.search(r"\b[fFdD]0{2,3}\d{1,4}(?:\+[fFdD]0{2,3}\d{1,4})*\b", s):
                             return False
 
                         # 1) Если явно содержит известные цветовые слова — ок
@@ -528,18 +534,35 @@ class Scraper:
 
                         # 4) Если не похоже ни на цвет, ни на принт — удаляем
                         return False
+                    def _clean_color_code(val: str) -> str:
+                        """Очищает технические коды из названия цвета"""
+                        import re
+                        s = val.strip()
+                        # Удаляем коды типа f00xx, d00xx и их комбинации
+                        s = re.sub(r"\b[fFdD]0{2,3}\d{1,4}(?:\+[fFdD]0{2,3}\d{1,4})*\b", "", s)
+                        # Удаляем оставшиеся фрагменты типа +f0045
+                        s = re.sub(r"\s*\+\s*[fFdD]0{2,3}\d{1,4}\b", "", s)
+                        s = re.sub(r"\s{2,}", " ", s).strip(" ,;:-").strip()
+                        return s
+                    
                     if isinstance(colors, list):
-                        filtered = [
-                            c for c in colors
-                            if isinstance(c, str) and not _is_bad(c) and _looks_like_color_value(c)
-                        ]
+                        filtered = []
+                        for c in colors:
+                            if not isinstance(c, str):
+                                continue
+                            cleaned = _clean_color_code(c)
+                            if cleaned and not _is_bad(cleaned) and _looks_like_color_value(cleaned):
+                                filtered.append(cleaned)
                         if filtered:
                             mc['Цвета'] = filtered
                         else:
                             mc.pop('Цвета', None)
                     elif isinstance(colors, str):
-                        if _is_bad(colors) or not _looks_like_color_value(colors):
+                        cleaned = _clean_color_code(colors)
+                        if not cleaned or _is_bad(cleaned) or not _looks_like_color_value(cleaned):
                             mc.pop('Цвета', None)
+                        else:
+                            mc['Цвета'] = cleaned
                 # Раньше мы полностью выбрасывали «Цвета» для не-одежды, чтобы не было галлюцинаций.
                 # Но для части товаров (подарки, кейсы, аксессуары) цвет — важный отличительный признак.
                 # Поэтому оставляем цвета, если они явно присутствуют во входных данных (sku_props/product_props).
@@ -3499,11 +3522,19 @@ class Scraper:
                                     "мальчик", "мальчиков", "для мальчиков", "девочк", "девочек", "для девочек",
                                     "мужск", "женск", "для мужчин", "для женщин", "унисекс",
                                 )
+                                # Убираем технические коды типа f00xx, d00xx и их комбинации
+                                import re
+                                # Удаляем коды типа f00xx, d00xx (f/d + 0 + 3-4 цифры)
+                                # Также удаляем комбинации типа d0004+f0045
+                                s = re.sub(r"\b[fFdD]0{2,3}\d{1,4}(?:\+[fFdD]0{2,3}\d{1,4})*\b", "", s)
+                                # Удаляем оставшиеся фрагменты типа +f0045 в начале/середине строки
+                                s = re.sub(r"\s*\+\s*[fFdD]0{2,3}\d{1,4}\b", "", s)
+                                s = re.sub(r"\s{2,}", " ", s).strip(" ,;:-").strip()
+                                
                                 if any(x in s for x in bad_tokens):
                                     # Пробуем «аккуратно» вычистить тип товара/служебные слова,
                                     # а не просто выкинуть значение целиком.
                                     try:
-                                        import re
                                         cleaned = s
                                         cleaned = re.sub(r"(?i)\b(цвет(а|ов)?|на фото|как на фото)\b", "", cleaned)
                                         cleaned = re.sub(r"(?i)\b(пиджак|брюки|штаны|костюм|жакет|куртка|рубашка)\b", "", cleaned)

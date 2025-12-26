@@ -897,8 +897,10 @@ async def broadcast_post_to_channel(
         if chunks_count > 1:
             stats_lines.append(f"📄 <b>Частей текста:</b> {chunks_count}")
 
-        # Лимиты
-        if limits_snapshot:
+        # Лимиты (показываем только если включен whitelist или blacklist)
+        wl_enabled = access_control_service._config.whitelist_enabled
+        bl_enabled = access_control_service._config.blacklist_enabled
+        if limits_snapshot and (wl_enabled or bl_enabled):
             if not limits_snapshot.get("unlimited"):
                 user_limits = limits_snapshot.get("user", {})
                 global_limits = limits_snapshot.get("global", {})
@@ -2445,6 +2447,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         # Фиксируем успешный запрос: инкрементируем счётчики лимитов только после удачной отправки
         # Передаем стоимость запроса, если она есть (только для OpenAI/ProxyAPI)
         request_cost = tokens_usage.total_cost if tokens_usage and tokens_usage.total_cost > 0 else 0.0
+        wl_enabled = access_control_service._config.whitelist_enabled
         commit_result = rate_limit_service.commit_success(
             user_id=user_id,
             user_daily_limit=user_settings.daily_limit,
@@ -2453,6 +2456,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             username=username,
             request_cost=request_cost,
             is_admin=is_admin,
+            whitelist_enabled=wl_enabled,
         )
         usage_snapshot = commit_result.get("snapshot") if commit_result else usage_snapshot
 

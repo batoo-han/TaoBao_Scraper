@@ -508,6 +508,7 @@ class RateLimitService:
         username: Optional[str] = None,
         request_cost: float = 0.0,
         is_admin: bool = False,
+        whitelist_enabled: bool = True,
     ) -> Dict[str, Any]:
         """
         Фиксирует успешный запрос: инкремент счётчиков без повторной блокировки.
@@ -520,6 +521,7 @@ class RateLimitService:
             username: Имя пользователя (опционально)
             request_cost: Стоимость запроса в USD (только для OpenAI/ProxyAPI, 0.0 для YandexGPT)
             is_admin: Является ли пользователь администратором
+            whitelist_enabled: Включен ли whitelist (влияет на отображение лимитов в snapshot)
         
         Returns:
             Dict с полем snapshot, содержащим текущую статистику
@@ -569,7 +571,7 @@ class RateLimitService:
             per_user_monthly=per_user_monthly,
             total_daily=total_daily,
             total_monthly=total_monthly,
-            whitelist_enabled=True,
+            whitelist_enabled=whitelist_enabled,
             is_admin=False,
         )
         
