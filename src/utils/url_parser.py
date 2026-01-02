@@ -70,6 +70,7 @@ class URLParser:
     SZWEGO_DOMAINS = [
         "szwego.com",
         "szwego.app",
+        "pc.szwego.com",  # PC версия сайта
         "clothes.szwego.app",
         "bags.szwego.app",
         "luxury.szwego.app"
@@ -218,6 +219,8 @@ class URLParser:
         - https://clothes.szwego.app/product/123456789
         - https://bags.szwego.app/item?id=123456789
         - https://szwego.com/product/123456789
+        - https://www.pc.szwego.com/product/123456789
+        - https://pc.szwego.com/item?id=123456789
         
         Args:
             url: URL товара Szwego
