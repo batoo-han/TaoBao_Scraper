@@ -52,9 +52,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Используем UID 1000 (обычно первый пользователь на системе)
 RUN useradd -m -u 1000 botuser
 
-# Создаём необходимые директории для данных и логов
-RUN mkdir -p /app/data /app/logs && \
-    chown -R botuser:botuser /app/data /app/logs
+# Создаём необходимые директории для данных, логов и cookies
+RUN mkdir -p /app/data /app/logs /app/cookies && \
+    chown -R botuser:botuser /app/data /app/logs /app/cookies
 
 # Копируем исходный код (новая структура)
 COPY main.py ./

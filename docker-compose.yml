@@ -34,6 +34,8 @@ services:
       - ./data:/app/data
       # Логи бота сохраняются вне контейнера
       - ./logs:/app/logs
+      # Папка cookies/ - содержит cookies для Szwego и других платформ
+      - ./cookies:/app/cookies
       # Файл .env (опционально, если нужен прямой доступ из контейнера)
       # - ./.env:/app/.env:ro
 
