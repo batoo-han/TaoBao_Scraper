@@ -2526,11 +2526,12 @@ class Scraper:
         Нормализует и ОГРАНИЧИВАЕТ характеристики для одежды/обуви.
 
         ВАЖНО (по требованиям):
-        - Для одежды/обуви в характеристиках допускаются ТОЛЬКО:
+        - Для одежды/обуви в характеристиках допускаются:
           1) Состав/Материал (если есть)
           2) Цвета (если есть)
           3) Размеры (если есть)
-        - Порядок блоков при выводе фиксированный: Состав/Материал → Цвета → Размеры.
+          4) Уточнения по размерам (если есть)
+        - Порядок блоков при выводе фиксированный: Состав/Материал → Цвета → Размеры → Уточнения по размерам.
         """
         if not isinstance(main_characteristics, dict) or not main_characteristics:
             return {}
@@ -2555,13 +2556,22 @@ class Scraper:
                 colors_value = v
                 break
 
-        # 3) Извлекаем "Размеры"
+        # 3) Извлекаем "Размеры" (но НЕ "Уточнения по размерам")
         sizes_value: str | None = None
         for k, v in list(main_characteristics.items()):
             key_l = str(k).strip().lower()
-            if "размер" in key_l or "size" in key_l:
+            if ("размер" in key_l or "size" in key_l) and "уточнен" not in key_l:
                 if isinstance(v, str) and v.strip():
                     sizes_value = v.strip()
+                    break
+
+        # 4) Извлекаем "Уточнения по размерам"
+        size_details_value = None
+        for k, v in list(main_characteristics.items()):
+            key_l = str(k).strip().lower()
+            if "уточнен" in key_l and "размер" in key_l:
+                if v and (isinstance(v, list) and len(v) > 0 or isinstance(v, str) and v.strip()):
+                    size_details_value = v
                     break
 
         normalized: dict = {}
@@ -2646,6 +2656,18 @@ class Scraper:
             cleaned_sizes = self._sanitize_apparel_sizes(sizes_value)
             if cleaned_sizes:
                 normalized["Размеры"] = self._format_size_range(cleaned_sizes)
+
+        # Поле 4: Уточнения по размерам (список или строка)
+        if size_details_value:
+            # Сохраняем как есть (список или строка)
+            # Проверяем, что значение не пустое
+            if isinstance(size_details_value, list) and len(size_details_value) > 0:
+                # Убираем пустые элементы из списка
+                cleaned_list = [str(item).strip() for item in size_details_value if item and str(item).strip()]
+                if cleaned_list:
+                    normalized["Уточнения по размерам"] = cleaned_list
+            elif isinstance(size_details_value, str) and size_details_value.strip():
+                normalized["Уточнения по размерам"] = size_details_value.strip()
 
         return normalized
 
@@ -3211,10 +3233,11 @@ class Scraper:
             pass
 
         # Для одежды/обуви фиксируем строгий формат характеристик:
-        # допускаются только (и строго в этом порядке при выводе):
+        # допускаются (и строго в этом порядке при выводе):
         # - Состав/Материал
         # - Цвета
         # - Размеры
+        # - Уточнения по размерам (если есть)
         #
         # Это делаем ДО санитации description, чтобы анти-дублирование работало корректно.
         try:
@@ -3404,7 +3427,7 @@ class Scraper:
             ]
             
             # Фильтруем и отображаем характеристики в правильном порядке
-            # Порядок: Состав/Материал → Цвета → Размеры/Объём → Остальное
+            # Порядок: Состав/Материал → Цвета → Размеры/Объём → Уточнения по размерам → Остальное
             ordered_keys = []
             
             # Сначала состав/материал (если есть и он конкретный)
@@ -3436,12 +3459,21 @@ class Scraper:
                     if value and (isinstance(value, list) and len(value) > 0 or isinstance(value, str) and value.strip()):
                         ordered_keys.append(key)
             
-            # Затем размеры и объёмы
+            # Затем размеры и объёмы (но НЕ "Уточнения по размерам")
             for key in main_characteristics.keys():
-                if 'размер' in key.lower() or 'size' in key.lower() or 'объём' in key.lower() or 'объем' in key.lower():
+                key_lower = key.lower()
+                if ('размер' in key_lower or 'size' in key_lower or 'объём' in key_lower or 'объем' in key_lower) and 'уточнен' not in key_lower:
                     value = main_characteristics[key]
                     # Проверяем что значение не пустое и не "не указан"
                     if value and isinstance(value, str) and value.strip() and value.lower().strip() not in invalid_values:
+                        ordered_keys.append(key)
+            
+            # Затем "Уточнения по размерам" (после обычных размеров)
+            for key in main_characteristics.keys():
+                if 'уточнен' in key.lower() and 'размер' in key.lower():
+                    value = main_characteristics[key]
+                    # Проверяем что значение не пустое (список или строка)
+                    if value and (isinstance(value, list) and len(value) > 0 or isinstance(value, str) and value.strip()):
                         ordered_keys.append(key)
             
             # Остальные характеристики (если есть значимые)
@@ -3587,8 +3619,8 @@ class Scraper:
                 if isinstance(value, list) and len(value) == 0:
                     continue
                 
-                # Форматируем размеры если это размеры
-                if 'размер' in key.lower() and isinstance(value, str):
+                # Форматируем размеры если это размеры (но НЕ "Уточнения по размерам")
+                if 'размер' in key.lower() and 'уточнен' not in key.lower() and isinstance(value, str):
                     value = self._format_size_range(value)
                 
                 if isinstance(value, list):
