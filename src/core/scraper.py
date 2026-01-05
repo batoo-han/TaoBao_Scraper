@@ -2521,6 +2521,7 @@ class Scraper:
         self,
         apparel_kind: str,
         main_characteristics: dict,
+        platform: str | None = None,
     ) -> dict:
         """
         Нормализует и ОГРАНИЧИВАЕТ характеристики для одежды/обуви.
@@ -2530,7 +2531,7 @@ class Scraper:
           1) Состав/Материал (если есть)
           2) Цвета (если есть)
           3) Размеры (если есть)
-          4) Уточнения по размерам (если есть)
+          4) Уточнения по размерам (если есть) - ТОЛЬКО для платформы SZWEGO!
         - Порядок блоков при выводе фиксированный: Состав/Материал → Цвета → Размеры → Уточнения по размерам.
         """
         if not isinstance(main_characteristics, dict) or not main_characteristics:
@@ -2657,8 +2658,8 @@ class Scraper:
             if cleaned_sizes:
                 normalized["Размеры"] = self._format_size_range(cleaned_sizes)
 
-        # Поле 4: Уточнения по размерам (список или строка)
-        if size_details_value:
+        # Поле 4: Уточнения по размерам (список или строка) - ТОЛЬКО для платформы SZWEGO!
+        if size_details_value and platform and platform.lower() == "szwego":
             # Сохраняем как есть (список или строка)
             # Проверяем, что значение не пустое
             if isinstance(size_details_value, list) and len(size_details_value) > 0:
@@ -3237,14 +3238,16 @@ class Scraper:
         # - Состав/Материал
         # - Цвета
         # - Размеры
-        # - Уточнения по размерам (если есть)
+        # - Уточнения по размерам (если есть) - ТОЛЬКО для платформы SZWEGO!
         #
         # Это делаем ДО санитации description, чтобы анти-дублирование работало корректно.
         try:
             looks_like_apparel = self._is_apparel_product(title, product_data)
             if looks_like_apparel:
                 apparel_kind = "footwear" if self._is_footwear_product(title, product_data) else "clothing"
-                main_characteristics = self._normalize_apparel_characteristics(apparel_kind, main_characteristics)
+                # Получаем платформу из product_data для проверки, нужны ли "Уточнения по размерам"
+                platform = product_data.get('_platform')
+                main_characteristics = self._normalize_apparel_characteristics(apparel_kind, main_characteristics, platform)
                 # Для одежды/обуви доп. секции в посте не используем (чтобы не уехал шаблон)
                 additional_info = {}
         except Exception:
@@ -3427,7 +3430,7 @@ class Scraper:
             ]
             
             # Фильтруем и отображаем характеристики в правильном порядке
-            # Порядок: Состав/Материал → Цвета → Размеры/Объём → Уточнения по размерам → Остальное
+            # Порядок: Состав/Материал → Цвета → Размеры/Объём → Уточнения по размерам (только для SZWEGO) → Остальное
             ordered_keys = []
             
             # Сначала состав/материал (если есть и он конкретный)
@@ -3468,13 +3471,15 @@ class Scraper:
                     if value and isinstance(value, str) and value.strip() and value.lower().strip() not in invalid_values:
                         ordered_keys.append(key)
             
-            # Затем "Уточнения по размерам" (после обычных размеров)
-            for key in main_characteristics.keys():
-                if 'уточнен' in key.lower() and 'размер' in key.lower():
-                    value = main_characteristics[key]
-                    # Проверяем что значение не пустое (список или строка)
-                    if value and (isinstance(value, list) and len(value) > 0 or isinstance(value, str) and value.strip()):
-                        ordered_keys.append(key)
+            # Затем "Уточнения по размерам" (после обычных размеров) - ТОЛЬКО для платформы SZWEGO!
+            platform = product_data.get('_platform')
+            if platform and platform.lower() == "szwego":
+                for key in main_characteristics.keys():
+                    if 'уточнен' in key.lower() and 'размер' in key.lower():
+                        value = main_characteristics[key]
+                        # Проверяем что значение не пустое (список или строка)
+                        if value and (isinstance(value, list) and len(value) > 0 or isinstance(value, str) and value.strip()):
+                            ordered_keys.append(key)
             
             # Остальные характеристики (если есть значимые)
             for key in main_characteristics.keys():
