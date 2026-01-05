@@ -183,6 +183,13 @@ class RequestStats(Base):
     global_daily_cost = Column(Float, nullable=True, comment="Общая стоимость запросов за день (USD)")
     global_monthly_cost = Column(Float, nullable=True, comment="Общая стоимость запросов за месяц (USD)")
     
+    # Статистика Redis кэша
+    cache_hits = Column(Integer, nullable=True, default=0, comment="Количество попаданий в кэш (cache hits)")
+    cache_misses = Column(Integer, nullable=True, default=0, comment="Количество промахов кэша (cache misses)")
+    cache_saved_tokens = Column(Integer, nullable=True, comment="Сэкономлено токенов благодаря кэшу")
+    cache_saved_cost = Column(Float, nullable=True, comment="Сэкономлено денег благодаря кэшу (USD)")
+    cache_saved_time_ms = Column(Integer, nullable=True, comment="Сэкономлено времени благодаря кэшу (мс)")
+    
     # Метаданные
     created_at = Column(DateTime, nullable=False, server_default=func.now(), comment="Время создания записи")
     

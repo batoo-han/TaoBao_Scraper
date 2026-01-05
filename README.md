@@ -63,10 +63,14 @@
 ### Предварительные требования
 
 - python 3.11+ ИЛИ Docker
+- PostgreSQL 12+ (для хранения данных)
+- Redis 6+ (для кэширования)
 - telegram Bot Token ([@BotFather](https://t.me/BotFather))
 - yandexgpt API Key ([Yandex Cloud](https://yandex.cloud))
 - openai API Key (опционально, [platform.openai.com](https://platform.openai.com) — если хотите использовать OpenAI)
 - tmapi Token ([tmapi.top](https://tmapi.top))
+
+> **Примечание:** PostgreSQL и Redis можно запустить через Docker Compose (включены в `docker-compose.yml`). См. [документацию по настройке БД](docs/DATABASE_SETUP.md).
 
 ### Установка за 3 шага
 

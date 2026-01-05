@@ -9,11 +9,14 @@
 ### Обязательно:
 - python 3.11+
 - git
+- PostgreSQL 12+ (см. [DATABASE_SETUP.md](DATABASE_SETUP.md))
+- Redis 6+ (см. [DATABASE_SETUP.md](DATABASE_SETUP.md))
 - настроенные API ключи (см. [SERVICES_SETUP.md](SERVICES_SETUP.md))
 
 ### Для Docker:
 - docker 20.10+
 - docker Compose 2.0+
+- PostgreSQL и Redis включаются автоматически через docker-compose.yml
 
 ---
 
@@ -118,20 +121,35 @@ find data -type f -name "*.json" -exec chmod 644 {} \;
 # chmod -R 777 data logs
 ```
 
-#### 3. Запуск
+#### 4. Применение миграций базы данных
+
+После первого запуска контейнеров:
 
 ```bash
-# Соберите и запустите контейнер
+# Примените миграции Alembic
+docker-compose exec bot python scripts/migrate_db.py upgrade head
+
+# Импортируйте данные из JSON (если обновляетесь с версии 2.x)
+docker-compose exec bot python scripts/migrate_json_to_db.py
+```
+
+#### 5. Запуск
+
+```bash
+# Соберите и запустите контейнеры (включая PostgreSQL и Redis)
 docker-compose up -d --build
 
 # Просмотр логов
 docker-compose logs -f
 
+# Просмотр логов только бота
+docker-compose logs -f bot
+
 # Остановка
 docker-compose down
 ```
 
-#### 3. Обновление
+#### 6. Обновление
 
 ```bash
 # Остановите контейнер

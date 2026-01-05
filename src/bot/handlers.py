@@ -38,6 +38,7 @@ from src.services.access_control import (
     parse_ids_and_usernames,
 )
 from src.utils.url_parser import Platform
+from src.utils.cache_stats import CacheStats
 from src.db.session import get_session
 from src.db.models import RequestStats
 from datetime import datetime
@@ -782,6 +783,7 @@ async def broadcast_post_to_channel(
     text_length: int | None = None,
     limits_snapshot: dict | None = None,
     tokens_usage = None,  # TokensUsage объект или None
+    cache_stats = None,  # CacheStats объект или None
 ) -> None:
     """
     Дублирует готовый пост в дополнительный канал/группу, если он указан.
@@ -968,6 +970,33 @@ async def broadcast_post_to_channel(
             else:
                 stats_lines.append(f"  📊 Всего: {total_tokens_str} токенов")
         
+        # Статистика Redis кэша
+        if cache_stats and (cache_stats.hits > 0 or cache_stats.misses > 0):
+            stats_lines.append("")  # Пустая строка для разделения
+            stats_lines.append("⚡ <b>Статистика кэша (Redis):</b>")
+            
+            total_requests = cache_stats.total_requests()
+            hit_rate_pct = cache_stats.hit_rate() * 100
+            
+            stats_lines.append(f"  ✅ Попаданий (hits): {cache_stats.hits}")
+            stats_lines.append(f"  ❌ Промахов (misses): {cache_stats.misses}")
+            stats_lines.append(f"  📊 Hit rate: {hit_rate_pct:.1f}% ({cache_stats.hits}/{total_requests})")
+            
+            if cache_stats.saved_tokens > 0:
+                saved_tokens_str = format_number(cache_stats.saved_tokens)
+                stats_lines.append(f"  💰 Сэкономлено токенов: {saved_tokens_str}")
+            
+            if cache_stats.saved_cost > 0:
+                stats_lines.append(f"  💵 Сэкономлено средств: ${cache_stats.saved_cost:.6f}")
+            
+            if cache_stats.saved_time_ms > 0:
+                saved_time_sec = cache_stats.saved_time_ms / 1000
+                if saved_time_sec < 1:
+                    saved_time_str = f"{cache_stats.saved_time_ms} мс"
+                else:
+                    saved_time_str = f"{saved_time_sec:.2f} сек"
+                stats_lines.append(f"  ⏱️ Сэкономлено времени: {saved_time_str}")
+        
         # Статистика стоимости запросов (после статистики токенов)
         if limits_snapshot:
             # Получаем глобальную стоимость из snapshot
@@ -1094,6 +1123,11 @@ async def broadcast_post_to_channel(
                 total_cost=total_cost_val,
                 global_daily_cost=global_daily_cost_val,
                 global_monthly_cost=global_monthly_cost_val,
+                cache_hits=cache_stats.hits if cache_stats and cache_stats.hits > 0 else None,
+                cache_misses=cache_stats.misses if cache_stats and cache_stats.misses > 0 else None,
+                cache_saved_tokens=cache_stats.saved_tokens if cache_stats and cache_stats.saved_tokens > 0 else None,
+                cache_saved_cost=cache_stats.saved_cost if cache_stats and cache_stats.saved_cost > 0 else None,
+                cache_saved_time_ms=cache_stats.saved_time_ms if cache_stats and cache_stats.saved_time_ms > 0 else None,
             )
             session.add(stats_record)
             # commit выполняется автоматически в get_session()
@@ -2302,6 +2336,12 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     request_id = str(uuid.uuid4())
     started_at = time.monotonic()
     broadcast_task: asyncio.Task | None = None
+    # Инициализируем статистику кэша для этого запроса
+    cache_stats = CacheStats()
+    # #region agent log
+    with open(r"j:\PyProject\Taobao_Scraper_main\.cursor\debug.log", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "handlers.py:2340", "message": "cache_stats created", "data": {"hits": cache_stats.hits, "misses": cache_stats.misses, "saved_tokens": cache_stats.saved_tokens}, "timestamp": int(time.time() * 1000)}) + "\n")
+    # #endregion
     # Получаем forward_channel_id из настроек администратора (из БД, если пусто - fallback на .env)
     admin_settings = await admin_settings_service.get_settings()
     forward_channel_id = (admin_settings.forward_channel_id or "").strip()
@@ -2473,6 +2513,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             request_id=request_id,
             user_price_mode=user_settings.price_mode,
             is_admin=is_admin,
+            cache_stats=cache_stats,
         )
         # Обрабатываем новую сигнатуру с статистикой токенов (для OpenAI/ProxyAPI)
         if len(result) == 3:
@@ -2578,6 +2619,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                     text_length=len(post_text) if post_text else 0,
                     limits_snapshot=usage_snapshot,
                     tokens_usage=tokens_usage,
+                    cache_stats=cache_stats,
                 )
             )
 

@@ -10,5 +10,5 @@ Telegram бот для парсинга товаров с Taobao, Tmall и Pindu
 - utils/  - Вспомогательные утилиты
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 

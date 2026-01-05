@@ -3,6 +3,7 @@ import inspect
 import json
 import logging
 import re
+import time
 from collections import Counter, OrderedDict, defaultdict
 
 from src.api.tmapi import TmapiClient
@@ -14,6 +15,9 @@ from src.core.config import settings
 from src.utils.url_parser import URLParser, Platform
 from src.scrapers.pinduoduo_web import PinduoduoWebScraper
 from src.api.tokens_stats import TokensUsage
+from src.utils.cache_stats import CacheStats
+from src.db.redis_client import get_redis_client
+from src.utils.cache_keys import build_cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +90,7 @@ class Scraper:
         request_id: str | None = None,
         user_price_mode: str | None = None,
         is_admin: bool = False,
+        cache_stats: CacheStats | None = None,
     ) -> tuple[str, list[str]] | tuple[str, list[str], TokensUsage]:
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
@@ -107,6 +112,9 @@ class Scraper:
         """
         # Инициализируем общую статистику токенов для этого запроса
         self._current_tokens_usage = TokensUsage()
+        # Инициализируем статистику кэша, если не передана
+        if cache_stats is None:
+            cache_stats = CacheStats()
         # Используем подпись пользователя (может быть пустой)
         signature = user_signature or ""
         currency = (user_currency or settings.DEFAULT_CURRENCY).lower()
@@ -292,6 +300,82 @@ class Scraper:
         exchange_rate = user_exchange_rate
         if exchange_rate is None and settings.CONVERT_CURRENCY:
             exchange_rate = await self.exchange_rate_client.get_exchange_rate()
+        
+        # Формируем ключ кэша и проверяем кэш (если кэширование включено)
+        cache_key = None
+        cached_result = None
+        cache_start_time = time.monotonic() if cache_stats and settings.CACHE_ENABLED else None
+        
+        if settings.CACHE_ENABLED and cache_stats:
+            try:
+                # Формируем ключ кэша на основе API-ответа и настроек пользователя
+                user_settings_for_cache = {
+                    "signature": signature,
+                    "currency": currency,
+                    "price_mode": effective_price_mode,
+                    "exchange_rate": exchange_rate,
+                }
+                cache_key = build_cache_key(api_response, user_settings_for_cache)
+                
+                # Проверяем кэш
+                redis_client = get_redis_client()
+                cached_result = await redis_client.get_json(cache_key)
+                
+                if cached_result:
+                    # Попадание в кэш
+                    try:
+                        post_text_cached = cached_result.get("post_text")
+                        image_urls_cached = cached_result.get("image_urls", [])
+                        tokens_usage_cached = cached_result.get("tokens_usage")
+                        estimated_tokens = cached_result.get("estimated_tokens", 0)
+                        estimated_cost = cached_result.get("estimated_cost", 0.0)
+                        
+                        if post_text_cached and image_urls_cached is not None:
+                            # Восстанавливаем TokensUsage, если есть
+                            tokens_usage_result = None
+                            if tokens_usage_cached:
+                                tokens_usage_result = TokensUsage(
+                                    prompt_tokens=tokens_usage_cached.get("prompt_tokens", 0),
+                                    completion_tokens=tokens_usage_cached.get("completion_tokens", 0),
+                                    total_tokens=tokens_usage_cached.get("total_tokens", 0),
+                                    prompt_cost=tokens_usage_cached.get("prompt_cost", 0.0),
+                                    completion_cost=tokens_usage_cached.get("completion_cost", 0.0),
+                                    total_cost=tokens_usage_cached.get("total_cost", 0.0),
+                                )
+                            
+                            # Вычисляем сэкономленное время
+                            if cache_start_time:
+                                saved_time_ms = int((time.monotonic() - cache_start_time) * 1000)
+                            else:
+                                saved_time_ms = 0
+                            
+                            # Обновляем статистику кэша
+                            cache_stats.add_hit(
+                                saved_tokens=estimated_tokens,
+                                saved_cost=estimated_cost,
+                                saved_time_ms=saved_time_ms
+                            )
+                            
+                            logger.info(f"Cache HIT for key: {cache_key[:50]}...")
+                            
+                            # Возвращаем закэшированный результат
+                            if tokens_usage_result:
+                                return post_text_cached, image_urls_cached, tokens_usage_result
+                            else:
+                                return post_text_cached, image_urls_cached
+                    except Exception as cache_error:
+                        logger.warning(f"Ошибка при обработке кэша: {cache_error}", exc_info=True)
+                        cached_result = None  # Продолжаем без кэша
+                
+                if cached_result is None:
+                    # Промах кэша
+                    cache_stats.add_miss()
+                    logger.debug(f"Cache MISS for key: {cache_key[:50]}...")
+            except Exception as cache_error:
+                # Ошибка кэша не должна блокировать обработку
+                logger.warning(f"Ошибка при проверке кэша: {cache_error}", exc_info=True)
+                if cache_stats:
+                    cache_stats.add_miss()  # Считаем как промах при ошибке
 
         # Для taobao/tmall/1688: запускаем получение detail_images параллельно с обработкой LLM
         # Это ускоряет общее время обработки, так как запрос к item_desc выполняется одновременно с подготовкой данных для LLM
@@ -739,6 +823,48 @@ class Scraper:
         
         if settings.DEBUG_MODE:
             print(f"[Scraper] Итого изображений: {len(image_urls)} (sku: {len(sku_images)}, detail: {len(detail_images)})")
+
+        # Сохраняем результат в кэш (если кэширование включено и ключ был сформирован)
+        if settings.CACHE_ENABLED and cache_key and cache_stats:
+            try:
+                # Подготавливаем данные для кэша
+                tokens_usage_dict = None
+                estimated_tokens = 0
+                estimated_cost = 0.0
+                
+                total_tokens_usage = self._current_tokens_usage or TokensUsage()
+                if total_tokens_usage.total_tokens > 0:
+                    tokens_usage_dict = {
+                        "prompt_tokens": total_tokens_usage.prompt_tokens,
+                        "completion_tokens": total_tokens_usage.completion_tokens,
+                        "total_tokens": total_tokens_usage.total_tokens,
+                        "prompt_cost": total_tokens_usage.prompt_cost,
+                        "completion_cost": total_tokens_usage.completion_cost,
+                        "total_cost": total_tokens_usage.total_cost,
+                    }
+                    estimated_tokens = total_tokens_usage.total_tokens
+                    estimated_cost = total_tokens_usage.total_cost
+                
+                cache_data = {
+                    "post_text": post_text,
+                    "image_urls": image_urls,
+                    "tokens_usage": tokens_usage_dict,
+                    "cached_at": time.time(),
+                    "estimated_tokens": estimated_tokens,
+                    "estimated_cost": estimated_cost,
+                }
+                
+                # Сохраняем в Redis
+                redis_client = get_redis_client()
+                await redis_client.set_json(
+                    cache_key,
+                    cache_data,
+                    expire=settings.CACHE_TTL_SECONDS
+                )
+                logger.debug(f"Cache SAVED for key: {cache_key[:50]}...")
+            except Exception as cache_error:
+                # Ошибка сохранения кэша не должна влиять на результат
+                logger.warning(f"Ошибка при сохранении в кэш: {cache_error}", exc_info=True)
 
         # Возвращаем результат с статистикой токенов, если она есть
         total_tokens_usage = self._current_tokens_usage or TokensUsage()

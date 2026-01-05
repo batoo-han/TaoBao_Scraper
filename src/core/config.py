@@ -6,7 +6,7 @@ TAOBAO SCRAPER BOT - CONFIGURATION
 Использует Pydantic Settings для валидации и загрузки из .env файла.
 
 Author: Your Name
-Version: 1.1.0
+Version: 3.0.0
 License: MIT
 ==============================================================================
 """
@@ -219,6 +219,11 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = "changeme"  # Пароль Redis
     REDIS_PORT: int = 6379  # Порт Redis
     REDIS_DB: int = 0  # Номер базы данных Redis
+    
+    # Настройки кэширования
+    CACHE_ENABLED: bool = True  # Включить/выключить кэширование
+    CACHE_TTL_SECONDS: int = 3600  # Время жизни кэша в секундах (по умолчанию 1 час)
+    CACHE_PREFIX: str = "cache:product"  # Префикс для ключей кэша
 
     model_config = SettingsConfigDict(
         env_file=".env",
