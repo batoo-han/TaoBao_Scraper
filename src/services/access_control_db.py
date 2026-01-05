@@ -6,35 +6,11 @@
 from __future__ import annotations
 
 from typing import Optional, Tuple
-from dataclasses import dataclass
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.session import get_session
 from src.db.models import AccessControl, AccessListEntry, ListType, EntryType
-
-
-@dataclass
-class AccessControlConfig:
-    """
-    Конфигурация белого и чёрного списков (для обратной совместимости).
-    """
-    whitelist_enabled: bool = False
-    blacklist_enabled: bool = False
-    whitelist_ids: list[int] = None  # type: ignore[assignment]
-    whitelist_usernames: list[str] = None  # type: ignore[assignment]
-    blacklist_ids: list[int] = None  # type: ignore[assignment]
-    blacklist_usernames: list[str] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.whitelist_ids is None:
-            self.whitelist_ids = []
-        if self.whitelist_usernames is None:
-            self.whitelist_usernames = []
-        if self.blacklist_ids is None:
-            self.blacklist_ids = []
-        if self.blacklist_usernames is None:
-            self.blacklist_usernames = []
 
 
 class AccessControlService:
@@ -45,19 +21,7 @@ class AccessControlService:
 
     def __init__(self):
         """Инициализация сервиса (без параметров, так как используется БД)"""
-        self._config_cache: Optional[AccessControlConfig] = None
-
-    @property
-    def _config(self) -> AccessControlConfig:
-        """
-        Свойство для обратной совместимости.
-        ВНИМАНИЕ: Использует кэш, который может быть устаревшим.
-        Для актуальных данных используйте async методы или get_config().
-        """
-        if self._config_cache is None:
-            # Возвращаем пустую конфигурацию по умолчанию
-            self._config_cache = AccessControlConfig()
-        return self._config_cache
+        pass
 
     async def _get_config(self, session: AsyncSession) -> AccessControl:
         """Получает или создаёт конфигурацию доступа"""

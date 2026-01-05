@@ -5,6 +5,44 @@
 # ==============================================================================
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: taobao-scraper-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-taobao_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-taobao_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taobao_user} -d ${POSTGRES_DB:-taobao_bot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - taobao-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: taobao-scraper-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - taobao-network
+
   taobao-bot:
     build:
       context: .
@@ -24,6 +62,16 @@ services:
     environment:
       - TZ=Europe/Moscow
       - PYTHONUNBUFFERED=1
+
+    # Зависимости от БД и Redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    networks:
+      - taobao-network
 
     ports:
       - "${MINI_APP_PORT:-8081}:${MINI_APP_PORT:-8081}"
@@ -61,3 +109,13 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  taobao-network:
+    driver: bridge

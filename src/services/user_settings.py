@@ -1,21 +1,29 @@
 """
 Сервис для управления настройками пользователей.
-Хранит настройки в JSON файле для простоты (без БД).
+Версия для работы с PostgreSQL через SQLAlchemy.
 """
 
-import json
-import os
 from typing import Optional
-from pathlib import Path
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.core.config import settings
+from src.db.session import get_session
+from src.db.models import User, UserSettings as UserSettingsModel
+
+
+try:
+    MSK = ZoneInfo("Europe/Moscow")
+except ZoneInfoNotFoundError:
+    MSK = timezone(timedelta(hours=3))
 
 
 @dataclass
 class UserSettings:
-    """Настройки пользователя"""
+    """Настройки пользователя (dataclass для обратной совместимости)"""
     signature: str = ""  # Полная подпись пользователя (если пустая, не добавляется в пост)
     default_currency: str = "cny"  # cny или rub
     exchange_rate: Optional[float] = None  # Курс обмена для рубля
@@ -25,189 +33,137 @@ class UserSettings:
     monthly_limit: Optional[int] = None  # Индивидуальный месячный лимит (None → глобальный/без ограничения)
 
 
+def _date_to_iso(d: date) -> str:
+    """Конвертирует date в ISO строку"""
+    return d.isoformat() if d else ""
+
+
+def _iso_to_date(s: str) -> date:
+    """Конвертирует ISO строку в date"""
+    try:
+        return date.fromisoformat(s)
+    except Exception:
+        return date.today()
+
+
+def _model_to_dataclass(model: UserSettingsModel, user_model: Optional[User] = None) -> UserSettings:
+    """Конвертирует модель БД в dataclass"""
+    return UserSettings(
+        signature=model.signature or "",
+        default_currency=model.default_currency or "cny",
+        exchange_rate=model.exchange_rate,
+        price_mode=model.price_mode or "",
+        created_at=_date_to_iso(user_model.created_at) if user_model else "",
+        daily_limit=model.daily_limit,
+        monthly_limit=model.monthly_limit,
+    )
+
+
 class UserSettingsService:
-    """Сервис для работы с настройками пользователей"""
+    """Сервис для работы с настройками пользователей (работает с PostgreSQL)"""
     
-    def __init__(self, storage_file: str = "data/user_settings.json"):
-        """
-        Инициализация сервиса.
+    def __init__(self):
+        """Инициализация сервиса (без параметров, так как используется БД)"""
+        pass
+
+    async def _ensure_user(self, session: AsyncSession, user_id: int, username: Optional[str] = None) -> User:
+        """Создаёт пользователя, если его нет"""
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
         
-        Args:
-            storage_file: Путь к файлу для хранения настроек
-        """
-        self.storage_file = Path(storage_file)
-        self.storage_file.parent.mkdir(parents=True, exist_ok=True)
-        self._settings_cache: dict[int, UserSettings] = {}
-        self._load_settings()
-    
-    def _load_settings(self) -> None:
-        """Загружает настройки из файла"""
-        if self.storage_file.exists():
-            try:
-                with open(self.storage_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for user_id_str, settings_dict in data.items():
-                        user_id = int(user_id_str)
-                        # Обрабатываем exchange_rate: если None или null, устанавливаем None
-                        if 'exchange_rate' in settings_dict:
-                            rate = settings_dict['exchange_rate']
-                            if rate is None or (isinstance(rate, str) and rate.lower() == 'null'):
-                                settings_dict['exchange_rate'] = None
-                            else:
-                                try:
-                                    settings_dict['exchange_rate'] = float(rate)
-                                except (ValueError, TypeError):
-                                    settings_dict['exchange_rate'] = None
-                        # Валидируем режим цен
-                        pm = (settings_dict.get('price_mode') or '').strip().lower()
-                        if pm not in {'simple', 'advanced', ''}:
-                            pm = ''
-                        settings_dict['price_mode'] = pm
-
-                        # Валидируем дату создания
-                        created_at = (settings_dict.get('created_at') or '').strip()
-                        settings_dict['created_at'] = created_at
-
-                        # Валидируем лимиты
-                        def _normalize_limit(val):
-                            try:
-                                iv = int(val)
-                                return iv if iv > 0 else None
-                            except Exception:
-                                return None
-                        settings_dict['daily_limit'] = _normalize_limit(settings_dict.get('daily_limit'))
-                        settings_dict['monthly_limit'] = _normalize_limit(settings_dict.get('monthly_limit'))
-
-                        self._settings_cache[user_id] = UserSettings(**settings_dict)
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                # Если файл повреждён, начинаем с пустого кэша
-                if hasattr(settings, 'DEBUG_MODE') and settings.DEBUG_MODE:
-                    print(f"[UserSettings] Ошибка загрузки настроек: {e}")
-                self._settings_cache = {}
-        else:
-            self._settings_cache = {}
-    
-    def _save_settings(self) -> None:
-        """Сохраняет настройки в файл"""
-        data = {}
-        for user_id, user_settings in self._settings_cache.items():
-            data[str(user_id)] = asdict(user_settings)
+        if user is None:
+            now_msk = datetime.now(MSK).date()
+            user = User(user_id=user_id, username=username, created_at=now_msk)
+            session.add(user)
+            await session.flush()
+        elif username and user.username != username:
+            user.username = username
         
-        try:
-            with open(self.storage_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            if hasattr(settings, 'DEBUG_MODE') and settings.DEBUG_MODE:
-                print(f"[UserSettings] Ошибка сохранения настроек: {e}")
-    
-    def get_settings(self, user_id: int) -> UserSettings:
+        return user
+
+    async def _get_or_create_settings(self, session: AsyncSession, user_id: int, username: Optional[str] = None) -> tuple[UserSettingsModel, User]:
+        """Получает или создаёт настройки пользователя"""
+        user = await self._ensure_user(session, user_id, username)
+        
+        result = await session.execute(select(UserSettingsModel).where(UserSettingsModel.user_id == user_id))
+        user_settings = result.scalar_one_or_none()
+        
+        if user_settings is None:
+            # Создаём настройки по умолчанию
+            default_signature = getattr(settings, 'DEFAULT_SIGNATURE', '')
+            default_currency = getattr(settings, 'DEFAULT_CURRENCY', 'cny')
+            default_price_mode = (getattr(settings, 'PRICE_MODE', 'simple') or 'simple').strip().lower()
+            
+            user_settings = UserSettingsModel(
+                user_id=user_id,
+                signature=default_signature,
+                default_currency=default_currency,
+                price_mode=default_price_mode,
+            )
+            session.add(user_settings)
+            await session.flush()
+        
+        return user_settings, user
+
+    async def get_settings(self, user_id: int, username: Optional[str] = None) -> UserSettings:
         """
         Получает настройки пользователя.
         
         Args:
             user_id: Telegram ID пользователя
+            username: Telegram username (опционально, для обновления)
             
         Returns:
             UserSettings: Настройки пользователя (создаются с дефолтами, если не существуют)
         """
-        if user_id not in self._settings_cache:
-            # Создаём настройки по умолчанию
-            default_signature = getattr(settings, 'DEFAULT_SIGNATURE', '')
-            default_currency = getattr(settings, 'DEFAULT_CURRENCY', 'cny')
-            default_price_mode = (getattr(settings, 'PRICE_MODE', 'simple') or 'simple').strip().lower()
-            try:
-                now_msk = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
-            except ZoneInfoNotFoundError:
-                now_msk = datetime.now(timezone(timedelta(hours=3))).date().isoformat()
-            self._settings_cache[user_id] = UserSettings(
-                signature=default_signature,
-                default_currency=default_currency,
-                price_mode=default_price_mode,
-                created_at=now_msk
-            )
-            self._save_settings()
-        else:
-            # Обновляем устаревшие записи: создан, но без created_at
-            settings_obj = self._settings_cache[user_id]
-            if not getattr(settings_obj, "created_at", ""):
-                try:
-                    settings_obj.created_at = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
-                except ZoneInfoNotFoundError:
-                    settings_obj.created_at = datetime.now(timezone(timedelta(hours=3))).date().isoformat()
-                self._save_settings()
-        
-        return self._settings_cache[user_id]
-    
-    def update_signature(self, user_id: int, signature: str) -> UserSettings:
-        """
-        Обновляет подпись пользователя.
-        
-        Args:
-            user_id: Telegram ID пользователя
-            signature: Новая подпись
-            
-        Returns:
-            UserSettings: Обновлённые настройки
-        """
-        settings_obj = self.get_settings(user_id)
-        settings_obj.signature = signature.strip()
-        self._save_settings()
-        return settings_obj
-    
-    def update_currency(self, user_id: int, currency: str) -> UserSettings:
-        """
-        Обновляет валюту пользователя.
-        
-        Args:
-            user_id: Telegram ID пользователя
-            currency: Новая валюта (cny или rub)
-            
-        Returns:
-            UserSettings: Обновлённые настройки
-        """
-        settings_obj = self.get_settings(user_id)
-        currency_lower = currency.lower()
-        settings_obj.default_currency = currency_lower
-        
-        # Если переключились на CNY, сбрасываем курс
-        if currency_lower == "cny":
-            settings_obj.exchange_rate = None
-        
-        self._save_settings()
-        return settings_obj
-    
-    def update_exchange_rate(self, user_id: int, rate: float) -> UserSettings:
-        """
-        Обновляет курс обмена для пользователя.
-        
-        Args:
-            user_id: Telegram ID пользователя
-            rate: Курс обмена (1 юань = rate рублей)
-            
-        Returns:
-            UserSettings: Обновлённые настройки
-        """
-        settings_obj = self.get_settings(user_id)
-        settings_obj.exchange_rate = rate
-        self._save_settings()
-        return settings_obj
+        async for session in get_session():
+            user_settings_model, user_model = await self._get_or_create_settings(session, user_id, username)
+            await session.commit()
+            return _model_to_dataclass(user_settings_model, user_model)
 
-    def update_price_mode(self, user_id: int, price_mode: str) -> UserSettings:
-        """
-        Обновляет режим цен для пользователя.
-        """
-        normalized = (price_mode or "").strip().lower()
-        if normalized not in {"simple", "advanced"}:
-            normalized = ""
-        settings_obj = self.get_settings(user_id)
-        settings_obj.price_mode = normalized
-        self._save_settings()
-        return settings_obj
+    async def update_signature(self, user_id: int, signature: str, username: Optional[str] = None) -> UserSettings:
+        """Обновляет подпись пользователя"""
+        async for session in get_session():
+            user_settings, user = await self._get_or_create_settings(session, user_id, username)
+            user_settings.signature = signature.strip()
+            await session.commit()
+            return _model_to_dataclass(user_settings, user)
 
-    def update_limits(self, user_id: int, daily_limit: int | None = None, monthly_limit: int | None = None) -> UserSettings:
-        """
-        Обновляет индивидуальные лимиты пользователя.
-        """
+    async def update_currency(self, user_id: int, currency: str, username: Optional[str] = None) -> UserSettings:
+        """Обновляет валюту пользователя"""
+        async for session in get_session():
+            user_settings, user = await self._get_or_create_settings(session, user_id, username)
+            currency_lower = currency.lower()
+            user_settings.default_currency = currency_lower
+            
+            # Если переключились на CNY, сбрасываем курс
+            if currency_lower == "cny":
+                user_settings.exchange_rate = None
+            
+            await session.commit()
+            return _model_to_dataclass(user_settings, user)
+
+    async def update_exchange_rate(self, user_id: int, rate: float, username: Optional[str] = None) -> UserSettings:
+        """Обновляет курс обмена для пользователя"""
+        async for session in get_session():
+            user_settings, user = await self._get_or_create_settings(session, user_id, username)
+            user_settings.exchange_rate = rate
+            await session.commit()
+            return _model_to_dataclass(user_settings, user)
+
+    async def update_price_mode(self, user_id: int, price_mode: str, username: Optional[str] = None) -> UserSettings:
+        """Обновляет режим цен для пользователя"""
+        async for session in get_session():
+            user_settings, user = await self._get_or_create_settings(session, user_id, username)
+            normalized = (price_mode or "").strip().lower()
+            if normalized not in {"simple", "advanced"}:
+                normalized = ""
+            user_settings.price_mode = normalized
+            await session.commit()
+            return _model_to_dataclass(user_settings, user)
+
+    async def update_limits(self, user_id: int, daily_limit: int | None = None, monthly_limit: int | None = None, username: Optional[str] = None) -> UserSettings:
+        """Обновляет индивидуальные лимиты пользователя"""
         def _norm(val):
             if val is None:
                 return None
@@ -216,28 +172,18 @@ class UserSettingsService:
                 return iv if iv > 0 else None
             except Exception:
                 return None
-        settings_obj = self.get_settings(user_id)
-        if daily_limit is not None:
-            settings_obj.daily_limit = _norm(daily_limit)
-        if monthly_limit is not None:
-            settings_obj.monthly_limit = _norm(monthly_limit)
-        self._save_settings()
-        return settings_obj
-
-    def update_price_mode(self, user_id: int, price_mode: str) -> UserSettings:
-        """
-        Обновляет режим цен для пользователя.
-        """
-        normalized = (price_mode or "").strip().lower()
-        if normalized not in {"simple", "advanced"}:
-            normalized = ""
-        settings_obj = self.get_settings(user_id)
-        settings_obj.price_mode = normalized
-        self._save_settings()
-        return settings_obj
+        
+        async for session in get_session():
+            user_settings, user = await self._get_or_create_settings(session, user_id, username)
+            if daily_limit is not None:
+                user_settings.daily_limit = _norm(daily_limit)
+            if monthly_limit is not None:
+                user_settings.monthly_limit = _norm(monthly_limit)
+            await session.commit()
+            return _model_to_dataclass(user_settings, user)
 
 
-# Глобальный экземпляр сервиса, чтобы все компоненты (бот и мини-приложение) работали с одними данными
+# Глобальный экземпляр сервиса
 _DEFAULT_SERVICE = UserSettingsService()
 
 

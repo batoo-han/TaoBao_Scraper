@@ -1,30 +1,32 @@
 """
 Сервис лимитов запросов: суточные и месячные, глобальные и индивидуальные.
+Версия для работы с PostgreSQL через SQLAlchemy.
 Учёт ведётся по времени Европы/Москвы.
 """
 
 from __future__ import annotations
 
-import json
-import threading
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.services.user_settings import UserSettingsService
+from src.db.session import get_session
+from src.db.models import RateLimitGlobal, RateLimitUser, User
 
 
 try:
     MSK = ZoneInfo("Europe/Moscow")
 except ZoneInfoNotFoundError:
-    # Fallback для окружений без tzdata (Windows). Смещение +3.
     MSK = timezone(timedelta(hours=3))
 
 
 def _today_msk() -> date:
+    """Возвращает текущую дату в МСК"""
     return datetime.now(MSK).date()
 
 
@@ -32,10 +34,9 @@ def _add_months(d: date, months: int) -> date:
     """
     Добавляет месяцы к дате, корректируя день на конец месяца.
     """
+    from calendar import monthrange
     year = d.year + (d.month - 1 + months) // 12
     month = (d.month - 1 + months) % 12 + 1
-    # Последний день месяца
-    from calendar import monthrange
     last_day = monthrange(year, month)[1]
     return date(year, month, min(d.day, last_day))
 
@@ -55,204 +56,123 @@ def _month_period(month_start_str: str) -> tuple[date, date]:
 
 @dataclass
 class LimitCounters:
+    """Счётчики лимитов (для обратной совместимости)"""
     day_start: str
     day_count: int
     month_start: str
     month_count: int
-    day_cost: float = 0.0  # Стоимость запросов за день (USD)
-    month_cost: float = 0.0  # Стоимость запросов за месяц (USD)
+    day_cost: float = 0.0
+    month_cost: float = 0.0
 
 
 class RateLimitService:
     """
-    Хранит и проверяет лимиты запросов.
+    Хранит и проверяет лимиты запросов (работает с PostgreSQL).
     """
 
-    def __init__(self, user_settings_service: UserSettingsService, storage_file: str = "data/rate_limits.json") -> None:
+    def __init__(self, user_settings_service: UserSettingsService) -> None:
+        """
+        Инициализация сервиса.
+        
+        Args:
+            user_settings_service: Сервис настроек пользователей
+        """
         self.user_settings_service = user_settings_service
-        self.storage_file = Path(storage_file)
-        self.storage_file.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._data: Dict[str, Any] = {"global": {}, "users": {}, "pending_by_username": {}}
-        self._load()
 
-    # -------------------- внутренние helpers --------------------
-    def _load(self) -> None:
-        if not self.storage_file.exists():
-            self._data = {"global": {}, "users": {}}
-            return
-        try:
-            with open(self.storage_file, "r", encoding="utf-8") as fh:
-                self._data = json.load(fh)
-        except Exception:
-            self._data = {"global": {}, "users": {}, "pending_by_username": {}}
+    async def _get_or_create_global(self, session: AsyncSession) -> RateLimitGlobal:
+        """Получает или создаёт глобальные лимиты (одна запись с id=1)"""
+        result = await session.execute(select(RateLimitGlobal).where(RateLimitGlobal.id == 1))
+        global_limits = result.scalar_one_or_none()
+        
+        if global_limits is None:
+            today = _today_msk()
+            global_limits = RateLimitGlobal(
+                id=1,
+                day_start=today,
+                day_count=0,
+                month_start=today.replace(day=1),
+                month_count=0,
+                day_cost=0.0,
+                month_cost=0.0,
+            )
+            session.add(global_limits)
+            await session.flush()
+        
+        return global_limits
 
-    def _save(self) -> None:
-        with open(self.storage_file, "w", encoding="utf-8") as fh:
-            json.dump(self._data, fh, ensure_ascii=False, indent=2)
+    async def _get_or_create_user_limits(self, session: AsyncSession, user_id: int, created_at: Optional[date] = None) -> RateLimitUser:
+        """Получает или создаёт лимиты пользователя (одна запись на пользователя)"""
+        result = await session.execute(select(RateLimitUser).where(RateLimitUser.user_id == user_id))
+        user_limits = result.scalar_one_or_none()
+        
+        if user_limits is None:
+            today = _today_msk()
+            month_start = created_at.replace(day=1) if created_at else today.replace(day=1)
+            user_limits = RateLimitUser(
+                user_id=user_id,
+                day_start=today,
+                day_count=0,
+                month_start=month_start,
+                month_count=0,
+                day_cost=0.0,
+                month_cost=0.0,
+            )
+            session.add(user_limits)
+            await session.flush()
+        
+        return user_limits
 
-    def _ensure_global(self) -> LimitCounters:
-        today = _today_msk().isoformat()
-        month_start = _today_msk().replace(day=1).isoformat()
-        g = self._data.setdefault("global", {})
-        if not g:
-            g.update({
-                "day_start": today,
-                "day_count": 0,
-                "month_start": month_start,
-                "month_count": 0,
-                "day_cost": 0.0,
-                "month_cost": 0.0,
-            })
-        return LimitCounters(
-            day_start=g.get("day_start", today),
-            day_count=int(g.get("day_count", 0)),
-            month_start=g.get("month_start", month_start),
-            month_count=int(g.get("month_count", 0)),
-            day_cost=float(g.get("day_cost", 0.0)),
-            month_cost=float(g.get("month_cost", 0.0)),
-        )
-
-    def _ensure_user(self, user_id: int, created_at: Optional[str]) -> LimitCounters:
+    async def _reset_if_needed_global(self, session: AsyncSession, global_limits: RateLimitGlobal) -> RateLimitGlobal:
+        """Сбрасывает глобальные счётчики, если нужно"""
         today = _today_msk()
-        users = self._data.setdefault("users", {})
-        entry = users.get(str(user_id), {})
+        
+        # Сброс дня
+        if global_limits.day_start != today:
+            global_limits.day_start = today
+            global_limits.day_count = 0
+            global_limits.day_cost = 0.0
+        
+        # Сброс месяца
+        month_start = today.replace(day=1)
+        if global_limits.month_start != month_start:
+            global_limits.month_start = month_start
+            global_limits.month_count = 0
+            global_limits.month_cost = 0.0
+        
+        return global_limits
 
-        # Определяем старт месяца для пользователя
-        month_anchor_str = entry.get("month_start") or (created_at or today.replace(day=1).isoformat())
-        try:
-            month_anchor = date.fromisoformat(month_anchor_str)
-        except Exception:
-            month_anchor = today.replace(day=1)
-        # Прокручиваем, если прошло >= 1 месяца
+    async def _reset_if_needed_user(self, session: AsyncSession, user_limits: RateLimitUser, created_at: Optional[date] = None) -> RateLimitUser:
+        """Сбрасывает пользовательские счётчики, если нужно"""
+        today = _today_msk()
+        
+        # Сброс дня
+        if user_limits.day_start != today:
+            user_limits.day_start = today
+            user_limits.day_count = 0
+            user_limits.day_cost = 0.0
+        
+        # Сброс месяца
+        month_anchor = user_limits.month_start
         while _add_months(month_anchor, 1) <= today:
             month_anchor = _add_months(month_anchor, 1)
-            entry["month_count"] = 0
-
-        # Суточный сброс
-        day_start_str = entry.get("day_start") or today.isoformat()
-        try:
-            day_start = date.fromisoformat(day_start_str)
-        except Exception:
-            day_start = today
-        if day_start != today:
-            entry["day_count"] = 0
-            entry["day_cost"] = 0.0  # Сбрасываем стоимость при смене дня
-            day_start = today
-
-        # Если месяц сдвинулся — обнуляем месячный счётчик
-        if month_anchor_str != month_anchor.isoformat():
-            entry["month_count"] = 0
-            entry["month_cost"] = 0.0  # Сбрасываем стоимость при смене месяца
-
-        entry.setdefault("day_count", 0)
-        entry.setdefault("month_count", 0)
-        entry.setdefault("day_cost", 0.0)
-        entry.setdefault("month_cost", 0.0)
-        entry["day_start"] = day_start.isoformat()
-        entry["month_start"] = month_anchor.isoformat()
-
-        users[str(user_id)] = entry
-        return LimitCounters(
-            day_start=entry["day_start"],
-            day_count=int(entry.get("day_count", 0)),
-            month_start=entry["month_start"],
-            month_count=int(entry.get("month_count", 0)),
-            day_cost=float(entry.get("day_cost", 0.0)),
-            month_cost=float(entry.get("month_cost", 0.0)),
-        )
-
-    def _reset_global_if_needed(self, counters: LimitCounters) -> LimitCounters:
-        today = _today_msk()
-        # День
-        try:
-            day_start = date.fromisoformat(counters.day_start)
-        except Exception:
-            day_start = today
-        if day_start != today:
-            counters.day_start = today.isoformat()
-            counters.day_count = 0
-            counters.day_cost = 0.0  # Сбрасываем стоимость при смене дня
-        # Месяц
-        try:
-            month_start = date.fromisoformat(counters.month_start)
-        except Exception:
-            month_start = today.replace(day=1)
-        first_day_current_month = today.replace(day=1)
-        if month_start != first_day_current_month:
-            counters.month_start = first_day_current_month.isoformat()
-            counters.month_count = 0
-            counters.month_cost = 0.0  # Сбрасываем стоимость при смене месяца
-        return counters
-
-    def _write_counters(self, user_id: Optional[int], user: LimitCounters | None, glob: LimitCounters | None) -> None:
-        if glob:
-            self._data["global"] = asdict(glob)
-        if user is not None and user_id is not None:
-            self._data.setdefault("users", {})
-            self._data["users"][str(user_id)] = asdict(user)
-        self._save()
+        
+        if user_limits.month_start != month_anchor:
+            user_limits.month_start = month_anchor
+            user_limits.month_count = 0
+            user_limits.month_cost = 0.0
+        
+        return user_limits
 
     def _remaining(self, limit: Optional[int], count: int) -> Optional[int]:
+        """Вычисляет остаток лимита"""
         if not limit:
             return None
         return max(limit - count, 0)
 
-    def set_pending_limits_by_username(self, username: str, daily_limit: Optional[int], monthly_limit: Optional[int]) -> None:
-        uname = (username or "").lstrip("@").lower()
-        if not uname:
-            return
-        pending = self._data.setdefault("pending_by_username", {})
-        pending[uname] = {
-            "daily_limit": daily_limit,
-            "monthly_limit": monthly_limit,
-        }
-        self._save()
-
-    def get_pending_limits_by_username(self, username: str) -> Optional[Dict[str, Any]]:
-        uname = (username or "").lstrip("@").lower()
-        if not uname:
-            return None
-        return (self._data.get("pending_by_username") or {}).get(uname)
-
-    def list_individual_limits(self) -> Dict[str, Any]:
-        """
-        Возвращает словарь с активными лимитами по ID и отложенными лимитами по username.
-        """
-        return {
-            "users": self._data.get("users", {}),
-            "pending_by_username": self._data.get("pending_by_username", {}),
-        }
-
-    def list_limits_full(self) -> Dict[str, Any]:
-        """
-        Возвращает все лимиты:
-        - settings: индивидуальные лимиты из user_settings (daily/monthly), даже если счётчики ещё не создавались
-        - usage: счётчики day/month из rate_limits.json
-        - pending_by_username: отложенные лимиты по username
-        """
-        settings_limits = {}
-        try:
-            cache = getattr(self.user_settings_service, "_settings_cache", {}) or {}
-            for uid, us in cache.items():
-                settings_limits[str(uid)] = {
-                    "daily_limit": getattr(us, "daily_limit", None),
-                    "monthly_limit": getattr(us, "monthly_limit", None),
-                }
-        except Exception:
-            settings_limits = {}
-
-        return {
-            "settings": settings_limits,
-            "usage": self._data.get("users", {}),
-            "pending_by_username": self._data.get("pending_by_username", {}),
-        }
-
-    # -------------------- публичные методы --------------------
     def _build_snapshot(
         self,
-        u: LimitCounters,
-        g: LimitCounters,
+        u: RateLimitUser,
+        g: RateLimitGlobal,
         per_user_daily: Optional[int],
         per_user_monthly: Optional[int],
         total_daily: Optional[int],
@@ -260,6 +180,7 @@ class RateLimitService:
         whitelist_enabled: bool,
         is_admin: bool,
     ) -> Dict[str, Any]:
+        """Строит snapshot для ответа"""
         if is_admin:
             return {"unlimited": True}
 
@@ -277,16 +198,16 @@ class RateLimitService:
                     "limit": per_user_daily,
                     "count": u.day_count,
                     "remaining": self._remaining(per_user_daily, u.day_count),
-                    "cost": u.day_cost,  # Стоимость запросов пользователя за день
-                    "reset_at": datetime.combine(date.fromisoformat(u.day_start), datetime.min.time(), MSK).replace(hour=23, minute=59, second=59).isoformat(),
+                    "cost": u.day_cost,
+                    "reset_at": datetime.combine(u.day_start, datetime.min.time(), MSK).replace(hour=23, minute=59, second=59).isoformat(),
                 },
                 "monthly": {
                     "limit": per_user_monthly,
                     "count": u.month_count,
                     "remaining": self._remaining(per_user_monthly, u.month_count),
-                    "cost": u.month_cost,  # Стоимость запросов пользователя за месяц
-                    "reset_at": _add_months(date.fromisoformat(u.month_start), 1).isoformat(),
-                    "period": _month_period(u.month_start),
+                    "cost": u.month_cost,
+                    "reset_at": _add_months(u.month_start, 1).isoformat(),
+                    "period": _month_period(u.month_start.isoformat()),
                 },
             },
             "global": {
@@ -294,21 +215,21 @@ class RateLimitService:
                     "limit": total_daily,
                     "count": g.day_count,
                     "remaining": self._remaining(total_daily, g.day_count),
-                    "cost": g.day_cost,  # Общая стоимость запросов всех пользователей за день
-                    "reset_at": datetime.combine(date.fromisoformat(g.day_start), datetime.min.time(), MSK).replace(hour=23, minute=59, second=59).isoformat(),
+                    "cost": g.day_cost,
+                    "reset_at": datetime.combine(g.day_start, datetime.min.time(), MSK).replace(hour=23, minute=59, second=59).isoformat(),
                 },
                 "monthly": {
                     "limit": total_monthly,
                     "count": g.month_count,
                     "remaining": self._remaining(total_monthly, g.month_count),
-                    "cost": g.month_cost,  # Общая стоимость запросов всех пользователей за месяц
-                    "reset_at": _add_months(date.fromisoformat(g.month_start), 1).isoformat(),
-                    "period": _month_period(g.month_start),
+                    "cost": g.month_cost,
+                    "reset_at": _add_months(g.month_start, 1).isoformat(),
+                    "period": _month_period(g.month_start.isoformat()),
                 },
             },
         }
 
-    def snapshot(
+    async def snapshot(
         self,
         user_id: int,
         is_admin: bool,
@@ -320,11 +241,23 @@ class RateLimitService:
         """
         Возвращает текущие счётчики и остатки без инкремента.
         """
-        with self._lock:
-            g = self._reset_global_if_needed(self._ensure_global())
-            u = self._ensure_user(user_id, created_at)
-            self._write_counters(user_id, u, g)
-
+        created_at_date = None
+        if created_at:
+            try:
+                created_at_date = date.fromisoformat(created_at)
+            except Exception:
+                pass
+        
+        async for session in get_session():
+            g = await self._get_or_create_global(session)
+            g = await self._reset_if_needed_global(session, g)
+            
+            u = await self._get_or_create_user_limits(session, user_id, created_at_date)
+            u = await self._reset_if_needed_user(session, u, created_at_date)
+            
+            await session.commit()
+            
+            # Получаем лимиты из настроек или админских настроек
             per_user_daily = user_daily_limit if user_daily_limit is not None else getattr(settings, "PER_USER_DAILY_LIMIT", None)
             per_user_monthly = user_monthly_limit if user_monthly_limit is not None else getattr(settings, "PER_USER_MONTHLY_LIMIT", None)
             total_daily = getattr(settings, "TOTAL_DAILY_LIMIT", None)
@@ -341,7 +274,7 @@ class RateLimitService:
                 is_admin=is_admin,
             )
 
-    def consume(
+    async def consume(
         self,
         user_id: int,
         is_admin: bool,
@@ -356,48 +289,50 @@ class RateLimitService:
         """
         Проверяет лимиты, опционально инкрементирует счётчики (increment=True).
         Возвращает словарь с полями allowed, reason, snapshot.
-        enforce_limits_override: True/False чтобы принудительно включить/выключить блокировки, None — по whitelist_enabled.
         """
+        created_at_date = None
+        if created_at:
+            try:
+                created_at_date = date.fromisoformat(created_at)
+            except Exception:
+                pass
+
         if is_admin:
             # Админы не ограничиваются, но usage считаем для метрик
-            with self._lock:
-                g = self._reset_global_if_needed(self._ensure_global())
-                u = self._ensure_user(user_id, created_at)
+            async for session in get_session():
+                g = await self._get_or_create_global(session)
+                g = await self._reset_if_needed_global(session, g)
+                
+                u = await self._get_or_create_user_limits(session, user_id, created_at_date)
+                u = await self._reset_if_needed_user(session, u, created_at_date)
+                
                 if increment:
                     u.day_count += 1
                     u.month_count += 1
                     g.day_count += 1
                     g.month_count += 1
-                    self._write_counters(user_id, u, g)
-            return {"allowed": True, "snapshot": {"unlimited": True}}
+                
+                await session.commit()
+                return {"allowed": True, "snapshot": {"unlimited": True}}
 
-        with self._lock:
+        async for session in get_session():
             # Применяем отложенные лимиты по username, если есть
-            if username:
-                uname = username.lstrip("@").lower()
-                pending = self._data.get("pending_by_username", {}).get(uname)
-                if pending:
-                    self.user_settings_service.update_limits(
-                        user_id,
-                        daily_limit=pending.get("daily_limit"),
-                        monthly_limit=pending.get("monthly_limit"),
-                    )
-                    # после применения переносим в обычные user-счётчики
-                    self._data.get("pending_by_username", {}).pop(uname, None)
-
-            g = self._reset_global_if_needed(self._ensure_global())
-            u = self._ensure_user(user_id, created_at)
+            # TODO: реализовать pending_by_username через Redis или отдельную таблицу
+            # Пока пропускаем эту логику
+            
+            g = await self._get_or_create_global(session)
+            g = await self._reset_if_needed_global(session, g)
+            
+            u = await self._get_or_create_user_limits(session, user_id, created_at_date)
+            u = await self._reset_if_needed_user(session, u, created_at_date)
 
             per_user_daily = user_daily_limit if user_daily_limit is not None else getattr(settings, "PER_USER_DAILY_LIMIT", None)
             per_user_monthly = user_monthly_limit if user_monthly_limit is not None else getattr(settings, "PER_USER_MONTHLY_LIMIT", None)
             total_daily = getattr(settings, "TOTAL_DAILY_LIMIT", None)
             total_monthly = getattr(settings, "TOTAL_MONTHLY_LIMIT", None)
 
-            # Индивидуальные лимиты имеют приоритет над глобальными (и могут быть больше), total сохраняем
-            # Если whitelist отключён — не блокируем, но считаем usage
             enforce_limits = enforce_limits_override if enforce_limits_override is not None else bool(whitelist_enabled)
 
-            # Проверки
             def _exceeded(limit: Optional[int], count: int) -> bool:
                 return bool(limit) and count >= limit
 
@@ -468,8 +403,8 @@ class RateLimitService:
                 u.month_count += 1
                 g.day_count += 1
                 g.month_count += 1
-                # Стоимость добавляется только в commit_success, здесь не трогаем
-                self._write_counters(user_id, u, g)
+
+            await session.commit()
 
             snap = self._build_snapshot(
                 u=u, g=g,
@@ -485,21 +420,7 @@ class RateLimitService:
                 "snapshot": snap,
             }
 
-    def get_global_cost_stats(self) -> Dict[str, float]:
-        """
-        Возвращает глобальную статистику стоимости (для всех пользователей, включая админов).
-        
-        Returns:
-            Dict с полями day_cost и month_cost
-        """
-        with self._lock:
-            g = self._reset_global_if_needed(self._ensure_global())
-            return {
-                "day_cost": g.day_cost,
-                "month_cost": g.month_cost,
-            }
-
-    def commit_success(
+    async def commit_success(
         self,
         user_id: int,
         user_daily_limit: Optional[int],
@@ -512,24 +433,20 @@ class RateLimitService:
     ) -> Dict[str, Any]:
         """
         Фиксирует успешный запрос: инкремент счётчиков без повторной блокировки.
-        
-        Args:
-            user_id: ID пользователя
-            user_daily_limit: Дневной лимит пользователя
-            user_monthly_limit: Месячный лимит пользователя
-            created_at: Дата создания пользователя
-            username: Имя пользователя (опционально)
-            request_cost: Стоимость запроса в USD (только для OpenAI/ProxyAPI, 0.0 для YandexGPT)
-            is_admin: Является ли пользователь администратором
-            whitelist_enabled: Включен ли whitelist (влияет на отображение лимитов в snapshot)
-        
-        Returns:
-            Dict с полем snapshot, содержащим текущую статистику
         """
-        # Обновляем счётчики и стоимость
-        with self._lock:
-            g = self._reset_global_if_needed(self._ensure_global())
-            u = self._ensure_user(user_id, created_at)
+        created_at_date = None
+        if created_at:
+            try:
+                created_at_date = date.fromisoformat(created_at)
+            except Exception:
+                pass
+
+        async for session in get_session():
+            g = await self._get_or_create_global(session)
+            g = await self._reset_if_needed_global(session, g)
+            
+            u = await self._get_or_create_user_limits(session, user_id, created_at_date)
+            u = await self._reset_if_needed_user(session, u, created_at_date)
             
             # Добавляем стоимость к счётчикам (для всех, включая админов)
             if request_cost > 0:
@@ -544,19 +461,22 @@ class RateLimitService:
             g.day_count += 1
             g.month_count += 1
             
-            self._write_counters(user_id, u, g)
+            await session.commit()
         
         # Для админов возвращаем unlimited snapshot, но с глобальной статистикой стоимости
         if is_admin:
-            return {
-                "snapshot": {
-                    "unlimited": True,
-                    "global": {
-                        "daily": {"cost": g.day_cost},
-                        "monthly": {"cost": g.month_cost},
-                    },
+            async for session in get_session():
+                g = await self._get_or_create_global(session)
+                await session.commit()
+                return {
+                    "snapshot": {
+                        "unlimited": True,
+                        "global": {
+                            "daily": {"cost": g.day_cost},
+                            "monthly": {"cost": g.month_cost},
+                        },
+                    }
                 }
-            }
         
         # Получаем финальный snapshot для обычных пользователей
         per_user_daily = user_daily_limit if user_daily_limit is not None else getattr(settings, "PER_USER_DAILY_LIMIT", None)
@@ -564,16 +484,51 @@ class RateLimitService:
         total_daily = getattr(settings, "TOTAL_DAILY_LIMIT", None)
         total_monthly = getattr(settings, "TOTAL_MONTHLY_LIMIT", None)
         
-        snap = self._build_snapshot(
-            u=u,
-            g=g,
-            per_user_daily=per_user_daily,
-            per_user_monthly=per_user_monthly,
-            total_daily=total_daily,
-            total_monthly=total_monthly,
-            whitelist_enabled=whitelist_enabled,
-            is_admin=False,
-        )
-        
-        return {"snapshot": snap}
+        async for session in get_session():
+            g = await self._get_or_create_global(session)
+            u = await self._get_or_create_user_limits(session, user_id, created_at_date)
+            await session.commit()
+            
+            snap = self._build_snapshot(
+                u=u,
+                g=g,
+                per_user_daily=per_user_daily,
+                per_user_monthly=per_user_monthly,
+                total_daily=total_daily,
+                total_monthly=total_monthly,
+                whitelist_enabled=whitelist_enabled,
+                is_admin=False,
+            )
+            
+            return {"snapshot": snap}
 
+    async def get_global_cost_stats(self) -> Dict[str, float]:
+        """Возвращает глобальную статистику стоимости"""
+        async for session in get_session():
+            g = await self._get_or_create_global(session)
+            g = await self._reset_if_needed_global(session, g)
+            await session.commit()
+            return {
+                "day_cost": g.day_cost,
+                "month_cost": g.month_cost,
+            }
+
+    async def set_pending_limits_by_username(self, username: str, daily_limit: Optional[int], monthly_limit: Optional[int]) -> None:
+        """Устанавливает отложенные лимиты по username (TODO: реализовать через Redis)"""
+        # TODO: реализовать через Redis или отдельную таблицу
+        pass
+
+    async def get_pending_limits_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        """Получает отложенные лимиты по username (TODO: реализовать через Redis)"""
+        # TODO: реализовать через Redis или отдельную таблицу
+        return None
+
+    async def list_individual_limits(self) -> Dict[str, Any]:
+        """Возвращает словарь с активными лимитами по ID"""
+        # TODO: реализовать получение всех пользователей из БД
+        return {"users": {}, "pending_by_username": {}}
+
+    async def list_limits_full(self) -> Dict[str, Any]:
+        """Возвращает все лимиты"""
+        # TODO: реализовать получение всех пользователей из БД
+        return {"settings": {}, "usage": {}, "pending_by_username": {}}

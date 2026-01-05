@@ -195,11 +195,11 @@ class MiniAppServer:
             raise WebAppAuthError("Заголовок X-Telegram-Init-Data обязателен для API Mimi App")
         return validate_init_data(init_data, self.bot_token)
 
-    def _serialize_user_settings(self, user_id: int) -> Dict[str, Any]:
+    async def _serialize_user_settings(self, user_id: int) -> Dict[str, Any]:
         """
         Преобразует пользовательские настройки к JSON-формату.
         """
-        settings_obj = self.user_settings_service.get_settings(user_id)
+        settings_obj = await self.user_settings_service.get_settings(user_id)
         return {
             "signature": settings_obj.signature,
             "default_currency": settings_obj.default_currency,
@@ -234,7 +234,7 @@ class MiniAppServer:
         except WebAppAuthError as exc:
             return web.json_response({"error": str(exc)}, status=401)
 
-        user_payload = self._serialize_user_settings(user_ctx.user_id)
+        user_payload = await self._serialize_user_settings(user_ctx.user_id)
         result: Dict[str, Any] = {
             "user": {
                 "profile": user_ctx.as_dict,
@@ -250,7 +250,7 @@ class MiniAppServer:
         if self._is_admin(user_ctx.user_id):
             result["role"] = "admin"
             result["admin"] = {
-                "settings": self.admin_settings_service.get_payload(),
+                "settings": await self.admin_settings_service.get_payload(),
             }
         else:
             result["role"] = "user"
@@ -292,12 +292,12 @@ class MiniAppServer:
             return web.json_response({"error": "Подпись не должна превышать 64 символа"}, status=400)
 
         if signature:
-            self.user_settings_service.update_signature(target_user_id, signature)
+            await self.user_settings_service.update_signature(target_user_id, signature)
 
         if currency:
             if currency not in {"cny", "rub"}:
                 return web.json_response({"error": "Доступны только валюты CNY или RUB"}, status=400)
-            self.user_settings_service.update_currency(target_user_id, currency)
+            await self.user_settings_service.update_currency(target_user_id, currency)
 
         if exchange_rate is not None:
             try:
@@ -306,13 +306,13 @@ class MiniAppServer:
                     raise ValueError
             except (TypeError, ValueError):
                 return web.json_response({"error": "Курс должен быть положительным числом"}, status=400)
-            self.user_settings_service.update_exchange_rate(target_user_id, rate_value)
+            await self.user_settings_service.update_exchange_rate(target_user_id, rate_value)
 
         if price_mode:
             if price_mode not in {"simple", "advanced", "inherit"}:
                 return web.json_response({"error": "Режим цен должен быть simple, advanced или inherit"}, status=400)
             normalized = "" if price_mode == "inherit" else price_mode
-            self.user_settings_service.update_price_mode(target_user_id, normalized)
+            await self.user_settings_service.update_price_mode(target_user_id, normalized)
 
         if daily_limit is not None or monthly_limit is not None:
             if not self._is_admin(user_ctx.user_id):
@@ -331,9 +331,9 @@ class MiniAppServer:
                 return web.json_response({"error": "daily_limit должен быть положительным числом"}, status=400)
             if monthly_limit not in (None, "") and ml is None:
                 return web.json_response({"error": "monthly_limit должен быть положительным числом"}, status=400)
-            self.user_settings_service.update_limits(target_user_id, dl, ml)
+            await self.user_settings_service.update_limits(target_user_id, dl, ml)
 
-        updated = self._serialize_user_settings(target_user_id)
+        updated = await self._serialize_user_settings(target_user_id)
         return web.json_response({"status": "ok", "settings": updated})
 
     async def handle_update_admin_llm(self, request: web.Request) -> web.Response:
@@ -358,7 +358,7 @@ class MiniAppServer:
             return web.json_response({"error": "Заполните все поля LLM"}, status=400)
 
         translate_legacy = bool(payload.get("translate_legacy"))
-        updated = self.admin_settings_service.update_llm_block(
+        updated = await self.admin_settings_service.update_llm_block(
             default_llm=payload["default_llm"],
             yandex_model=payload["yandex_model"],
             openai_model=payload["openai_model"],
@@ -397,7 +397,7 @@ class MiniAppServer:
         if len(forward_channel_id) > 128:
             return web.json_response({"error": "ID канала не должен превышать 128 символов"}, status=400)
 
-        updated = self.admin_settings_service.update_feature_flags(
+        updated = await self.admin_settings_service.update_feature_flags(
             convert_currency=bool(payload.get("convert_currency")),
             tmapi_notify_439=bool(payload.get("tmapi_notify_439")),
             debug_mode=bool(payload.get("debug_mode")),

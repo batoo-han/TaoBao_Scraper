@@ -11,7 +11,12 @@ License: MIT
 ==============================================================================
 """
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+except ImportError:
+    # Fallback для старых версий pydantic
+    from pydantic import BaseSettings, Field
+    SettingsConfigDict = dict
 
 
 class Settings(BaseSettings):
@@ -199,11 +204,36 @@ class Settings(BaseSettings):
     PROXYAPI_PROMPT_PRICE_PER_1M: float = 0.0  # Цена за 1M входных токенов
     PROXYAPI_COMPLETION_PRICE_PER_1M: float = 0.0  # Цена за 1M выходных токенов
 
+    # Database (PostgreSQL)
+    POSTGRES_DB: str = "taobao_bot"  # Имя базы данных
+    POSTGRES_USER: str = "taobao_user"  # Пользователь PostgreSQL
+    POSTGRES_PASSWORD: str = "changeme"  # Пароль PostgreSQL
+    POSTGRES_HOST: str = "localhost"  # Хост PostgreSQL (localhost для локальной БД, postgres для Docker)
+    POSTGRES_PORT: int = 5432  # Порт PostgreSQL
+    DATABASE_URL: str = ""  # Строка подключения к PostgreSQL (формируется автоматически из компонентов)
+    DB_POOL_SIZE: int = 10  # Размер пула соединений с БД
+    DB_MAX_OVERFLOW: int = 20  # Максимальное переполнение пула соединений
+    
+    # Redis
+    REDIS_URL: str = "redis://:changeme@redis:6379/0"  # Строка подключения к Redis
+    REDIS_PASSWORD: str = "changeme"  # Пароль Redis
+    REDIS_PORT: int = 6379  # Порт Redis
+    REDIS_DB: int = 0  # Номер базы данных Redis
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra='ignore'  # Игнорировать лишние переменные в .env (на случай устаревших ключей)
     )
+    
+    def __init__(self, **kwargs):
+        """Инициализация с автоматическим формированием DATABASE_URL"""
+        super().__init__(**kwargs)
+        # Формируем DATABASE_URL из компонентов, если он не указан явно в .env
+        if not self.DATABASE_URL or self.DATABASE_URL.strip() == "":
+            from urllib.parse import quote_plus
+            encoded_password = quote_plus(self.POSTGRES_PASSWORD)
+            self.DATABASE_URL = f"postgresql+asyncpg://{self.POSTGRES_USER}:{encoded_password}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
 
 settings = Settings()

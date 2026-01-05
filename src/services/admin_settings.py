@@ -1,18 +1,17 @@
 """
-Сервис для управления глобальными параметрами бота, доступными администратору через Mimi App.
-Хранит настройки в JSON файле и синхронно обновляет объект settings для горячего применения.
+Сервис для управления глобальными настройками администратора.
+Версия для работы с PostgreSQL через SQLAlchemy.
 """
 
-from __future__ import annotations
-
-import json
-import threading
-from dataclasses import dataclass, asdict, replace
-from pathlib import Path
-from typing import Any, Dict
+from dataclasses import dataclass, asdict
+from typing import Optional, Dict, Any
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api import llm_provider
 from src.core.config import settings
+from src.db.session import get_session
+from src.db.models import AdminSettings as AdminSettingsModel
 
 
 def _normalize_provider(raw: str | None) -> str:
@@ -34,7 +33,6 @@ def _normalize_channel_id(raw: str | int | None) -> str:
     value = str(raw).strip()
     if not value:
         return ""
-    # Разрешаем числовые ID (включая -100...) и username с @
     if value.startswith("@"):
         return value
     if value.lstrip("-").isdigit():
@@ -48,9 +46,8 @@ def _normalize_channel_id(raw: str | int | None) -> str:
 @dataclass
 class AdminSettings:
     """
-    Модель настроек, доступных админу.
+    Модель настроек, доступных админу (dataclass для обратной совместимости).
     """
-
     default_llm: str = "yandex"
     yandex_model: str = "yandexgpt-lite"
     openai_model: str = "gpt-4o-mini"
@@ -68,102 +65,102 @@ class AdminSettings:
     total_monthly_limit: int | None = None
 
 
+def _model_to_dataclass(model: AdminSettingsModel) -> AdminSettings:
+    """Конвертирует модель БД в dataclass"""
+    return AdminSettings(
+        default_llm=model.default_llm or "yandex",
+        yandex_model=model.yandex_model or "yandexgpt-lite",
+        openai_model=model.openai_model or "gpt-4o-mini",
+        translate_provider=model.translate_provider or "yandex",
+        translate_model=model.translate_model or "yandexgpt-lite",
+        translate_legacy=model.translate_legacy,
+        convert_currency=model.convert_currency,
+        tmapi_notify_439=model.tmapi_notify_439,
+        debug_mode=model.debug_mode,
+        mock_mode=model.mock_mode,
+        forward_channel_id=model.forward_channel_id or "",
+        per_user_daily_limit=model.per_user_daily_limit,
+        per_user_monthly_limit=model.per_user_monthly_limit,
+        total_daily_limit=model.total_daily_limit,
+        total_monthly_limit=model.total_monthly_limit,
+    )
+
+
 class AdminSettingsService:
     """
-    Управляет настройками администратора и синхронизирует их с рантаймом.
+    Сервис для управления глобальными настройками администратора (работает с PostgreSQL).
     """
 
-    def __init__(self, storage_file: str = "data/admin_settings.json") -> None:
-        self.storage_file = Path(storage_file)
-        self.storage_file.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self):
+        """Инициализация сервиса (без параметров, так как используется БД)"""
+        pass
 
-        self._lock = threading.Lock()
-        self._data = AdminSettings(
-            default_llm=_normalize_provider(getattr(settings, "DEFAULT_LLM", "yandex")),
-            yandex_model=getattr(settings, "YANDEX_GPT_MODEL", "yandexgpt-lite"),
-            openai_model=getattr(settings, "OPENAI_MODEL", "gpt-4o-mini"),
-            translate_provider=_normalize_provider(
-                getattr(settings, "TRANSLATE_PROVIDER", "") or getattr(settings, "DEFAULT_LLM", "yandex")
-            ),
-            translate_model=getattr(settings, "TRANSLATE_MODEL", "") or getattr(
-                settings, "YANDEX_GPT_MODEL", "yandexgpt-lite"
-            ),
-            translate_legacy=getattr(settings, "TRANSLATE_LEGACY", False),
-            convert_currency=getattr(settings, "CONVERT_CURRENCY", False),
-            tmapi_notify_439=getattr(settings, "TMAPI_NOTIFY_439", False),
-            debug_mode=getattr(settings, "DEBUG_MODE", False),
-            mock_mode=getattr(settings, "MOCK_MODE", False),
-            forward_channel_id=_normalize_channel_id(getattr(settings, "FORWARD_CHANNEL_ID", "")),
-            per_user_daily_limit=getattr(settings, "PER_USER_DAILY_LIMIT", None),
-            per_user_monthly_limit=getattr(settings, "PER_USER_MONTHLY_LIMIT", None),
-            total_daily_limit=getattr(settings, "TOTAL_DAILY_LIMIT", None),
-            total_monthly_limit=getattr(settings, "TOTAL_MONTHLY_LIMIT", None),
-        )
-        self._load_from_disk()
-        self.apply_to_runtime()
+    async def _get_or_create_settings(self, session: AsyncSession) -> AdminSettingsModel:
+        """Получает или создаёт настройки администратора"""
+        result = await session.execute(select(AdminSettingsModel).where(AdminSettingsModel.id == 1))
+        admin_settings = result.scalar_one_or_none()
+        
+        if admin_settings is None:
+            admin_settings = AdminSettingsModel(id=1)
+            # Инициализируем forward_channel_id из .env, если он указан
+            if not admin_settings.forward_channel_id:
+                env_forward_channel_id = getattr(settings, "FORWARD_CHANNEL_ID", "") or ""
+                if env_forward_channel_id:
+                    admin_settings.forward_channel_id = _normalize_channel_id(env_forward_channel_id)
+            session.add(admin_settings)
+            await session.commit()
+            await session.refresh(admin_settings)
+        else:
+            # Если запись существует, но forward_channel_id пустой, инициализируем из .env
+            if not admin_settings.forward_channel_id:
+                env_forward_channel_id = getattr(settings, "FORWARD_CHANNEL_ID", "") or ""
+                if env_forward_channel_id:
+                    admin_settings.forward_channel_id = _normalize_channel_id(env_forward_channel_id)
+                    await session.commit()
+                    await session.refresh(admin_settings)
+        
+        return admin_settings
 
-    def _load_from_disk(self) -> None:
+    async def get_settings(self) -> AdminSettings:
+        """Получает текущие настройки администратора"""
+        async for session in get_session():
+            model = await self._get_or_create_settings(session)
+            return _model_to_dataclass(model)
+
+    async def get_payload(self) -> Dict[str, Any]:
         """
-        Пробует загрузить сохранённые настройки.
+        Возвращает сериализуемое представление для Mimi App.
         """
-        if not self.storage_file.exists():
-            return
+        admin_settings = await self.get_settings()
+        return asdict(admin_settings)
 
-        try:
-            with open(self.storage_file, "r", encoding="utf-8") as fh:
-                payload = json.load(fh)
-        except (json.JSONDecodeError, OSError):
-            return
-
-        updated = replace(self._data, **{k: payload.get(k, getattr(self._data, k)) for k in asdict(self._data)})
-        updated.default_llm = _normalize_provider(payload.get("default_llm", updated.default_llm))
-        updated.translate_provider = _normalize_provider(payload.get("translate_provider", updated.translate_provider))
-        self._data = updated
-
-    def _save_to_disk(self) -> None:
-        """
-        Сохраняет настройки на диск.
-        """
-        with open(self.storage_file, "w", encoding="utf-8") as fh:
-            json.dump(asdict(self._data), fh, ensure_ascii=False, indent=2)
-
-    def apply_to_runtime(self) -> None:
+    async def apply_to_runtime(self) -> None:
         """
         Применяет текущие настройки к объекту settings и обнуляет кэши клиентов.
         """
-        settings.DEFAULT_LLM = self._data.default_llm
-        settings.YANDEX_GPT_MODEL = self._data.yandex_model
-        settings.OPENAI_MODEL = self._data.openai_model
-        settings.TRANSLATE_PROVIDER = self._data.translate_provider
-        settings.TRANSLATE_MODEL = self._data.translate_model
-        settings.TRANSLATE_LEGACY = self._data.translate_legacy
-        settings.CONVERT_CURRENCY = self._data.convert_currency
-        settings.TMAPI_NOTIFY_439 = self._data.tmapi_notify_439
-        settings.DEBUG_MODE = self._data.debug_mode
-        settings.MOCK_MODE = self._data.mock_mode
-        settings.FORWARD_CHANNEL_ID = self._data.forward_channel_id
-        settings.PER_USER_DAILY_LIMIT = self._data.per_user_daily_limit
-        settings.PER_USER_MONTHLY_LIMIT = self._data.per_user_monthly_limit
-        settings.TOTAL_DAILY_LIMIT = self._data.total_daily_limit
-        settings.TOTAL_MONTHLY_LIMIT = self._data.total_monthly_limit
+        admin_settings = await self.get_settings()
+        
+        settings.DEFAULT_LLM = admin_settings.default_llm
+        settings.YANDEX_GPT_MODEL = admin_settings.yandex_model
+        settings.OPENAI_MODEL = admin_settings.openai_model
+        settings.TRANSLATE_PROVIDER = admin_settings.translate_provider
+        settings.TRANSLATE_MODEL = admin_settings.translate_model
+        settings.TRANSLATE_LEGACY = admin_settings.translate_legacy
+        settings.CONVERT_CURRENCY = admin_settings.convert_currency
+        settings.TMAPI_NOTIFY_439 = admin_settings.tmapi_notify_439
+        settings.DEBUG_MODE = admin_settings.debug_mode
+        settings.MOCK_MODE = admin_settings.mock_mode
+        settings.FORWARD_CHANNEL_ID = admin_settings.forward_channel_id
+        settings.PER_USER_DAILY_LIMIT = admin_settings.per_user_daily_limit
+        settings.PER_USER_MONTHLY_LIMIT = admin_settings.per_user_monthly_limit
+        settings.TOTAL_DAILY_LIMIT = admin_settings.total_daily_limit
+        settings.TOTAL_MONTHLY_LIMIT = admin_settings.total_monthly_limit
 
         # Сбрасываем кэши, чтобы новые настройки вступили в силу немедленно
         llm_provider.reset_llm_cache()
         llm_provider.reset_translation_cache()
 
-    def get_settings(self) -> AdminSettings:
-        """
-        Возвращает копию текущих настроек.
-        """
-        return replace(self._data)
-
-    def get_payload(self) -> Dict[str, Any]:
-        """
-        Возвращает сериализуемое представление для Mimi App.
-        """
-        return asdict(self._data)
-
-    def update_llm_block(
+    async def update_llm_block(
         self,
         *,
         default_llm: str,
@@ -179,18 +176,18 @@ class AdminSettingsService:
         provider = _normalize_provider(default_llm)
         translate = _normalize_provider(translate_provider)
 
-        with self._lock:
-            self._data.default_llm = provider
-            self._data.yandex_model = yandex_model.strip() or self._data.yandex_model
-            self._data.openai_model = openai_model.strip() or self._data.openai_model
-            self._data.translate_provider = translate
-            self._data.translate_model = translate_model.strip() or self._data.translate_model
-            self._data.translate_legacy = bool(translate_legacy)
-            self._save_to_disk()
-            self.apply_to_runtime()
-            return replace(self._data)
+        updated = await self.update_settings(
+            default_llm=provider,
+            yandex_model=yandex_model.strip() or None,
+            openai_model=openai_model.strip() or None,
+            translate_provider=translate,
+            translate_model=translate_model.strip() or None,
+            translate_legacy=bool(translate_legacy),
+        )
+        await self.apply_to_runtime()
+        return updated
 
-    def update_feature_flags(
+    async def update_feature_flags(
         self,
         *,
         convert_currency: bool,
@@ -215,18 +212,72 @@ class AdminSettingsService:
             except Exception:
                 return None
 
-        with self._lock:
-            self._data.convert_currency = bool(convert_currency)
-            self._data.tmapi_notify_439 = bool(tmapi_notify_439)
-            self._data.debug_mode = bool(debug_mode)
-            self._data.mock_mode = bool(mock_mode)
-            self._data.forward_channel_id = _normalize_channel_id(forward_channel_id)
-            # Лимиты: None или int > 0
-            self._data.per_user_daily_limit = _norm_limit(per_user_daily_limit)
-            self._data.per_user_monthly_limit = _norm_limit(per_user_monthly_limit)
-            self._data.total_daily_limit = _norm_limit(total_daily_limit)
-            self._data.total_monthly_limit = _norm_limit(total_monthly_limit)
-            self._save_to_disk()
-            self.apply_to_runtime()
-            return replace(self._data)
+        updated = await self.update_settings(
+            convert_currency=bool(convert_currency),
+            tmapi_notify_439=bool(tmapi_notify_439),
+            debug_mode=bool(debug_mode),
+            mock_mode=bool(mock_mode),
+            forward_channel_id=_normalize_channel_id(forward_channel_id),
+            per_user_daily_limit=_norm_limit(per_user_daily_limit),
+            per_user_monthly_limit=_norm_limit(per_user_monthly_limit),
+            total_daily_limit=_norm_limit(total_daily_limit),
+            total_monthly_limit=_norm_limit(total_monthly_limit),
+        )
+        await self.apply_to_runtime()
+        return updated
 
+    async def update_settings(self, **kwargs) -> AdminSettings:
+        """
+        Обновляет настройки администратора.
+        
+        Args:
+            **kwargs: Параметры для обновления (любые поля из AdminSettings)
+        
+        Returns:
+            AdminSettings: Обновлённые настройки
+        """
+        async for session in get_session():
+            model = await self._get_or_create_settings(session)
+            
+            # Обновляем поля, если они переданы
+            if "default_llm" in kwargs:
+                model.default_llm = kwargs["default_llm"]
+            if "yandex_model" in kwargs:
+                model.yandex_model = kwargs["yandex_model"]
+            if "openai_model" in kwargs:
+                model.openai_model = kwargs["openai_model"]
+            if "translate_provider" in kwargs:
+                model.translate_provider = kwargs["translate_provider"]
+            if "translate_model" in kwargs:
+                model.translate_model = kwargs["translate_model"]
+            if "translate_legacy" in kwargs:
+                model.translate_legacy = bool(kwargs["translate_legacy"])
+            if "convert_currency" in kwargs:
+                model.convert_currency = bool(kwargs["convert_currency"])
+            if "tmapi_notify_439" in kwargs:
+                model.tmapi_notify_439 = bool(kwargs["tmapi_notify_439"])
+            if "debug_mode" in kwargs:
+                model.debug_mode = bool(kwargs["debug_mode"])
+            if "mock_mode" in kwargs:
+                model.mock_mode = bool(kwargs["mock_mode"])
+            if "forward_channel_id" in kwargs:
+                model.forward_channel_id = kwargs["forward_channel_id"] or ""
+            if "per_user_daily_limit" in kwargs:
+                val = kwargs["per_user_daily_limit"]
+                model.per_user_daily_limit = int(val) if val is not None and int(val) > 0 else None
+            if "per_user_monthly_limit" in kwargs:
+                val = kwargs["per_user_monthly_limit"]
+                model.per_user_monthly_limit = int(val) if val is not None and int(val) > 0 else None
+            if "total_daily_limit" in kwargs:
+                val = kwargs["total_daily_limit"]
+                model.total_daily_limit = int(val) if val is not None and int(val) > 0 else None
+            if "total_monthly_limit" in kwargs:
+                val = kwargs["total_monthly_limit"]
+                model.total_monthly_limit = int(val) if val is not None and int(val) > 0 else None
+            
+            await session.commit()
+            return _model_to_dataclass(model)
+
+
+# Глобальный экземпляр сервиса
+admin_settings_service = AdminSettingsService()

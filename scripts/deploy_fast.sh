@@ -49,6 +49,14 @@ else
   echo "==> SKIP_BUILD=1 — пропускаем сборку (используем уже готовый образ)"
 fi
 
+# Применяем миграции БД перед запуском (если контейнеры уже запущены)
+if docker compose -f "${COMPOSE_FILE}" ps postgres | grep -q "Up"; then
+  echo "==> Применяем миграции БД..."
+  docker compose -f "${COMPOSE_FILE}" exec -T taobao-bot python scripts/migrate_db.py upgrade head || {
+    echo "⚠️  Предупреждение: не удалось применить миграции (возможно, контейнер ещё не запущен)"
+  }
+fi
+
 echo "==> docker compose up -d --no-deps ${SERVICE}"
 docker compose -f "${COMPOSE_FILE}" up -d --no-deps "${SERVICE}"
 

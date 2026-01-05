@@ -1,0 +1,32 @@
+{
+  "global": {
+    "day_start": "2026-01-05",
+    "day_count": 7,
+    "month_start": "2026-01-01",
+    "month_count": 9,
+    "day_cost": 0.01249925,
+    "month_cost": 0.02153025
+  },
+  "users": {
+    "5579518093": {
+      "day_start": "2025-12-10",
+      "day_count": 2,
+      "month_start": "2025-12-10",
+      "month_count": 2
+    },
+    "6623120824": {
+      "day_start": "2026-01-05",
+      "day_count": 7,
+      "month_start": "2025-12-10",
+      "month_count": 107,
+      "day_cost": 0.01249925,
+      "month_cost": 0.9153032499999998
+    }
+  },
+  "pending_by_username": {
+    "derinovakris": {
+      "daily_limit": 40,
+      "monthly_limit": 500
+    }
+  }
+}

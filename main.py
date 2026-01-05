@@ -22,6 +22,8 @@ from src.services.admin_settings import AdminSettingsService
 from src.services.user_settings import get_user_settings_service
 from src.webapp.server import MiniAppServer
 from src.services.szwego_monitor import SzwegoHealthMonitor
+from src.db.session import init_db, close_db
+from src.db.redis_client import init_redis, close_redis
 
 # Конфигурация базового логирования (детальное логирование в error_handler.py)
 logging.basicConfig(level=logging.INFO)
@@ -42,6 +44,18 @@ async def main():
     Raises:
         Exception: Любые ошибки логируются и приводят к остановке бота
     """
+    # Инициализация базы данных и Redis
+    logging.info("Инициализация базы данных...")
+    await init_db()
+    logging.info("Подключение к Redis...")
+    await init_redis()
+    logging.info("База данных и Redis готовы.")
+    
+    # Применяем настройки администратора к рантайму
+    admin_settings_service = AdminSettingsService()
+    await admin_settings_service.apply_to_runtime()
+    logging.info("Настройки администратора применены.")
+    
     # Инициализация бота с токеном из настроек
     bot = Bot(token=settings.BOT_TOKEN)
     # Инициализация диспетчера
@@ -51,7 +65,6 @@ async def main():
 
     # Сервисы настроек (общие для бота и Mimi App)
     user_settings_service = get_user_settings_service()
-    admin_settings_service = AdminSettingsService()
 
     mini_app_server = MiniAppServer(
         bot_token=settings.BOT_TOKEN,
@@ -95,6 +108,16 @@ async def main():
         # Закрываем сессию бота
         try:
             await bot.session.close()
+        except Exception:
+            pass
+        # Закрываем подключения к БД и Redis
+        logging.info("Закрытие подключений к БД и Redis...")
+        try:
+            await close_redis()
+        except Exception:
+            pass
+        try:
+            await close_db()
         except Exception:
             pass
         # Отменяем все оставшиеся задачи, чтобы убрать CancelledError в stdout

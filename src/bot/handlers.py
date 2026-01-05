@@ -38,6 +38,9 @@ from src.services.access_control import (
     parse_ids_and_usernames,
 )
 from src.utils.url_parser import Platform
+from src.db.session import get_session
+from src.db.models import RequestStats
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +194,7 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
-def build_settings_menu_keyboard(user_id: int | None = None) -> ReplyKeyboardMarkup:
+async def build_settings_menu_keyboard(user_id: int | None = None) -> ReplyKeyboardMarkup:
     """
     Создаёт меню настроек с кнопкой запуска Mimi App, если указана ссылка в настройках.
     Для пользователей с валютой RUB добавляет кнопку смены курса.
@@ -207,7 +210,7 @@ def build_settings_menu_keyboard(user_id: int | None = None) -> ReplyKeyboardMar
     # Показываем кнопку удаления подписи только если подпись задана
     try:
         if user_id is not None:
-            settings_obj = user_settings_service.get_settings(user_id)
+            settings_obj = await user_settings_service.get_settings(user_id)
             if settings_obj.signature and settings_obj.signature.strip():
                 rows.append([KeyboardButton(text="🗑️ Удалить подпись")])
             if settings_obj.default_currency.lower() == "rub":
@@ -318,7 +321,7 @@ async def ensure_access(message: Message) -> bool:
     if is_admin_user(user_id, username):
         return True
 
-    allowed, reason = access_control_service.is_allowed(user_id, username)
+    allowed, reason = await access_control_service.is_allowed(user_id, username)
     if allowed:
         return True
 
@@ -787,8 +790,6 @@ async def broadcast_post_to_channel(
     Пробует несколько вариантов форматов ID для групп (обычная группа, супергруппа).
     Перед основным постом отправляет сообщение со статистикой запроса.
     """
-    from datetime import datetime
-    
     normalized_chat = _normalize_broadcast_chat_id(channel_id)
     if not normalized_chat:
         return
@@ -898,8 +899,8 @@ async def broadcast_post_to_channel(
             stats_lines.append(f"📄 <b>Частей текста:</b> {chunks_count}")
 
         # Лимиты (показываем только если включен whitelist или blacklist)
-        wl_enabled = access_control_service._config.whitelist_enabled
-        bl_enabled = access_control_service._config.blacklist_enabled
+        wl_enabled = await access_control_service.get_whitelist_enabled()
+        bl_enabled = await access_control_service.get_blacklist_enabled()
         if limits_snapshot and (wl_enabled or bl_enabled):
             if not limits_snapshot.get("unlimited"):
                 user_limits = limits_snapshot.get("user", {})
@@ -1011,6 +1012,97 @@ async def broadcast_post_to_channel(
             "Ошибка при формировании статистики для чата %s: %s. Продолжаем отправку основного поста.",
             working_chat_id,
             stats_prep_exc,
+        )
+    
+    # Сохраняем статистику в БД (вне блока try для статистики, чтобы не блокировать отправку)
+    try:
+        # Подготавливаем данные для сохранения
+        request_dt = datetime.fromtimestamp(request_time) if request_time else datetime.now()
+        images_count_val = len(image_urls or [])
+        chunks_count_val = len(text_chunks or []) if text_chunks else None
+        
+        # Извлекаем данные о лимитах
+        user_daily_limit = None
+        user_daily_count = None
+        user_daily_remaining = None
+        user_monthly_limit = None
+        user_monthly_count = None
+        user_monthly_remaining = None
+        global_daily_cost_val = None
+        global_monthly_cost_val = None
+        
+        if limits_snapshot:
+            global_limits = limits_snapshot.get("global", {})
+            if global_limits:
+                global_daily = global_limits.get("daily", {})
+                global_monthly = global_limits.get("monthly", {})
+                global_daily_cost_val = global_daily.get("cost")
+                global_monthly_cost_val = global_monthly.get("cost")
+            
+            if not limits_snapshot.get("unlimited"):
+                user_limits = limits_snapshot.get("user", {})
+                if user_limits:
+                    daily = user_limits.get("daily", {})
+                    monthly = user_limits.get("monthly", {})
+                    user_daily_limit = daily.get("limit")
+                    user_daily_count = daily.get("count")
+                    user_daily_remaining = daily.get("remaining")
+                    user_monthly_limit = monthly.get("limit")
+                    user_monthly_count = monthly.get("count")
+                    user_monthly_remaining = monthly.get("remaining")
+        
+        # Извлекаем данные о токенах
+        prompt_tokens_val = None
+        completion_tokens_val = None
+        total_tokens_val = None
+        prompt_cost_val = None
+        completion_cost_val = None
+        total_cost_val = None
+        
+        if tokens_usage and tokens_usage.total_tokens > 0:
+            prompt_tokens_val = tokens_usage.prompt_tokens
+            completion_tokens_val = tokens_usage.completion_tokens
+            total_tokens_val = tokens_usage.total_tokens
+            prompt_cost_val = tokens_usage.prompt_cost if tokens_usage.prompt_cost > 0 else None
+            completion_cost_val = tokens_usage.completion_cost if tokens_usage.completion_cost > 0 else None
+            total_cost_val = tokens_usage.total_cost if tokens_usage.total_cost > 0 else None
+        
+        # Сохраняем в БД
+        async for session in get_session():
+            stats_record = RequestStats(
+                user_id=user_id,
+                username=username,
+                request_time=request_dt,
+                product_url=product_url,
+                platform=platform,
+                text_length=text_length,
+                images_count=images_count_val,
+                chunks_count=chunks_count_val,
+                duration_ms=duration_ms,
+                request_id=request_id,
+                user_daily_limit=user_daily_limit,
+                user_daily_count=user_daily_count,
+                user_daily_remaining=user_daily_remaining,
+                user_monthly_limit=user_monthly_limit,
+                user_monthly_count=user_monthly_count,
+                user_monthly_remaining=user_monthly_remaining,
+                prompt_tokens=prompt_tokens_val,
+                completion_tokens=completion_tokens_val,
+                total_tokens=total_tokens_val,
+                prompt_cost=prompt_cost_val,
+                completion_cost=completion_cost_val,
+                total_cost=total_cost_val,
+                global_daily_cost=global_daily_cost_val,
+                global_monthly_cost=global_monthly_cost_val,
+            )
+            session.add(stats_record)
+            # commit выполняется автоматически в get_session()
+    
+    except Exception as db_exc:
+        logger.warning(
+            "Не удалось сохранить статистику запроса в БД: %s. Продолжаем отправку поста.",
+            db_exc,
+            exc_info=True,
         )
     
     # Отправляем пост используя рабочий ID
@@ -1176,10 +1268,10 @@ async def open_settings_menu(message: Message, state: FSMContext) -> None:
     await _delete_user_message(message)
     await state.clear()
     user_id = message.from_user.id
-    user_settings_service.get_settings(user_id)
+    await user_settings_service.get_settings(user_id)
     await message.answer(
         "⚙️ <b>Настройки</b>\n\nВыберите действие:",
-        reply_markup=build_settings_menu_keyboard(user_id),
+        reply_markup=await build_settings_menu_keyboard(user_id),
         parse_mode="HTML"
     )
 
@@ -1249,20 +1341,21 @@ async def update_signature(message: Message, state: FSMContext) -> None:
         if new_signature == "ℹ️ Мои настройки":
             # Показываем настройки
             user_id = message.from_user.id
-            user_settings = user_settings_service.get_settings(user_id)
+            user_settings = await user_settings_service.get_settings(user_id)
             is_admin_local = is_admin_user(user_id, message.from_user.username or "")
-            limits_snapshot_local = rate_limit_service.snapshot(
+            wl_enabled = await access_control_service.get_whitelist_enabled()
+            limits_snapshot_local = await rate_limit_service.snapshot(
                 user_id=user_id,
                 is_admin=is_admin_local,
                 user_daily_limit=user_settings.daily_limit,
                 user_monthly_limit=user_settings.monthly_limit,
                 created_at=user_settings.created_at,
-                whitelist_enabled=access_control_service._config.whitelist_enabled,
+                whitelist_enabled=wl_enabled,
             )
             summary = format_settings_summary(user_settings, limits_snapshot_local)
             await message.answer(
                 summary,
-                reply_markup=build_settings_menu_keyboard(user_id),
+                reply_markup=await build_settings_menu_keyboard(user_id),
                 parse_mode="HTML"
             )
         elif new_signature == "💱 Валюта":
@@ -1285,10 +1378,10 @@ async def update_signature(message: Message, state: FSMContext) -> None:
         elif new_signature == "⚙️ Настройки":
             # Открываем меню настроек
             user_id = message.from_user.id
-            user_settings_service.get_settings(user_id)
+            await user_settings_service.get_settings(user_id)
             await message.answer(
                 "⚙️ <b>Настройки</b>\n\nВыберите действие:",
-                reply_markup=build_settings_menu_keyboard(user_id),
+                reply_markup=await build_settings_menu_keyboard(user_id),
                 parse_mode="HTML"
             )
         elif new_signature == "📈 Сменить курс":
@@ -1303,10 +1396,10 @@ async def update_signature(message: Message, state: FSMContext) -> None:
         elif new_signature == "🗑️ Удалить подпись":
             # Удаляем подпись
             user_id = message.from_user.id
-            user_settings_service.update_signature(user_id, "")
+            await user_settings_service.update_signature(user_id, "")
             await message.answer(
                 "✅ Подпись удалена. Подпись не будет добавляться в посты.",
-                reply_markup=build_settings_menu_keyboard(user_id),
+                reply_markup=await build_settings_menu_keyboard(user_id),
                 parse_mode="HTML"
             )
         else:
@@ -1314,7 +1407,7 @@ async def update_signature(message: Message, state: FSMContext) -> None:
             await message.answer(
                 "❌ Ввод подписи отменён. Вы выбрали пункт меню вместо ввода подписи.\n\n"
                 "Если хотите изменить подпись, используйте кнопку «✍️ Изменить подпись» и введите текст.",
-                reply_markup=build_settings_menu_keyboard(message.from_user.id),
+                reply_markup=await build_settings_menu_keyboard(message.from_user.id),
             )
         return
     
@@ -1330,19 +1423,19 @@ async def update_signature(message: Message, state: FSMContext) -> None:
     
     # Валидация пройдена, обновляем подпись
     user_id = message.from_user.id
-    user_settings_service.update_signature(user_id, new_signature)
+    await user_settings_service.update_signature(user_id, new_signature)
 
     await state.clear()
     if new_signature:
         await message.answer(
             f"✅ Подпись обновлена: <code>{new_signature}</code>",
-            reply_markup=build_settings_menu_keyboard(message.from_user.id),
+            reply_markup=await build_settings_menu_keyboard(message.from_user.id),
             parse_mode="HTML"
         )
     else:
         await message.answer(
             "✅ Подпись очищена. Подпись не будет добавляться в посты.",
-            reply_markup=build_settings_menu_keyboard(message.from_user.id),
+            reply_markup=await build_settings_menu_keyboard(message.from_user.id),
             parse_mode="HTML"
         )
 
@@ -1355,11 +1448,11 @@ async def delete_signature(message: Message, state: FSMContext) -> None:
         return
     
     user_id = message.from_user.id
-    user_settings_service.update_signature(user_id, "")
+    await user_settings_service.update_signature(user_id, "")
     
     await message.answer(
         "✅ Подпись удалена. Подпись не будет добавляться в посты.",
-        reply_markup=build_settings_menu_keyboard(user_id),
+        reply_markup=await build_settings_menu_keyboard(user_id),
         parse_mode="HTML"
         )
 
@@ -1372,11 +1465,11 @@ async def delete_signature(message: Message, state: FSMContext) -> None:
         return
     
     user_id = message.from_user.id
-    user_settings_service.update_signature(user_id, "")
+    await user_settings_service.update_signature(user_id, "")
     
     await message.answer(
         "✅ Подпись удалена. Подпись не будет добавляться в посты.",
-        reply_markup=build_settings_menu_keyboard(user_id),
+        reply_markup=await build_settings_menu_keyboard(user_id),
         parse_mode="HTML"
     )
 
@@ -1405,23 +1498,23 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         await _safe_clear_markup(callback.message)
         await callback.message.answer(
             "Настройки не изменены.",
-            reply_markup=build_settings_menu_keyboard(callback.from_user.id),
+            reply_markup=await build_settings_menu_keyboard(callback.from_user.id),
         )
         return
 
     user_id = callback.from_user.id
-    user_settings = user_settings_service.get_settings(user_id)
+    user_settings = await user_settings_service.get_settings(user_id)
 
     if choice == "cny":
-        user_settings_service.update_currency(user_id, "cny")
+        await user_settings_service.update_currency(user_id, "cny")
         await callback.answer("Валюта: юань")
         await _safe_clear_markup(callback.message)
         await callback.message.answer(
             "✅ Валюта по умолчанию: юань. Конвертация отключена.",
-            reply_markup=build_settings_menu_keyboard(user_id),
+            reply_markup=await build_settings_menu_keyboard(user_id),
         )
     elif choice == "rub":
-        user_settings = user_settings_service.update_currency(user_id, "rub")
+        user_settings = await user_settings_service.update_currency(user_id, "rub")
         await callback.answer("Валюта: рубль")
         await _safe_clear_markup(callback.message)
 
@@ -1433,7 +1526,7 @@ async def handle_currency_choice(callback: CallbackQuery, state: FSMContext) -> 
         else:
             await callback.message.answer(
                 f"✅ Валюта по умолчанию: рубль. Текущий курс: {float(user_settings.exchange_rate):.4f} ₽ за 1 ¥.",
-                reply_markup=build_settings_menu_keyboard(callback.from_user.id),
+                reply_markup=await build_settings_menu_keyboard(callback.from_user.id),
             )
     else:
         await callback.answer("Неизвестный выбор", show_alert=True)
@@ -1463,19 +1556,19 @@ async def handle_price_mode_choice(callback: CallbackQuery, state: FSMContext) -
         await _safe_clear_markup(callback.message)
         await callback.message.answer(
             "Настройки не изменены.",
-            reply_markup=build_settings_menu_keyboard(callback.from_user.id),
+            reply_markup=await build_settings_menu_keyboard(callback.from_user.id),
         )
         return
 
     user_id = callback.from_user.id
     if choice in {"simple", "advanced"}:
-        user_settings_service.update_price_mode(user_id, choice)
+        await user_settings_service.update_price_mode(user_id, choice)
         human = "простой (только макс. цена)" if choice == "simple" else "расширенный (сводка вариантов)"
         await callback.answer(f"Режим: {choice}")
         await _safe_clear_markup(callback.message)
         await callback.message.answer(
             f"✅ Режим цен установлен: {human}.",
-            reply_markup=build_settings_menu_keyboard(user_id),
+            reply_markup=await build_settings_menu_keyboard(user_id),
         )
     else:
         await callback.answer("Неизвестный выбор", show_alert=True)
@@ -1509,7 +1602,7 @@ async def show_info(message: Message, state: FSMContext) -> None:
     )
     await message.answer(
         info_text,
-        reply_markup=build_settings_menu_keyboard(message.from_user.id),
+        reply_markup=await build_settings_menu_keyboard(message.from_user.id),
         parse_mode="HTML"
     )
 
@@ -1521,12 +1614,12 @@ async def prompt_change_rate(message: Message, state: FSMContext) -> None:
     if not await ensure_access(message):
         return
     user_id = message.from_user.id
-    user_settings = user_settings_service.get_settings(user_id)
+    user_settings = await user_settings_service.get_settings(user_id)
     if user_settings.default_currency.lower() != "rub":
         await state.clear()
         await message.answer(
             "Сначала выберите валюту: рубль. Откройте «💱 Валюта» и установите рубль.",
-            reply_markup=build_settings_menu_keyboard(user_id),
+            reply_markup=await build_settings_menu_keyboard(user_id),
         )
         return
 
@@ -1568,7 +1661,7 @@ async def set_exchange_rate(message: Message, state: FSMContext) -> None:
         await message.answer(
             "❌ Ввод курса отменён. Вы выбрали пункт меню вместо ввода курса.\n\n"
             "Если хотите изменить курс, используйте кнопку «📈 Сменить курс» и введите число.",
-            reply_markup=build_settings_menu_keyboard(message.from_user.id),
+            reply_markup=await build_settings_menu_keyboard(message.from_user.id),
         )
         return
     
@@ -1586,12 +1679,12 @@ async def set_exchange_rate(message: Message, state: FSMContext) -> None:
         return
 
     user_id = message.from_user.id
-    user_settings_service.update_exchange_rate(user_id, rate)
+    await user_settings_service.update_exchange_rate(user_id, rate)
 
     await state.clear()
     await message.answer(
         f"✅ Курс обновлён: 1 ¥ = {rate:.4f} ₽.",
-        reply_markup=build_settings_menu_keyboard(message.from_user.id),
+        reply_markup=await build_settings_menu_keyboard(message.from_user.id),
     )
 
 
@@ -1603,20 +1696,21 @@ async def show_settings(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     user_id = message.from_user.id
-    user_settings = user_settings_service.get_settings(user_id)
+    user_settings = await user_settings_service.get_settings(user_id)
     is_admin = is_admin_user(user_id, message.from_user.username or "")
-    limits_snapshot = rate_limit_service.snapshot(
+    wl_enabled = await access_control_service.get_whitelist_enabled()
+    limits_snapshot = await rate_limit_service.snapshot(
         user_id=user_id,
         is_admin=is_admin,
         user_daily_limit=user_settings.daily_limit,
         user_monthly_limit=user_settings.monthly_limit,
         created_at=user_settings.created_at,
-        whitelist_enabled=access_control_service._config.whitelist_enabled,
+        whitelist_enabled=wl_enabled,
     )
     summary = format_settings_summary(user_settings, limits_snapshot)
     await message.answer(
         summary,
-        reply_markup=build_settings_menu_keyboard(user_id),
+        reply_markup=await build_settings_menu_keyboard(user_id),
         parse_mode="HTML"
     )
 
@@ -1631,7 +1725,7 @@ async def access_menu_entry(message: Message, state: FSMContext) -> None:
         return
 
     await state.set_state(AccessState.choosing_action)
-    summary = access_control_service.get_summary()
+    summary = await access_control_service.get_summary()
     help_text = (
         "🔐 <b>Управление доступом к боту</b>\n\n"
         f"{summary}\n\n"
@@ -1659,7 +1753,7 @@ async def limits_menu_entry(message: Message, state: FSMContext) -> None:
     if not is_admin_user(message.from_user.id, message.from_user.username):
         return
     await state.set_state(LimitsState.choosing_action)
-    current = admin_settings_service.get_settings()
+    current = await admin_settings_service.get_settings()
     def _lim(value):
         return "без ограничений" if not value else str(value)
     info = (
@@ -1711,8 +1805,8 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
             return
         vals = [_parse_limit_arg(p) for p in parts[1:5]]
         pu_d, pu_m, tot_d, tot_m = vals
-        current = admin_settings_service.get_settings()
-        updated = admin_settings_service.update_feature_flags(
+        current = await admin_settings_service.get_settings()
+        updated = await admin_settings_service.update_feature_flags(
             convert_currency=current.convert_currency,
             tmapi_notify_439=current.tmapi_notify_439,
             debug_mode=current.debug_mode,
@@ -1745,7 +1839,7 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
             await message.answer(f"❌ {err}")
             return
         if target_id:
-            user_settings_service.update_limits(target_id, daily_limit=daily, monthly_limit=monthly)
+            await user_settings_service.update_limits(target_id, daily_limit=daily, monthly_limit=monthly)
             await message.answer(
                 "✅ Лимиты пользователя обновлены (МСК):\n"
                 f"• ID: {target_id}\n"
@@ -1766,7 +1860,7 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
 
     if parts[0].lower() == "show":
         # show -> все лимиты
-        current = admin_settings_service.get_settings()
+        current = await admin_settings_service.get_settings()
         def _lim(v): return "без ограничений" if not v else str(v)
         lines = [
             "📊 <b>Глобальные лимиты (МСК)</b>",
@@ -1788,14 +1882,15 @@ async def limits_handle_action(message: Message, state: FSMContext) -> None:
             await message.answer(f"❌ {err}")
             return
         if target_id:
-            us = user_settings_service.get_settings(target_id)
-            limits_snapshot = rate_limit_service.snapshot(
+            us = await user_settings_service.get_settings(target_id)
+            wl_enabled = await access_control_service.get_whitelist_enabled()
+            limits_snapshot = await rate_limit_service.snapshot(
                 user_id=target_id,
                 is_admin=False,
                 user_daily_limit=us.daily_limit,
                 user_monthly_limit=us.monthly_limit,
                 created_at=us.created_at,
-                whitelist_enabled=access_control_service._config.whitelist_enabled,
+                whitelist_enabled=wl_enabled,
             )
             uname_disp = f"@{uname}" if uname else "—"
             def _fmt(block, title):
@@ -1887,7 +1982,7 @@ async def set_global_limits(message: Message, state: FSMContext) -> None:
         return
     parts = (message.text or "").split()
     args = parts[1:] if len(parts) > 1 else []
-    current = admin_settings_service.get_settings()
+    current = await admin_settings_service.get_settings()
 
     def _current_view():
         return (
@@ -1961,7 +2056,7 @@ async def set_user_limits(message: Message, state: FSMContext) -> None:
 
     daily_arg = _parse_limit_arg(parts[2])
     monthly_arg = _parse_limit_arg(parts[3])
-    user_settings_service.update_limits(target_user_id, daily_limit=daily_arg, monthly_limit=monthly_arg)
+    await user_settings_service.update_limits(target_user_id, daily_limit=daily_arg, monthly_limit=monthly_arg)
     await message.answer(
         "✅ Лимиты пользователя обновлены (МСК):\n"
         f"• user_id: {target_user_id}\n"
@@ -2075,24 +2170,24 @@ async def access_choose_action(message: Message, state: FSMContext) -> None:
     if raw in {"white on", "white off", "black on", "black off"}:
         enable = raw.endswith("on")
         if raw.startswith("white"):
-            access_control_service.set_whitelist_enabled(enable)
+            await access_control_service.set_whitelist_enabled(enable)
             await message.answer(
                 f"✅ Белый список {'включён' if enable else 'выключен'}.",
                 parse_mode="HTML",
             )
         else:
-            access_control_service.set_blacklist_enabled(enable)
+            await access_control_service.set_blacklist_enabled(enable)
             await message.answer(
                 f"✅ Чёрный список {'включён' if enable else 'выключен'}.",
                 parse_mode="HTML",
             )
         # остаёмся в режиме выбора действия
-        summary = access_control_service.get_summary()
+        summary = await access_control_service.get_summary()
         await message.answer(summary)
         return
 
     if raw == "show":
-        dump = access_control_service.dump_lists()
+        dump = await access_control_service.dump_lists()
         await message.answer(dump, parse_mode="HTML")
         return
 
@@ -2143,14 +2238,14 @@ async def access_edit_whitelist(message: Message, state: FSMContext) -> None:
         return
 
     if op == "add":
-        access_control_service.add_to_whitelist(ids, names)
+        await access_control_service.add_to_whitelist(ids, names)
         await message.answer("✅ Пользователи добавлены в белый список.")
     else:
-        access_control_service.remove_from_whitelist(ids, names)
+        await access_control_service.remove_from_whitelist(ids, names)
         await message.answer("✅ Пользователи удалены из белого списка (если были).")
 
     await state.set_state(AccessState.choosing_action)
-    summary = access_control_service.get_summary()
+    summary = await access_control_service.get_summary()
     await message.answer(summary)
 
 
@@ -2172,14 +2267,14 @@ async def access_edit_blacklist(message: Message, state: FSMContext) -> None:
         return
 
     if op == "add":
-        access_control_service.add_to_blacklist(ids, names)
+        await access_control_service.add_to_blacklist(ids, names)
         await message.answer("✅ Пользователи добавлены в чёрный список.")
     else:
-        access_control_service.remove_from_blacklist(ids, names)
+        await access_control_service.remove_from_blacklist(ids, names)
         await message.answer("✅ Пользователи удалены из чёрного списка (если были).")
 
     await state.set_state(AccessState.choosing_action)
-    summary = access_control_service.get_summary()
+    summary = await access_control_service.get_summary()
     await message.answer(summary)
 
 
@@ -2207,7 +2302,12 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
     request_id = str(uuid.uuid4())
     started_at = time.monotonic()
     broadcast_task: asyncio.Task | None = None
-    forward_channel_id = (getattr(settings, "FORWARD_CHANNEL_ID", "") or "").strip()
+    # Получаем forward_channel_id из настроек администратора (из БД, если пусто - fallback на .env)
+    admin_settings = await admin_settings_service.get_settings()
+    forward_channel_id = (admin_settings.forward_channel_id or "").strip()
+    # Fallback на settings.FORWARD_CHANNEL_ID, если в БД пусто (для обратной совместимости с .env)
+    if not forward_channel_id:
+        forward_channel_id = (getattr(settings, "FORWARD_CHANNEL_ID", "") or "").strip()
 
     product_url = message.text  # Определяем переменную до try блока
     
@@ -2252,27 +2352,27 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         if current_state:
             await message.answer(
                 "Сначала завершите настройку, затем отправьте ссылку.",
-                reply_markup=build_settings_menu_keyboard(message.from_user.id),
+                reply_markup=await build_settings_menu_keyboard(message.from_user.id),
             )
             return
         
         # Получаем настройки пользователя
         user_id = message.from_user.id
         username = message.from_user.username or ""
-        user_settings = user_settings_service.get_settings(user_id)
+        user_settings = await user_settings_service.get_settings(user_id, username)
         
         # Проверяем, что если валюта рубль, то курс установлен
         if user_settings.default_currency.lower() == "rub" and not user_settings.exchange_rate:
             await message.answer(
                 "⚠️ Сначала укажите курс рубля в настройках.",
-                reply_markup=build_settings_menu_keyboard(user_id),
+                reply_markup=await build_settings_menu_keyboard(user_id),
             )
             return
         
         # Проверяем лимиты (без инкремента — неудачные запросы не считаем)
         is_admin = is_admin_user(user_id, username)
-        wl_enabled = access_control_service._config.whitelist_enabled
-        limit_result = rate_limit_service.consume(
+        wl_enabled = await access_control_service.get_whitelist_enabled()
+        limit_result = await rate_limit_service.consume(
             user_id=user_id,
             is_admin=is_admin,
             user_daily_limit=user_settings.daily_limit,
@@ -2322,7 +2422,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                 "*Время начала нового периода 00 ч 00 мин по МСК",
                 support_suffix,
             ]
-            await message.answer("\n".join([m for m in msg_lines if m]), reply_markup=build_settings_menu_keyboard(user_id))
+            await message.answer("\n".join([m for m in msg_lines if m]), reply_markup=await build_settings_menu_keyboard(user_id))
             return
         
         usage_snapshot = limit_result.get("snapshot") if limit_result else None
@@ -2447,8 +2547,8 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         # Фиксируем успешный запрос: инкрементируем счётчики лимитов только после удачной отправки
         # Передаем стоимость запроса, если она есть (только для OpenAI/ProxyAPI)
         request_cost = tokens_usage.total_cost if tokens_usage and tokens_usage.total_cost > 0 else 0.0
-        wl_enabled = access_control_service._config.whitelist_enabled
-        commit_result = rate_limit_service.commit_success(
+        wl_enabled = await access_control_service.get_whitelist_enabled()
+        commit_result = await rate_limit_service.commit_success(
             user_id=user_id,
             user_daily_limit=user_settings.daily_limit,
             user_monthly_limit=user_settings.monthly_limit,

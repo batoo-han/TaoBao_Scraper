@@ -24,3 +24,12 @@ Pillow  # Определение размеров и обработка изоб
 
 # Browser Automation for Pinduoduo scraping
 playwright>=1.46.0  # Асинхронный Playwright для веб-скрапинга Pinduoduo
+
+# Database
+sqlalchemy[asyncio]>=2.0.0  # Асинхронная ORM для работы с PostgreSQL
+alembic>=1.13.0  # Система миграций базы данных
+asyncpg>=0.29.0  # Асинхронный драйвер PostgreSQL
+
+# Redis
+redis>=5.0.0  # Синхронный клиент Redis
+aioredis>=2.0.0  # Асинхронный клиент Redis
