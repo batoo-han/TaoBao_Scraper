@@ -784,6 +784,7 @@ async def broadcast_post_to_channel(
     limits_snapshot: dict | None = None,
     tokens_usage = None,  # TokensUsage объект или None
     cache_stats = None,  # CacheStats объект или None
+    postprocess_tokens_usage = None,  # TokensUsage для постобработки или None
 ) -> None:
     """
     Дублирует готовый пост в дополнительный канал/группу, если он указан.
@@ -939,15 +940,15 @@ async def broadcast_post_to_channel(
                 duration_str = f"{minutes} мин {seconds} сек"
             stats_lines.append(f"⏱️ <b>Время обработки:</b> {duration_str}")
         
+        # Форматирование чисел с пробелами вместо запятых для разделения тысяч
+        def format_number(num: int) -> str:
+            """Форматирует число с пробелами для разделения тысяч"""
+            return f"{num:,}".replace(",", " ")
+        
         # Статистика токенов (если используется OpenAI/ProxyAPI)
         if tokens_usage and tokens_usage.total_tokens > 0:
             stats_lines.append("")  # Пустая строка для разделения
             stats_lines.append("💬 <b>Статистика токенов:</b>")
-            
-            # Форматирование чисел с пробелами вместо запятых для разделения тысяч
-            def format_number(num: int) -> str:
-                """Форматирует число с пробелами для разделения тысяч"""
-                return f"{num:,}".replace(",", " ")
             
             # Входящие токены
             prompt_tokens_str = format_number(tokens_usage.prompt_tokens)
@@ -996,6 +997,23 @@ async def broadcast_post_to_channel(
                 else:
                     saved_time_str = f"{saved_time_sec:.2f} сек"
                 stats_lines.append(f"  ⏱️ Сэкономлено времени: {saved_time_str}")
+        
+        # Отдельная статистика токенов постобработки (если выполнялась)
+        # Показываем независимо от основного провайдера, так как постобработка может быть через OpenAI даже при YandexGPT
+        if postprocess_tokens_usage and postprocess_tokens_usage.total_tokens > 0:
+            stats_lines.append("")  # Пустая строка для разделения
+            stats_lines.append("🔧 <b>Постобработка текста:</b>")
+            pp_prompt_tokens_str = format_number(postprocess_tokens_usage.prompt_tokens)
+            pp_completion_tokens_str = format_number(postprocess_tokens_usage.completion_tokens)
+            pp_total_tokens_str = format_number(postprocess_tokens_usage.total_tokens)
+            if postprocess_tokens_usage.prompt_cost > 0 or postprocess_tokens_usage.completion_cost > 0:
+                stats_lines.append(f"  📥 Входящие: {pp_prompt_tokens_str} токенов/💰${postprocess_tokens_usage.prompt_cost:.6f}")
+                stats_lines.append(f"  📤 Исходящие: {pp_completion_tokens_str} токенов/💰${postprocess_tokens_usage.completion_cost:.6f}")
+                stats_lines.append(f"  📊 Всего: {pp_total_tokens_str} токенов/💰${postprocess_tokens_usage.total_cost:.6f}")
+            else:
+                stats_lines.append(f"  📥 Входящие: {pp_prompt_tokens_str} токенов")
+                stats_lines.append(f"  📤 Исходящие: {pp_completion_tokens_str} токенов")
+                stats_lines.append(f"  📊 Всего: {pp_total_tokens_str} токенов")
         
         # Статистика стоимости запросов (после статистики токенов)
         if limits_snapshot:
@@ -2516,11 +2534,16 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             cache_stats=cache_stats,
         )
         # Обрабатываем новую сигнатуру с статистикой токенов (для OpenAI/ProxyAPI)
-        if len(result) == 3:
+        # Может быть 2 элемента (старый формат), 3 элемента (с токенами) или 4 элемента (с токенами + постобработка)
+        if len(result) == 4:
+            post_text, image_urls, tokens_usage, postprocess_tokens_usage = result
+        elif len(result) == 3:
             post_text, image_urls, tokens_usage = result
+            postprocess_tokens_usage = None  # Постобработка не выполнялась или старая версия кода
         else:
             post_text, image_urls = result
             tokens_usage = None  # YandexGPT не возвращает статистику токенов
+            postprocess_tokens_usage = None
         duration_ms = int((time.monotonic() - started_at) * 1000)
         
         # Платформа уже определена выше при проверке доступности
@@ -2620,6 +2643,7 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
                     limits_snapshot=usage_snapshot,
                     tokens_usage=tokens_usage,
                     cache_stats=cache_stats,
+                    postprocess_tokens_usage=postprocess_tokens_usage,
                 )
             )
 

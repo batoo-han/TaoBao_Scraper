@@ -89,6 +89,51 @@ def get_translation_client():
     return _build_translation_client()
 
 
+@lru_cache(maxsize=1)
+def _build_postprocess_client():
+    """
+    Возвращает клиент LLM, используемый ТОЛЬКО для постобработки готового поста.
+
+    ВАЖНО:
+    - Постобработка включается флагом ENABLE_POSTPROCESSING.
+    - Для постобработки всегда используем OpenAI (минимальную/дешёвую модель),
+      независимо от основного DEFAULT_LLM.
+    - При любой ошибке инициализации (нет ключа, некорректная модель и т.п.)
+      возвращаем None, чтобы основной пайплайн не падал.
+    """
+    enabled = bool(getattr(settings, "ENABLE_POSTPROCESSING", False))
+    if not enabled:
+        return None
+
+    # Модель для постобработки: отдельная, компактная (mini), если указана.
+    # Если не задана, используем глобальную OPENAI_MODEL (как фолбэк).
+    model_name = (
+        getattr(settings, "OPENAI_POSTPROCESS_MODEL", "")  # отдельная модель для постобработки
+        or getattr(settings, "OPENAI_MODEL", "")           # общая модель OpenAI
+    ).strip()
+
+    try:
+        # Если модель не указана, передаём None — OpenAIClient подставит значение по умолчанию.
+        return OpenAIClient(model_name=model_name or None)
+    except Exception:
+        # В режиме DEBUG выдаём понятное сообщение, но не ломаем основной сценарий.
+        if settings.DEBUG_MODE:
+            print("[LLM] Не удалось инициализировать OpenAI-клиент для постобработки. "
+                  "Постобработка будет отключена для этого запуска.")
+        return None
+
+
+def get_postprocess_client():
+    """
+    Возвращает клиент LLM, настроенный для постобработки текста поста.
+
+    Может вернуть None, если:
+    - постобработка отключена (ENABLE_POSTPROCESSING=False),
+    - не удалось инициализировать OpenAIClient (нет ключа, неверная конфигурация и т.п.).
+    """
+    return _build_postprocess_client()
+
+
 def reset_llm_cache() -> None:
     """
     Сбрасывает кэши клиентов LLM, чтобы подхватить новые настройки во время работы бота.

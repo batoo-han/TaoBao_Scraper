@@ -7,7 +7,7 @@ import time
 from collections import Counter, OrderedDict, defaultdict
 
 from src.api.tmapi import TmapiClient
-from src.api.llm_provider import get_llm_client, get_translation_client
+from src.api.llm_provider import get_llm_client, get_translation_client, get_postprocess_client
 from src.api.exchange_rate import ExchangeRateClient
 from src.api.proxyapi_client import ProxyAPIClient
 from src.api.openai_client import OpenAIClient
@@ -57,7 +57,7 @@ class Scraper:
     CHARGE_KEYWORDS = ("заряд", "заряжа", "аккум", "recharge", "charging")
     def __init__(self):
         self.tmapi_client = TmapiClient()  # Клиент для tmapi.top
-        self.llm_client = get_llm_client()  # Унифицированный LLM клиент (YandexGPT или OpenAI)
+        self.llm_client = get_llm_client()  # Унифицированный LLM клиент (YandexGPT или OpenAI/ProxyAPI)
         self.exchange_rate_client = ExchangeRateClient()  # Клиент для ExchangeRate-API
         self.translation_client = get_translation_client()  # Отдельный LLM для переводов/предобработки цен
         # Режим работы с ценами: simple — старый сценарий (только максимальная цена), advanced — перевод и сводка вариантов
@@ -78,8 +78,13 @@ class Scraper:
         else:
             self.translation_supports_structured = hasattr(self.translation_client, "generate_json_response")
         
-        # Атрибут для сбора статистики токенов во время обработки запроса
+        # Отдельный клиент для постобработки текста поста (может быть None, если отключено/не сконфигурировано)
+        self.postprocess_client = get_postprocess_client()
+
+        # Атрибут для сбора общей статистики токенов во время обработки запроса
         self._current_tokens_usage: TokensUsage | None = None
+        # Атрибут для отдельного учёта токенов постобработки (чтобы показывать их отдельной строкой в статистике)
+        self._postprocess_tokens_usage: TokensUsage | None = None
 
     async def scrape_product(
         self, 
@@ -115,6 +120,8 @@ class Scraper:
         # Инициализируем статистику кэша, если не передана
         if cache_stats is None:
             cache_stats = CacheStats()
+        # Инициализируем отдельную статистику токенов постобработки
+        self._postprocess_tokens_usage = TokensUsage()
         # Используем подпись пользователя (может быть пустой)
         signature = user_signature or ""
         currency = (user_currency or settings.DEFAULT_CURRENCY).lower()
@@ -438,6 +445,10 @@ class Scraper:
                     (pdd_min.get('description') or '').strip() or
                     (product_data.get('details') or '').strip()
                 )
+            elif platform == Platform.SZWEGO:
+                # Для Szwego: details = title, не переводим отдельно, чтобы не дублировать токены
+                # Используем только переведённый title_hint для контекста цен
+                raw_description = ''
             else:
                 raw_description = (product_data.get('details') or '').strip()
             
@@ -773,6 +784,45 @@ class Scraper:
             exchange_rate=exchange_rate,
             price_lines=price_lines
         )
+
+        # Шаг LLM-постобработки: аккуратное исправление языка без изменения структуры поста.
+        # ВАЖНО:
+        # - Включается только при ENABLE_POSTPROCESSING=True.
+        # - Использует отдельный компактный OpenAI-клиент (если он успешно инициализировался).
+        if getattr(settings, "ENABLE_POSTPROCESSING", False) and self.postprocess_client:
+            try:
+                result_pp = await self.postprocess_client.postprocess_post_text(post_text)
+                if isinstance(result_pp, tuple):
+                    post_text_processed, tokens_usage_pp = result_pp
+                else:
+                    # Теоретически сюда попадём только если сигнатура изменится,
+                    # но оставляем безопасный фолбэк.
+                    post_text_processed = result_pp
+                    tokens_usage_pp = TokensUsage()
+
+                # Если модель вернула ненулевой текст — используем его как финальный.
+                if isinstance(post_text_processed, str) and post_text_processed.strip():
+                    post_text = post_text_processed
+
+                # Сохраняем статистику токенов постобработки отдельно для показа в статистике.
+                if tokens_usage_pp:
+                    self._postprocess_tokens_usage = tokens_usage_pp
+                    # Также добавляем в общую статистику для общего подсчёта стоимости.
+                    if self._current_tokens_usage:
+                        self._current_tokens_usage += tokens_usage_pp
+
+                if settings.DEBUG_MODE:
+                    try:
+                        print(f"[Scraper] Постобработка поста выполнена через LLM. Токены: {tokens_usage_pp.total_tokens} (вход: {tokens_usage_pp.prompt_tokens}, выход: {tokens_usage_pp.completion_tokens}), стоимость: ${tokens_usage_pp.total_cost:.6f}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                # Никогда не роняем основной сценарий из-за проблем постобработки.
+                if settings.DEBUG_MODE:
+                    try:
+                        print(f"[Scraper] Ошибка LLM-постобработки поста: {e}")
+                    except Exception:
+                        pass
         
         # Получаем изображения в зависимости от платформы
         if platform == 'pinduoduo':
@@ -868,23 +918,44 @@ class Scraper:
 
         # Возвращаем результат с статистикой токенов, если она есть
         total_tokens_usage = self._current_tokens_usage or TokensUsage()
-        if total_tokens_usage.total_tokens > 0:
-            return post_text, image_urls, total_tokens_usage
+        postprocess_tokens_usage = self._postprocess_tokens_usage or TokensUsage()
+        
+        # Если есть токены (основные или постобработки), возвращаем расширенную сигнатуру
+        if total_tokens_usage.total_tokens > 0 or postprocess_tokens_usage.total_tokens > 0:
+            # Возвращаем 4 элемента: текст, изображения, общие токены, токены постобработки
+            # Если постобработка не выполнялась, postprocess_tokens_usage будет пустым TokensUsage()
+            # Если основной провайдер - YandexGPT, total_tokens_usage может быть пустым, но postprocess_tokens_usage может быть заполнен
+            return post_text, image_urls, total_tokens_usage, postprocess_tokens_usage
         return post_text, image_urls
     
     def _prepare_compact_data_for_llm(self, product_data: dict) -> dict:
         """
         Подготавливает компактные данные для отправки в LLM.
         Убирает огромный массив skus и другие лишние данные.
-        Поддерживает как Taobao/Tmall, так и Pinduoduo.
+        Поддерживает как Taobao/Tmall, так и Pinduoduo, и Szwego.
         
         Args:
-            product_data: Полные данные от TMAPI
+            product_data: Полные данные от TMAPI/Szwego API
             
         Returns:
             dict: Компактные данные только с нужной информацией
         """
         platform = product_data.get('_platform', 'unknown')
+        
+        # Для Szwego: оптимизация - ограничиваем длину title (часто это длинное описание)
+        # и не передаём пустые product_props, чтобы не раздувать промпт
+        if platform == Platform.SZWEGO:
+            title = product_data.get('title', '').strip()
+            # Ограничиваем длину title для Szwego (часто это многострочное описание)
+            # Берём первые 300 символов, чтобы не раздувать промпт токенами
+            if len(title) > 300:
+                title = title[:300].rstrip() + "..."
+            
+            compact = {
+                'title': title,
+                # У Szwego нет product_props, не передаём пустой список
+            }
+            return compact
         
         compact = {
             'title': product_data.get('title', ''),
