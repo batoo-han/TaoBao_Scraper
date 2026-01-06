@@ -117,6 +117,8 @@ TaoBao_Scraper_2/
 - асинхронный клиент OpenAI (`AsyncOpenAI`)
 - поддержка моделей `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4o`, `o4-mini`
 - строгий JSON-ответ через `response_format`
+- отдельный метод постобработки текста поста (`postprocess_post_text`),
+  который аккуратно правит язык без изменения структуры блоков
 
 **Зависимости:**
 - `src.core.config` - ключ и модель
@@ -125,6 +127,8 @@ TaoBao_Scraper_2/
 - фабрика провайдеров (YandexGPT/OpenAI) с кэшированием
 - читает `DEFAULT_LLM` и валидирует значение
 - возвращает единый интерфейс `generate_post_content`
+- создаёт отдельный клиент для постобработки (`get_postprocess_client`),
+  чтобы использовать компактную модель OpenAI независимо от основного провайдера
 
 #### `prompts.py`
 - хранит шаблоны промптов
@@ -161,6 +165,7 @@ TaoBao_Scraper_2/
 ```
 1. Получение данных → tmapi.py
 2. Генерация LLM контента → llm_provider.py → (yandex_gpt.py или openai_client.py)
+2.5. (опционально) Постобработка текста поста → llm_provider.get_postprocess_client() → openai_client.postprocess_post_text
 3. Получение курса валют → exchange_rate.py
 4. Получение detail изображений → tmapi.py
 5. Фильтрация изображений → встроенная логика
