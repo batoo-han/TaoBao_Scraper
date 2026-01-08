@@ -6,7 +6,7 @@ import re
 from collections import Counter, OrderedDict, defaultdict
 
 from src.api.tmapi import TmapiClient
-from src.api.llm_provider import get_llm_client, get_translation_client, get_postprocess_client
+from src.api.llm_provider import get_llm_client, get_translation_client, get_postprocess_client, get_hashtags_client
 from src.api.exchange_rate import ExchangeRateClient
 from src.api.proxyapi_client import ProxyAPIClient
 from src.api.openai_client import OpenAIClient
@@ -76,11 +76,15 @@ class Scraper:
         
         # Отдельный клиент для постобработки текста поста (может быть None, если отключено/не сконфигурировано)
         self.postprocess_client = get_postprocess_client()
+        # Отдельный клиент для генерации хэштегов (может быть None, если отключено/не сконфигурировано)
+        self.hashtags_client = get_hashtags_client()
 
         # Атрибут для сбора общей статистики токенов во время обработки запроса
         self._current_tokens_usage: TokensUsage | None = None
         # Атрибут для отдельного учёта токенов постобработки (чтобы показывать их отдельной строкой в статистике)
         self._postprocess_tokens_usage: TokensUsage | None = None
+        # Атрибут для отдельного учёта токенов генерации хэштегов
+        self._hashtags_tokens_usage: TokensUsage | None = None
 
     async def scrape_product(
         self, 
@@ -691,15 +695,56 @@ class Scraper:
         except Exception:
             pass
         
-        # Формируем финальный пост из структурированных данных
+        # Формируем финальный пост из структурированных данных (без хэштегов)
         post_text = self._build_post_text(
             llm_content=llm_content,
             product_data=product_data,
             signature=signature,
             currency=currency,
             exchange_rate=exchange_rate,
-            price_lines=price_lines
+            price_lines=price_lines,
+            hashtags=None  # Хэштеги будут сгенерированы отдельно
         )
+
+        # Шаг генерации хэштегов на основе готового поста (до постобработки).
+        # ВАЖНО:
+        # - Включается только при ENABLE_HASHTAGS=True.
+        # - Использует отдельный LLM-клиент (если он успешно инициализировался).
+        hashtags = []
+        if getattr(settings, "ENABLE_HASHTAGS", False) and self.hashtags_client:
+            try:
+                hashtags_result = await self.hashtags_client.generate_hashtags(post_text)
+                if isinstance(hashtags_result, tuple):
+                    hashtags, tokens_usage_hashtags = hashtags_result
+                else:
+                    # Теоретически сюда попадём только если сигнатура изменится,
+                    # но оставляем безопасный фолбэк.
+                    hashtags = hashtags_result if isinstance(hashtags_result, list) else []
+                    tokens_usage_hashtags = TokensUsage()
+
+                # Сохраняем статистику токенов генерации хэштегов отдельно для показа в статистике.
+                if tokens_usage_hashtags:
+                    self._hashtags_tokens_usage = tokens_usage_hashtags
+                    # Также добавляем в общую статистику для общего подсчёта стоимости.
+                    if self._current_tokens_usage:
+                        self._current_tokens_usage += tokens_usage_hashtags
+
+                if settings.DEBUG_MODE:
+                    try:
+                        print(f"[Scraper] Генерация хэштегов выполнена через LLM. Хэштеги: {hashtags}, токены: {tokens_usage_hashtags.total_tokens} (вход: {tokens_usage_hashtags.prompt_tokens}, выход: {tokens_usage_hashtags.completion_tokens}), стоимость: ${tokens_usage_hashtags.total_cost:.6f}")
+                    except Exception:
+                        pass
+                
+                # Добавляем хэштеги в пост
+                if hashtags:
+                    post_text = self._add_hashtags_to_post(post_text, hashtags)
+            except Exception as e:
+                # Никогда не роняем основной сценарий из-за проблем генерации хэштегов.
+                if settings.DEBUG_MODE:
+                    try:
+                        print(f"[Scraper] Ошибка LLM-генерации хэштегов: {e}")
+                    except Exception:
+                        pass
 
         # Шаг LLM-постобработки: аккуратное исправление языка без изменения структуры поста.
         # ВАЖНО:
@@ -2832,6 +2877,61 @@ class Scraper:
         except Exception:
             return (text or "").strip()
 
+    def _remove_sizes_from_title(self, title: str) -> str:
+        """
+        Удаляет размеры из названия товара.
+        Размеры могут быть в разных форматах: "35 × 24 × 17 см", "35x24x17", "35-24-17", "35 24 17" и т.п.
+        
+        Args:
+            title: Название товара
+            
+        Returns:
+            str: Название без размеров
+        """
+        if not title:
+            return title
+        
+        try:
+            import re
+            
+            # Паттерны для различных форматов размеров:
+            # - "35 × 24 × 17 см", "35x24x17", "35-24-17", "35 24 17"
+            # - "35×24×17см", "35 x 24 x 17 см"
+            # - "35×24×17", "35 x 24 x 17"
+            # - "35×24", "35 x 24"
+            # - "35 см", "35см", "35cm"
+            # - "35-40", "35/40", "S-M", "S, M, L"
+            
+            # Удаляем размеры в формате "число × число × число" (с единицами измерения или без)
+            title = re.sub(r'\d+\s*[×xX]\s*\d+\s*[×xX]\s*\d+\s*(?:см|cm|mm|м|m)?', '', title, flags=re.IGNORECASE)
+            
+            # Удаляем размеры в формате "число × число" (с единицами измерения или без)
+            title = re.sub(r'\d+\s*[×xX]\s*\d+\s*(?:см|cm|mm|м|m)?', '', title, flags=re.IGNORECASE)
+            
+            # Удаляем размеры в формате "число-число" или "число/число" (диапазоны)
+            title = re.sub(r'\d+\s*[-/]\s*\d+\s*(?:см|cm|mm|м|m)?', '', title, flags=re.IGNORECASE)
+            
+            # Удаляем размеры в формате "число, число, число" (списки)
+            title = re.sub(r'\d+\s*,\s*\d+\s*,\s*\d+\s*(?:см|cm|mm|м|m)?', '', title, flags=re.IGNORECASE)
+            
+            # Удаляем размеры в формате "число, число" (списки из двух)
+            title = re.sub(r'\d+\s*,\s*\d+\s*(?:см|cm|mm|м|m)?', '', title, flags=re.IGNORECASE)
+            
+            # Удаляем одиночные размеры с единицами измерения в конце названия
+            title = re.sub(r'\s+\d+\s*(?:см|cm|mm|м|m)\s*$', '', title, flags=re.IGNORECASE)
+            
+            # Удаляем размеры в формате "S-M", "S/M", "S, M, L" (буквенные размеры)
+            # Но только если они в конце названия или после пробела
+            title = re.sub(r'\s+[A-ZА-ЯЁ]\s*[-/]\s*[A-ZА-ЯЁ]\s*$', '', title)
+            title = re.sub(r'\s+[A-ZА-ЯЁ]\s*,\s*[A-ZА-ЯЁ]\s*,\s*[A-ZА-ЯЁ]\s*$', '', title)
+            
+            # Очищаем множественные пробелы и пробелы в начале/конце
+            title = re.sub(r'\s+', ' ', title).strip()
+            
+            return title
+        except Exception:
+            return (title or "").strip()
+
     def _strip_gender_age_sentences(self, text: str) -> str:
         """
         Для description: удаляем предложения, которые содержат упоминания пола/возраста.
@@ -2852,6 +2952,113 @@ class Scraper:
             return " ".join(kept).strip() or s
         except Exception:
             return s
+
+    def _remove_meta_comments_from_description(self, description: str) -> str:
+        """
+        Удаляет мета-комментарии о самом описании или источнике данных из description.
+        Запрещены фразы типа: "В описании указаны...", "производитель указал", "в данных указано" и т.п.
+        
+        Args:
+            description: Текст описания товара
+            
+        Returns:
+            str: Описание без мета-комментариев
+        """
+        if not description:
+            return description
+        
+        try:
+            import re
+            
+            # Разбиваем на предложения для более точной фильтрации
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", description) if s.strip()]
+            if not sentences:
+                return description
+            
+            # Паттерны для мета-комментариев
+            meta_patterns = [
+                r"(?i)^в\s+описании\s+",  # "В описании указаны...", "В описании упомянуты..."
+                r"(?i)\bв\s+описании\s+указан",  # "в описании указаны"
+                r"(?i)\bв\s+описании\s+упомянут",  # "в описании упомянуты"
+                r"(?i)\bпроизводитель\s+указал",  # "производитель указал"
+                r"(?i)\bстрана\s+производства\s+указана",  # "страна производства указана"
+                r"(?i)\bв\s+данных\s+указано",  # "в данных указано"
+                r"(?i)\bв\s+характеристиках\s+указано",  # "в характеристиках указано"
+                r"(?i)\bв\s+информации\s+указано",  # "в информации указано"
+                r"(?i)\bв\s+спецификации\s+указано",  # "в спецификации указано"
+                r"(?i)\bсогласно\s+описанию",  # "согласно описанию"
+                r"(?i)\bпо\s+описанию",  # "по описанию"
+                r"(?i)\bв\s+описании\s+есть",  # "в описании есть"
+                r"(?i)\bв\s+описании\s+присутствует",  # "в описании присутствует"
+            ]
+            
+            # Фильтруем предложения, содержащие мета-комментарии
+            filtered_sentences = []
+            for sentence in sentences:
+                # Проверяем, содержит ли предложение мета-комментарий
+                is_meta = False
+                for pattern in meta_patterns:
+                    if re.search(pattern, sentence):
+                        is_meta = True
+                        break
+                
+                # Если это не мета-комментарий, добавляем предложение
+                if not is_meta:
+                    filtered_sentences.append(sentence)
+            
+            # Собираем обратно в текст
+            result = " ".join(filtered_sentences).strip()
+            
+            # Если после фильтрации осталась пустая строка, возвращаем исходную
+            # (чтобы не потерять весь description из-за ошибки фильтрации)
+            return result if result else description
+        except Exception:
+            # В случае ошибки возвращаем исходный текст
+            return description
+
+    def _remove_article_codes_from_title(self, title: str) -> str:
+        """
+        Удаляет артикулы, SKU, ID и коды товара из названия.
+        
+        Args:
+            title: Название товара
+            
+        Returns:
+            str: Название без артикулов и кодов
+        """
+        if not title:
+            return title
+        
+        try:
+            import re
+            
+            # Паттерны для артикулов и кодов:
+            # - "Артикул: ABC123", "SKU: XYZ", "ID: 12345"
+            # - "ABC123", "SKU-123", "ID-456"
+            # - "Арт. ABC123", "Арт.ABC123"
+            # - Коды в скобках: "(ABC123)", "[SKU-123]"
+            # - Коды в конце: "Товар ABC123", "Товар SKU-123"
+            
+            # Удаляем артикулы и коды в формате "Артикул: ...", "SKU: ...", "ID: ..."
+            title = re.sub(r"(?i)\b(артикул|sku|id|код)\s*:?\s*\S+", "", title)
+            
+            # Удаляем артикулы в формате "Арт. ..." или "Арт.ABC123"
+            title = re.sub(r"(?i)\bарт\.?\s*\S+", "", title)
+            
+            # Удаляем коды в скобках: "(ABC123)", "[SKU-123]", "{ID-456}"
+            title = re.sub(r"[\[\(]\s*(?:артикул|sku|id|код)\s*:?\s*\S+\s*[\]\)]", "", title, flags=re.IGNORECASE)
+            title = re.sub(r"[\[\(]\s*[A-Z0-9\-_]+\s*[\]\)]", "", title)  # Простые коды в скобках
+            
+            # Удаляем коды в конце названия: "Товар ABC123", "Товар SKU-123"
+            title = re.sub(r"\s+(?:артикул|sku|id|код)\s*:?\s*[A-Z0-9\-_]+$", "", title, flags=re.IGNORECASE)
+            title = re.sub(r"\s+[A-Z]{2,}\d+[A-Z0-9\-_]*$", "", title)  # Коды типа "ABC123", "SKU-123"
+            
+            # Очищаем множественные пробелы и пробелы в начале/конце
+            title = re.sub(r'\s+', ' ', title).strip()
+            
+            return title
+        except Exception:
+            return (title or "").strip()
 
     def _remove_color_words(self, text: str) -> str:
         if not text:
@@ -3241,7 +3448,8 @@ class Scraper:
         signature: str = None,
         currency: str = "cny",
         exchange_rate: float = None,
-        price_lines: list | None = None
+        price_lines: list | None = None,
+        hashtags: list[str] | None = None
     ) -> str:
         """
         Формирует финальный текст поста из структурированных данных LLM и данных API.
@@ -3264,16 +3472,19 @@ class Scraper:
         description = llm_content.get('description', '')
         main_characteristics = llm_content.get('main_characteristics', {})
         additional_info = llm_content.get('additional_info', {})
-        hashtags = llm_content.get('hashtags', [])
+        # Хэштеги больше не извлекаются из llm_content, они передаются отдельным параметром
         emoji = llm_content.get('emoji', '')
 
-        # По требованиям: запрещены любые упоминания пола/возраста.
+        # По требованиям: запрещены любые упоминания пола/возраста и размеры в названии.
         # Чистим сразу, чтобы не протащить это в финальный пост даже при ошибке LLM.
         try:
             if isinstance(title, str):
                 title = self._sanitize_gender_age_from_title(title)
+                title = self._remove_sizes_from_title(title)
+                title = self._remove_article_codes_from_title(title)
             if isinstance(description, str):
                 description = self._strip_gender_age_sentences(description)
+                description = self._remove_meta_comments_from_description(description)
             # Если LLM вдруг добавил "мужской/женский/детский" в названия характеристик — выкидываем такие поля.
             if isinstance(main_characteristics, dict) and main_characteristics:
                 import re
@@ -3301,6 +3512,32 @@ class Scraper:
                             main_characteristics[k] = cleaned_list
                         else:
                             main_characteristics.pop(k, None)
+                
+                # Фильтруем характеристики, описывающие назначение или способ использования товара
+                # Такие характеристики не нужны - пользователь сам решает, как использовать товар
+                forbidden_characteristics = [
+                    "назначение", "способ использования", "применение", "использование",
+                    "для чего", "кому подходит", "варианты использования", "условия применения",
+                    "сфера применения", "цель использования", "область применения",
+                    "как использовать", "способ применения", "назначение товара"
+                ]
+                forbidden_key_pattern = re.compile(
+                    r"(?i)\b(" + "|".join(forbidden_characteristics) + r")\b"
+                )
+                for k in list(main_characteristics.keys()):
+                    if forbidden_key_pattern.search(str(k)):
+                        main_characteristics.pop(k, None)
+                
+                # Также фильтруем "Конструкция", если она описывает способ использования
+                # (например, "двухвариантное ношение", "сменная конструкция")
+                if "Конструкция" in main_characteristics:
+                    construction_value = str(main_characteristics.get("Конструкция", "")).lower()
+                    usage_patterns = [
+                        r"двухвариантн", r"сменн", r"вариант.*ношени", r"способ.*ношени",
+                        r"ношени", r"использовани", r"применени"
+                    ]
+                    if any(re.search(pattern, construction_value) for pattern in usage_patterns):
+                        main_characteristics.pop("Конструкция", None)
         except Exception:
             pass
 
@@ -3779,18 +4016,44 @@ class Scraper:
             post_parts.append(f"<i>{user_signature}</i>")
             post_parts.append("")
         
-        # Хэштеги (курсивом)
-        # Очищаем хэштеги от пробелов (программная проверка на случай, если LLM добавил пробелы)
-        # Удаляем все пробелы из хэштегов, включая пробелы в начале и конце
-        if hashtags:
-            cleaned_hashtags = [tag.strip().replace(" ", "") for tag in hashtags if tag and tag.strip()]
-            hashtag_text = " ".join([f"#{tag}" for tag in cleaned_hashtags if tag])
-            if hashtag_text:  # Добавляем только если есть хотя бы один хэштег
-                post_parts.append(f"<i>{hashtag_text}</i>")
-                post_parts.append("")
+        # Хэштеги больше не добавляются здесь - они генерируются отдельно после создания поста
+        # и добавляются через метод _add_hashtags_to_post()
         
         # Ссылка на товар
         if product_url:
             post_parts.append(f'<a href="{product_url}">Ссылка</a>')
         
         return "\n".join(post_parts)
+
+    def _add_hashtags_to_post(self, post_text: str, hashtags: list[str]) -> str:
+        """
+        Добавляет хэштеги в конец поста перед ссылкой на товар.
+
+        Args:
+            post_text: Текст поста
+            hashtags: Список хэштегов
+
+        Returns:
+            str: Текст поста с добавленными хэштегами
+        """
+        if not hashtags:
+            return post_text
+        
+        # Очищаем хэштеги от пробелов
+        cleaned_hashtags = [tag.strip().replace(" ", "").replace("#", "") for tag in hashtags if tag and tag.strip()]
+        if not cleaned_hashtags:
+            return post_text
+        
+        hashtag_text = " ".join([f"#{tag}" for tag in cleaned_hashtags if tag])
+        
+        # Ищем позицию ссылки на товар (если есть)
+        link_pattern = r'<a href="[^"]+">Ссылка</a>'
+        if link_match := __import__('re').search(link_pattern, post_text):
+            # Вставляем хэштеги перед ссылкой
+            link_pos = link_match.start()
+            before_link = post_text[:link_pos].rstrip()
+            after_link = post_text[link_pos:]
+            return f"{before_link}\n\n<i>{hashtag_text}</i>\n\n{after_link}"
+        else:
+            # Если ссылки нет, добавляем хэштеги в конец
+            return f"{post_text.rstrip()}\n\n<i>{hashtag_text}</i>"
