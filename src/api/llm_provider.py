@@ -146,3 +146,69 @@ def reset_translation_cache() -> None:
     Сбрасывает кэш переводческого клиента после переключения провайдера или модели.
     """
     _build_translation_client.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def _build_hashtags_client():
+    """
+    Возвращает клиент LLM, используемый ТОЛЬКО для генерации хэштегов на основе готового поста.
+
+    ВАЖНО:
+    - Генерация хэштегов включается флагом ENABLE_HASHTAGS.
+    - Провайдер задаётся через HASHTAGS_PROVIDER (yandex/openai/proxyapi), если пусто - используется DEFAULT_LLM.
+    - Модель задаётся через HASHTAGS_MODEL, если пусто - используется модель провайдера по умолчанию.
+    - При любой ошибке инициализации (нет ключа, некорректная модель и т.п.)
+      возвращаем None, чтобы основной пайплайн не падал.
+    """
+    enabled = bool(getattr(settings, "ENABLE_HASHTAGS", False))
+    if not enabled:
+        return None
+
+    # Определяем провайдер: если HASHTAGS_PROVIDER не указан, используем DEFAULT_LLM
+    provider_raw = (getattr(settings, "HASHTAGS_PROVIDER", "") or "").strip()
+    if provider_raw:
+        provider = _normalize_provider(provider_raw)
+    else:
+        provider = _normalize_provider(settings.DEFAULT_LLM)
+
+    # Определяем модель: если HASHTAGS_MODEL не указана, используем модель провайдера по умолчанию
+    model_name = (getattr(settings, "HASHTAGS_MODEL", "") or "").strip()
+
+    try:
+        if provider == "openai":
+            if not model_name:
+                model_name = settings.OPENAI_MODEL or ""
+            return OpenAIClient(model_name=model_name or None)
+        if provider == "proxyapi":
+            if not model_name:
+                model_name = settings.OPENAI_MODEL or ""
+            return ProxyAPIClient(model_name=model_name or None)
+        
+        # YandexGPT
+        if not model_name:
+            model_name = settings.YANDEX_GPT_MODEL or ""
+        return YandexGPTClient(model_name=model_name or None)
+    except Exception:
+        # В режиме DEBUG выдаём понятное сообщение, но не ломаем основной сценарий.
+        if settings.DEBUG_MODE:
+            print("[LLM] Не удалось инициализировать клиент для генерации хэштегов. "
+                  "Генерация хэштегов будет отключена для этого запуска.")
+        return None
+
+
+def get_hashtags_client():
+    """
+    Возвращает клиент LLM, настроенный для генерации хэштегов на основе готового поста.
+
+    Может вернуть None, если:
+    - генерация хэштегов отключена (ENABLE_HASHTAGS=False),
+    - не удалось инициализировать клиент (нет ключа, неверная конфигурация и т.п.).
+    """
+    return _build_hashtags_client()
+
+
+def reset_hashtags_cache() -> None:
+    """
+    Сбрасывает кэш клиента генерации хэштегов после переключения провайдера или модели.
+    """
+    _build_hashtags_client.cache_clear()

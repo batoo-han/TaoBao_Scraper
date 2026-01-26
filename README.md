@@ -203,6 +203,15 @@ EXCHANGE_RATE_API_KEY=your_exchange_rate_key
 
 # Файлы cookies для Pinduoduo (обязательно, если работаете с PDD)
 PDD_COOKIES_FILE=src/pdd_cookies.json
+
+# Генерация хэштегов через отдельную LLM-модель (опционально)
+ENABLE_HASHTAGS=False
+HASHTAGS_PROVIDER=  # Провайдер для хэштегов (yandex/openai/proxyapi), если пусто - используется DEFAULT_LLM
+HASHTAGS_MODEL=     # Модель для генерации хэштегов, если пусто - используется модель провайдера по умолчанию
+
+# Постобработка текста поста через отдельную LLM-модель (опционально)
+ENABLE_POSTPROCESSING=False
+OPENAI_POSTPROCESS_MODEL=  # Модель для постобработки (например, gpt-4o-mini), если пусто - используется OPENAI_MODEL
 ```
 
 ### Опциональные переменные
@@ -265,6 +274,7 @@ PLAYWRIGHT_PAGE_TIMEOUT_MS=90000
 - Семейство `gpt-5.1` (включая `gpt-5.1-mini` и `gpt-5.1-nano`) использует Responses API: бот автоматически отключает temperature/top_p/max_tokens и задаёт `reasoning` + `max_output_tokens` как рекомендует OpenAI Latest Model Guide.
 - Для YandexGPT необходимо оставить заполненными `YANDEX_GPT_API_KEY`, `YANDEX_FOLDER_ID`, `YANDEX_GPT_MODEL`.
 - **Подсчет токенов и стоимости:** При использовании OpenAI/ProxyAPI бот автоматически считает количество токенов и стоимость запросов. Вы можете указать цены вручную через `OPENAI_PROMPT_PRICE_PER_1M`, `OPENAI_COMPLETION_PRICE_PER_1M` (или `PROXYAPI_*`) в USD за 1 000 000 токенов. Если цены не указаны, используются стандартные цены из `openai_pricing.py`. Статистика токенов и стоимости отображается в дублирующем чате после каждого запроса. Для YandexGPT стоимость не считается.
+- **Генерация хэштегов:** Отдельный пайплайн для генерации хэштегов на основе готового поста. Включается через `ENABLE_HASHTAGS=True`. Провайдер и модель задаются через `HASHTAGS_PROVIDER` и `HASHTAGS_MODEL` (если не указаны, используются значения из `DEFAULT_LLM`). Хэштеги генерируются после создания поста, но до постобработки, что позволяет создавать более релевантные хэштеги на основе полного контекста поста.
 
 Если вы используете **OpenAI Gateway** на зарубежном сервере:
 

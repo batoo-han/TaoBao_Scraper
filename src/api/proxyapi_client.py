@@ -15,7 +15,7 @@ from typing import Iterable, Optional
 from openai import AsyncOpenAI, OpenAIError
 
 from src.core.config import settings
-from src.api.prompts import POST_GENERATION_PROMPT
+from src.api.prompts import POST_GENERATION_PROMPT, HASHTAGS_GENERATION_PROMPT
 from src.api.tokens_stats import TokensUsage, calculate_cost
 from src.api.openai_pricing import get_effective_pricing
 
@@ -355,6 +355,87 @@ class ProxyAPIClient:
                 return "".join(pieces)
 
         return ""
+
+    async def generate_hashtags(
+        self,
+        post_text: str,
+    ) -> tuple[list[str], TokensUsage]:
+        """
+        Генерирует хэштеги на основе готового текста поста.
+
+        Args:
+            post_text: Готовый текст поста для Telegram
+
+        Returns:
+            tuple[list[str], TokensUsage]: Список хэштегов и статистика токенов
+        """
+        if not post_text:
+            # Если текста нет — возвращаем пустой список и нулевую статистику
+            return [], TokensUsage()
+
+        # Формируем промпт для генерации хэштегов
+        user_prompt = HASHTAGS_GENERATION_PROMPT.replace("{post_text}", post_text)
+
+        system_prompt = (
+            "Ты опытный маркетолог, специализирующийся на работе с маркетплейсами. "
+            "Твоя задача — по тексту поста товара дать один-два хэштега, которые отражают только суть товара. "
+            "НИКОГДА не используй материал изготовления в хэштегах (металл, кожа, хлопок, шерсть и т.п.). "
+            "Если нет бренда и нет другого ключевого свойства (кроме материала), используй ТОЛЬКО ОДИН хэштег с типом товара."
+        )
+
+        if settings.DEBUG_MODE:
+            print(f"[ProxyAPI][hashtags] Отправляем промпт генерации хэштегов ({self.model}):\n{user_prompt[:500]}...")
+
+        # Генерируем хэштеги через Chat Completions (ProxyAPI не использует Responses API)
+        max_out = 200  # Для хэштегов достаточно небольшого лимита
+        result = await self._call_chat_completions(
+            user_prompt,
+            system_prompt=system_prompt,
+            expect_json=True,
+            max_tokens=max_out,
+            temperature=0.1,
+        )
+        
+        if isinstance(result, tuple):
+            text, tokens_usage = result
+        else:
+            text = result
+            tokens_usage = TokensUsage()
+
+        # Парсим JSON-ответ
+        try:
+            cleaned = text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            if cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+            
+            data = json.loads(cleaned)
+            hashtags = data.get("hashtags", [])
+            
+            # Валидация: убеждаемся, что это список строк
+            if not isinstance(hashtags, list):
+                hashtags = []
+            else:
+                # Фильтруем и очищаем хэштеги
+                hashtags = [
+                    str(tag).strip().replace(" ", "").replace("#", "")
+                    for tag in hashtags
+                    if tag and str(tag).strip()
+                ]
+            
+            if settings.DEBUG_MODE:
+                print(f"[ProxyAPI][hashtags] Сгенерированы хэштеги: {hashtags}")
+            
+            return hashtags, tokens_usage
+        except (json.JSONDecodeError, KeyError, AttributeError) as exc:
+            if settings.DEBUG_MODE:
+                print(f"[ProxyAPI][hashtags] Ошибка парсинга JSON: {exc}\nОтвет: {text}")
+            # В случае ошибки возвращаем пустой список, но сохраняем статистику токенов
+            return [], tokens_usage
 
     @staticmethod
     def _build_responses_input(system_text: str, user_text: str) -> list[dict]:

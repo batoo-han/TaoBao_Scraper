@@ -2,7 +2,7 @@ import json
 import httpx
 
 from src.core.config import settings
-from src.api.prompts import POST_GENERATION_PROMPT
+from src.api.prompts import POST_GENERATION_PROMPT, HASHTAGS_GENERATION_PROMPT
 
 
 class YandexGPTClient:
@@ -106,6 +106,75 @@ class YandexGPTClient:
             temperature=0.0,
         )
         return translated.strip()
+
+    async def generate_hashtags(
+        self,
+        post_text: str,
+    ) -> tuple[list[str], "TokensUsage"]:
+        """
+        Генерирует хэштеги на основе готового текста поста.
+
+        Args:
+            post_text: Готовый текст поста для Telegram
+
+        Returns:
+            tuple[list[str], TokensUsage]: Список хэштегов и статистика токенов
+        """
+        # Импортируем TokensUsage здесь, чтобы избежать циклических импортов
+        from src.api.tokens_stats import TokensUsage
+        
+        if not post_text:
+            # Если текста нет — возвращаем пустой список и нулевую статистику
+            return [], TokensUsage()
+
+        # Формируем промпт для генерации хэштегов
+        user_prompt = HASHTAGS_GENERATION_PROMPT.replace("{post_text}", post_text)
+
+        system_prompt = (
+            "Ты опытный маркетолог, специализирующийся на работе с маркетплейсами. "
+            "Твоя задача — по тексту поста товара дать один-два хэштега, которые отражают только суть товара. "
+            "НИКОГДА не используй материал изготовления в хэштегах (металл, кожа, хлопок, шерсть и т.п.). "
+            "Если нет бренда и нет другого ключевого свойства (кроме материала), используй ТОЛЬКО ОДИН хэштег с типом товара."
+        )
+
+        if settings.DEBUG_MODE:
+            print(f"[YandexGPT][hashtags] Отправляем промпт генерации хэштегов ({self.model}):\n{user_prompt[:500]}...")
+
+        # Генерируем хэштеги
+        text = await self.generate_json_response(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=200,
+            temperature=0.1,
+        )
+
+        # Парсим JSON-ответ
+        try:
+            cleaned = self._cleanup_response(text)
+            data = json.loads(cleaned)
+            hashtags = data.get("hashtags", [])
+            
+            # Валидация: убеждаемся, что это список строк
+            if not isinstance(hashtags, list):
+                hashtags = []
+            else:
+                # Фильтруем и очищаем хэштеги
+                hashtags = [
+                    str(tag).strip().replace(" ", "").replace("#", "")
+                    for tag in hashtags
+                    if tag and str(tag).strip()
+                ]
+            
+            if settings.DEBUG_MODE:
+                print(f"[YandexGPT][hashtags] Сгенерированы хэштеги: {hashtags}")
+            
+            # YandexGPT не возвращает статистику токенов, создаём пустую
+            return hashtags, TokensUsage()
+        except (json.JSONDecodeError, KeyError, AttributeError) as exc:
+            if settings.DEBUG_MODE:
+                print(f"[YandexGPT][hashtags] Ошибка парсинга JSON: {exc}\nОтвет: {text}")
+            # В случае ошибки возвращаем пустой список
+            return [], TokensUsage()
 
     @staticmethod
     def _cleanup_response(raw_text: str) -> str:
