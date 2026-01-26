@@ -6,6 +6,7 @@ import time
 import uuid
 import json
 import contextlib
+from typing import Callable, Awaitable, Any
 from collections import deque
 from aiogram import Router, F
 from aiogram.types import (
@@ -39,6 +40,12 @@ from src.services.access_control import (
 )
 from src.utils.url_parser import Platform
 from src.utils.cache_stats import CacheStats
+from src.services.telegram_flood_control import (
+    extract_retry_after,
+    build_maintenance_message,
+    get_flood_block_remaining,
+    set_flood_block,
+)
 from src.db.session import get_session
 from src.db.models import RequestStats
 from datetime import datetime
@@ -318,6 +325,13 @@ async def ensure_access(message: Message) -> bool:
     user_id = user.id
     username = user.username or ""
 
+    # Проверяем, не активна ли у пользователя индивидуальная блокировка Telegram flood-limit
+    # Если активна — показываем время до восстановления и не обрабатываем запрос
+    remaining = await get_flood_block_remaining(user_id)
+    if remaining > 0:
+        await message.answer(build_maintenance_message(remaining))
+        return False
+
     # Админы всегда имеют доступ, независимо от списков
     if is_admin_user(user_id, username):
         return True
@@ -344,6 +358,8 @@ PUNCTUATION_BREAKS = ('.', '!', '?', ';', ':', ',', '…', '\n')
 MIN_BREAK_RATIO = 0.4
 HTML_SELF_CLOSING_TAGS = {"br", "hr"}
 HTML_TAG_PATTERN = re.compile(r"<(/?)([a-zA-Z0-9]+)(?:\s[^<>]*)?>")
+# Небольшая пауза между сообщениями, чтобы не ловить flood-limit
+TELEGRAM_SEND_DELAY_SEC = 0.35
 
 
 def _parse_limit_arg(raw: str | None) -> int | None:
@@ -504,6 +520,120 @@ def prepare_caption_and_queue(text: str) -> tuple[str, deque[str]]:
     return caption_text, remaining
 
 
+async def _notify_user_flood_control(bot, user_id: int, retry_after: int) -> None:
+    """
+    Пытается отправить пользователю сообщение о техническом обслуживании.
+
+    Важно:
+    - Отправляем только один раз для блока > 60 сек (см. логику выше по цепочке).
+    - Ошибки отправки здесь не должны ломать основной поток.
+    """
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=build_maintenance_message(retry_after),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Не удалось уведомить пользователя %s о flood-limit: %s",
+            user_id,
+            exc,
+        )
+
+
+async def _handle_flood_control_error(
+    *,
+    error: Exception,
+    user_id: int,
+    bot,
+    context: str,
+    notify_user: bool,
+) -> tuple[int | None, bool]:
+    """
+    Обрабатывает ошибку flood-limit от Telegram.
+
+    Возвращает кортеж:
+    - retry_after (секунды) или None, если это не flood-limit
+    - нужно ли повторить отправку (True, если retry_after <= 60)
+
+    Логика:
+    - retry_after <= 60: не уведомляем пользователя, ждём и повторяем отправку
+    - retry_after > 60: сохраняем блокировку в Redis и (опционально) уведомляем
+    """
+    retry_after = extract_retry_after(error)
+    if not retry_after:
+        return None, False
+
+    if retry_after <= 60:
+        logger.warning(
+            "Telegram flood-limit (%s сек). Контекст: %s. Пользователь: %s",
+            retry_after,
+            context,
+            user_id,
+        )
+        await asyncio.sleep(retry_after)
+        return retry_after, True
+
+    # Длинная блокировка: записываем в Redis и уведомляем пользователя
+    updated = await set_flood_block(user_id, retry_after, source=context)
+    if notify_user and updated:
+        await _notify_user_flood_control(bot, user_id, retry_after)
+
+    logger.warning(
+        "Telegram flood-limit (%s сек). Блокировка пользователя %s сохранена. Контекст: %s",
+        retry_after,
+        user_id,
+        context,
+    )
+    return retry_after, False
+
+
+async def _try_send_with_flood_control(
+    *,
+    send_coro_factory: Callable[[], Awaitable[Any]],
+    user_id: int,
+    bot,
+    context: str,
+    notify_user: bool,
+) -> bool:
+    """
+    Универсальная обёртка для отправки сообщений/медиа с обработкой flood-limit.
+
+    Поведение:
+    1) Пробуем отправить.
+    2) Если ловим flood-limit:
+       - retry_after <= 60: ждём и повторяем один раз
+       - retry_after > 60: сохраняем блокировку, уведомляем пользователя
+    """
+    try:
+        await send_coro_factory()
+        return True
+    except Exception as exc:
+        retry_after, should_retry = await _handle_flood_control_error(
+            error=exc,
+            user_id=user_id,
+            bot=bot,
+            context=context,
+            notify_user=notify_user,
+        )
+        if should_retry:
+            try:
+                await send_coro_factory()
+                return True
+            except Exception as retry_exc:
+                logger.warning(
+                    "Повторная отправка после flood-limit не удалась: %s. Контекст: %s",
+                    retry_exc,
+                    context,
+                )
+                return False
+
+        # Если это не flood-limit — считаем отправку неуспешной и даём вызывающему решать
+        if retry_after is None:
+            logger.debug("Ошибка отправки без retry_after. Контекст: %s. Ошибка: %s", context, exc)
+        return False
+
+
 async def send_text_sequence(message: Message, chunks: list[str]) -> None:
     """
     Отправляет список текстовых сообщений по очереди.
@@ -511,7 +641,16 @@ async def send_text_sequence(message: Message, chunks: list[str]) -> None:
     for chunk in chunks:
         if not chunk or not chunk.strip():
             continue
-        await message.answer(chunk.strip(), parse_mode="HTML")
+        sent = await _try_send_with_flood_control(
+            send_coro_factory=lambda: message.answer(chunk.strip(), parse_mode="HTML"),
+            user_id=message.from_user.id,
+            bot=message.bot,
+            context="user_text_sequence",
+            notify_user=True,
+        )
+        if not sent:
+            return
+        await asyncio.sleep(TELEGRAM_SEND_DELAY_SEC)
 
 
 async def _send_single_photo(message: Message, url: str, caption: str | None) -> bool:
@@ -519,19 +658,30 @@ async def _send_single_photo(message: Message, url: str, caption: str | None) ->
     Отправляет одиночное фото с подписью. Возвращает True при успехе.
     """
     parse_mode = "HTML" if caption else None
-    try:
-        await message.answer_photo(url, caption=caption or None, parse_mode=parse_mode)
+    sent_direct = await _try_send_with_flood_control(
+        send_coro_factory=lambda: message.answer_photo(url, caption=caption or None, parse_mode=parse_mode),
+        user_id=message.from_user.id,
+        bot=message.bot,
+        context="user_photo_direct",
+        notify_user=True,
+    )
+    if sent_direct:
         return True
-    except TelegramBadRequest:
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                response = await client.get(url)
-                if response.status_code == 200 and response.content:
-                    buffer = BufferedInputFile(response.content, filename="photo.jpg")
-                    await message.answer_photo(buffer, caption=caption or None, parse_mode=parse_mode)
-                    return True
-        except Exception:
-            pass
+
+    # Если прямая отправка не удалась — пробуем скачать картинку и отправить файлом
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+            response = await client.get(url)
+            if response.status_code == 200 and response.content:
+                buffer = BufferedInputFile(response.content, filename="photo.jpg")
+                sent_buffer = await _try_send_with_flood_control(
+                    send_coro_factory=lambda: message.answer_photo(buffer, caption=caption or None, parse_mode=parse_mode),
+                    user_id=message.from_user.id,
+                    bot=message.bot,
+                    context="user_photo_buffer",
+                    notify_user=True,
+                )
+                return sent_buffer
     except Exception:
         pass
     return False
@@ -551,13 +701,15 @@ async def _send_media_group(message: Message, urls: list[str], caption: str | No
         else:
             media.append(InputMediaPhoto(media=url))
 
-    try:
-        await message.answer_media_group(media=media)
+    sent_group = await _try_send_with_flood_control(
+        send_coro_factory=lambda: message.answer_media_group(media=media),
+        user_id=message.from_user.id,
+        bot=message.bot,
+        context="user_media_group_direct",
+        notify_user=True,
+    )
+    if sent_group:
         return True
-    except TelegramBadRequest:
-        pass
-    except Exception:
-        pass
 
     files: list[InputMediaPhoto] = []
     try:
@@ -575,10 +727,14 @@ async def _send_media_group(message: Message, urls: list[str], caption: str | No
                 except Exception:
                     continue
         if files:
-            await message.answer_media_group(media=files)
-            return True
-    except TelegramBadRequest:
-        pass
+            sent_buffer_group = await _try_send_with_flood_control(
+                send_coro_factory=lambda: message.answer_media_group(media=files),
+                user_id=message.from_user.id,
+                bot=message.bot,
+                context="user_media_group_buffer",
+                notify_user=True,
+            )
+            return sent_buffer_group
     except Exception:
         pass
 
@@ -682,30 +838,64 @@ def _get_chat_id_variants(raw_channel_id: str | int | None, normalized_chat_id: 
     return unique_variants
 
 
-async def _send_single_photo_to_chat(bot, chat_id: int | str, url: str, caption: str | None) -> bool:
+async def _send_single_photo_to_chat(
+    bot,
+    chat_id: int | str,
+    url: str,
+    caption: str | None,
+    *,
+    user_id: int,
+) -> bool:
     """
     Отправляет одиночное фото в указанный чат (канал) с fallback на загрузку файла.
     """
     parse_mode = "HTML" if caption else None
-    try:
-        await bot.send_photo(chat_id=chat_id, photo=url, caption=caption or None, parse_mode=parse_mode)
+    sent_direct = await _try_send_with_flood_control(
+        send_coro_factory=lambda: bot.send_photo(
+            chat_id=chat_id,
+            photo=url,
+            caption=caption or None,
+            parse_mode=parse_mode,
+        ),
+        user_id=user_id,
+        bot=bot,
+        context="broadcast_photo_direct",
+        notify_user=True,
+    )
+    if sent_direct:
         return True
-    except TelegramBadRequest:
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                response = await client.get(url)
-                if response.status_code == 200 and response.content:
-                    buffer = BufferedInputFile(response.content, filename="photo.jpg")
-                    await bot.send_photo(chat_id=chat_id, photo=buffer, caption=caption or None, parse_mode=parse_mode)
-                    return True
-        except Exception:
-            pass
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+            response = await client.get(url)
+            if response.status_code == 200 and response.content:
+                buffer = BufferedInputFile(response.content, filename="photo.jpg")
+                sent_buffer = await _try_send_with_flood_control(
+                    send_coro_factory=lambda: bot.send_photo(
+                        chat_id=chat_id,
+                        photo=buffer,
+                        caption=caption or None,
+                        parse_mode=parse_mode,
+                    ),
+                    user_id=user_id,
+                    bot=bot,
+                    context="broadcast_photo_buffer",
+                    notify_user=True,
+                )
+                return sent_buffer
     except Exception:
         pass
     return False
 
 
-async def _send_media_block_to_chat(bot, chat_id: int | str, urls: list[str], caption: str | None) -> bool:
+async def _send_media_block_to_chat(
+    bot,
+    chat_id: int | str,
+    urls: list[str],
+    caption: str | None,
+    *,
+    user_id: int,
+) -> bool:
     """
     Универсальная отправка фотоблока в указанный чат: одиночное фото или альбом.
     """
@@ -713,7 +903,13 @@ async def _send_media_block_to_chat(bot, chat_id: int | str, urls: list[str], ca
         return False
 
     if len(urls) == 1:
-        return await _send_single_photo_to_chat(bot, chat_id, urls[0], caption)
+        return await _send_single_photo_to_chat(
+            bot,
+            chat_id,
+            urls[0],
+            caption,
+            user_id=user_id,
+        )
 
     media = []
     for idx, url in enumerate(urls):
@@ -722,13 +918,15 @@ async def _send_media_block_to_chat(bot, chat_id: int | str, urls: list[str], ca
         else:
             media.append(InputMediaPhoto(media=url))
 
-    try:
-        await bot.send_media_group(chat_id=chat_id, media=media)
+    sent_group = await _try_send_with_flood_control(
+        send_coro_factory=lambda: bot.send_media_group(chat_id=chat_id, media=media),
+        user_id=user_id,
+        bot=bot,
+        context="broadcast_media_group_direct",
+        notify_user=True,
+    )
+    if sent_group:
         return True
-    except TelegramBadRequest:
-        pass
-    except Exception:
-        pass
 
     files: list[InputMediaPhoto] = []
     try:
@@ -746,24 +944,43 @@ async def _send_media_block_to_chat(bot, chat_id: int | str, urls: list[str], ca
                 except Exception:
                     continue
         if files:
-            await bot.send_media_group(chat_id=chat_id, media=files)
-            return True
-    except TelegramBadRequest:
-        pass
+            sent_buffer_group = await _try_send_with_flood_control(
+                send_coro_factory=lambda: bot.send_media_group(chat_id=chat_id, media=files),
+                user_id=user_id,
+                bot=bot,
+                context="broadcast_media_group_buffer",
+                notify_user=True,
+            )
+            return sent_buffer_group
     except Exception:
         pass
 
     return False
 
 
-async def _send_text_sequence_to_chat(bot, chat_id: int | str, chunks: list[str]) -> None:
+async def _send_text_sequence_to_chat(
+    bot,
+    chat_id: int | str,
+    chunks: list[str],
+    *,
+    user_id: int,
+) -> None:
     """
     Отправляет последовательность текстов в указанный чат (канал).
     """
     for chunk in chunks:
         if not chunk or not chunk.strip():
             continue
-        await bot.send_message(chat_id=chat_id, text=chunk.strip(), parse_mode="HTML")
+        sent = await _try_send_with_flood_control(
+            send_coro_factory=lambda: bot.send_message(chat_id=chat_id, text=chunk.strip(), parse_mode="HTML"),
+            user_id=user_id,
+            bot=bot,
+            context="broadcast_text_sequence",
+            notify_user=True,
+        )
+        if not sent:
+            return
+        await asyncio.sleep(TELEGRAM_SEND_DELAY_SEC)
 
 
 async def broadcast_post_to_channel(
@@ -1042,11 +1259,22 @@ async def broadcast_post_to_channel(
         
         # Отправляем статистику
         try:
-            await bot.send_message(
-                chat_id=working_chat_id,
-                text=stats_message,
-                parse_mode="HTML",
+            sent_stats = await _try_send_with_flood_control(
+                send_coro_factory=lambda: bot.send_message(
+                    chat_id=working_chat_id,
+                    text=stats_message,
+                    parse_mode="HTML",
+                ),
+                user_id=user_id,
+                bot=bot,
+                context="broadcast_stats_message",
+                notify_user=True,
             )
+            if not sent_stats:
+                logger.warning(
+                    "Не удалось отправить статистику в чат %s (flood-limit или ошибка). Продолжаем отправку основного поста.",
+                    working_chat_id,
+                )
         except Exception as stats_exc:
             logger.warning(
                 "Не удалось отправить статистику в чат %s: %s. Продолжаем отправку основного поста.",
@@ -1161,23 +1389,50 @@ async def broadcast_post_to_channel(
     try:
         main_images = (image_urls or [])[:4]
         if main_images:
-            album_sent = await _send_media_block_to_chat(bot, working_chat_id, main_images, caption_text)
+            album_sent = await _send_media_block_to_chat(
+                bot,
+                working_chat_id,
+                main_images,
+                caption_text,
+                user_id=user_id,
+            )
             if not album_sent:
-                await _send_text_sequence_to_chat(bot, working_chat_id, text_chunks)
+                await _send_text_sequence_to_chat(
+                    bot,
+                    working_chat_id,
+                    text_chunks,
+                    user_id=user_id,
+                )
                 return
 
             remaining_text = text_chunks[1:] if len(text_chunks) > 1 else []
             if remaining_text:
-                await _send_text_sequence_to_chat(bot, working_chat_id, remaining_text)
+                await _send_text_sequence_to_chat(
+                    bot,
+                    working_chat_id,
+                    remaining_text,
+                    user_id=user_id,
+                )
 
             remaining_images = (image_urls or [])[len(main_images):]
             for i in range(0, len(remaining_images), 10):
                 batch = remaining_images[i:i + 10]
-                sent = await _send_media_block_to_chat(bot, working_chat_id, batch, None)
+                sent = await _send_media_block_to_chat(
+                    bot,
+                    working_chat_id,
+                    batch,
+                    None,
+                    user_id=user_id,
+                )
                 if not sent:
                     break
         else:
-            await _send_text_sequence_to_chat(bot, working_chat_id, text_chunks)
+            await _send_text_sequence_to_chat(
+                bot,
+                working_chat_id,
+                text_chunks,
+                user_id=user_id,
+            )
 
         _log_json(
             "info",
