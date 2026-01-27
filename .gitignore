@@ -68,6 +68,8 @@ cookies/szwego_cookies.json
 scripts/*.json
 data/user_settings.json
 data/*.json
+data/*
+data/backup_before_migration/
 logs/
 other/
 
@@ -76,3 +78,6 @@ backups/
 *.tar.gz
 bot_backup_*.tar.gz
 openai_gateway/
+
+cookies/szwego_users/*.json
+

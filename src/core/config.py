@@ -186,6 +186,45 @@ class Settings(BaseSettings):
     # “Запас” в секундах: считаем токен истёкшим немного заранее, чтобы не ловить граничные состояния
     SZWEGO_TOKEN_EXPIRE_GRACE_SEC: int = 60
 
+    # Szwego (авторизация через логин/пароль)
+    SZWEGO_AUTH_COOKIES_DIR: str = "cookies/szwego_users"  # Папка для cookies-файлов пользователей
+    SZWEGO_AUTH_ENCRYPTION_KEY: str = ""  # Fernet-ключ для шифрования логина/пароля (base64)
+    SZWEGO_LOGIN_URL: str = "https://www.szwego.com"  # URL страницы входа
+    SZWEGO_LOGIN_USERNAME_SELECTOR: str = "input[name='phoneNumber']"  # CSS-селектор поля логина
+    SZWEGO_LOGIN_PASSWORD_SELECTOR: str = "input[name='password']"  # CSS-селектор поля пароля
+    SZWEGO_LOGIN_SUBMIT_SELECTOR: str = "div.app-login__btn"  # CSS-селектор кнопки входа
+    SZWEGO_LOGIN_SUCCESS_SELECTOR: str = ""  # CSS-селектор, показывающий успешный вход
+    SZWEGO_LOGIN_SUCCESS_URL_PART: str = ""  # Часть URL, указывающая на успешный вход
+    SZWEGO_AUTH_TIMEOUT_SEC: int = 120  # Таймаут ожидания успешного входа
+    SZWEGO_AUTH_REQUIRED_COOKIES: str = "token,JSESSIONID"  # Какие cookies считаем признаком успешного входа
+
+    # Режим работы браузера при авторизации Szwego
+    # True  — headless (невидимый браузер, рекомендовано для Ubuntu Server)
+    # False — обычный режим (полезно при отладке на Windows 11)
+    SZWEGO_PLAYWRIGHT_HEADLESS: bool = True
+
+    # Пул User-Agent строк для авторизации Szwego.
+    # Значение читается как список строк, разделённых запятыми.
+    # Если не задано, используются дефолтные значения ниже.
+    # Пример в .env:
+    #   SZWEGO_UA_POOL="Mozilla/5.0 ... Chrome/120...,Mozilla/5.0 ... Firefox/122..."
+    SZWEGO_UA_POOL: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36,"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36,"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36,"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0,"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    # Szwego (капча-слайдер)
+    SZWEGO_CAPTCHA_CONTAINER_SELECTOR: str = "#slideBgWrap"  # Контейнер капчи (если пусто, считаем, что капчи нет)
+    SZWEGO_CAPTCHA_FRAME_SELECTOR: str = ""  # Селектор iframe, если капча внутри фрейма
+    SZWEGO_CAPTCHA_BG_SELECTOR: str = "#slideBg"  # Селектор фона капчи
+    SZWEGO_CAPTCHA_PIECE_SELECTOR: str = "#slideBlock"  # Селектор фрагмента пазла
+    SZWEGO_CAPTCHA_SLIDER_SELECTOR: str = "#tcaptcha_drag_thumb"  # Селектор ползунка
+    SZWEGO_CAPTCHA_SUCCESS_SELECTOR: str = ""  # Селектор, который появляется после успешной капчи
+    SZWEGO_CAPTCHA_MAX_ATTEMPTS: int = 3  # Максимум попыток решения капчи
+
     # Мониторинг токена Szwego (фоновые проверки и алерты админу)
     SZWEGO_MONITOR_ENABLED: bool = True
     SZWEGO_MONITOR_INTERVAL_SEC: int = 3600  # раз в час
@@ -193,6 +232,13 @@ class Settings(BaseSettings):
     SZWEGO_ALERT_MIN_INTERVAL_SEC: int = 6 * 3600  # не чаще 1 раза в 6 часов (анти-спам)
     # Опционально: URL товара для “пинга” API, если хотите проверять не только expires, но и реальную авторизацию
     SZWEGO_HEALTHCHECK_URL: str = ""
+
+    # Уведомления по результатам авторизации Szwego
+    # none   — не отправлять
+    # all    — отправлять все (успехи и ошибки)
+    # errors — только неудачные попытки
+    # Уведомления отправляются в ADMIN_CHAT_ID (если задан)
+    SZWEGO_ADMIN_NOTIFY_MODE: str = "errors"
 
     # Постобработка текста поста через отдельную LLM-модель
     # ВАЖНО:

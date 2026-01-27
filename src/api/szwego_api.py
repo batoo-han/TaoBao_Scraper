@@ -68,24 +68,73 @@ class SzwegoApiClient:
     def __init__(
         self,
         cookies_file: str | Path | None = None,
+        cookies_payload: dict | None = None,
+        user_agent: str | None = None,
         base_url: str | None = None,
         timeout_sec: float | None = None,
         trans_lang: str | None = None,
     ) -> None:
-        self.cookies_file = Path(
-            cookies_file
-            or getattr(settings, "SZWEGO_COOKIES_FILE", "")
-            or "cookies/szwego_cookies.json"
-        )
         self.base_url = (base_url or getattr(settings, "SZWEGO_BASE_URL", "") or "https://www.szwego.com").rstrip("/")
         self.timeout_sec = float(timeout_sec or getattr(settings, "SZWEGO_TIMEOUT", 30.0) or 30.0)
         self.trans_lang = (trans_lang or getattr(settings, "SZWEGO_TRANS_LANG", "") or "en").strip() or "en"
 
-        self._creds = self._load_cookies_and_user_agent(self.cookies_file)
+        # Приоритет: cookies_payload/user_agent (из БД) → cookies_file (legacy).
+        if cookies_payload and user_agent:
+            self._creds = self._parse_cookies_and_user_agent(cookies_payload, user_agent)
+        else:
+            self.cookies_file = Path(
+                cookies_file
+                or getattr(settings, "SZWEGO_COOKIES_FILE", "")
+                or "cookies/szwego_cookies.json"
+            )
+            self._creds = self._load_cookies_and_user_agent(self.cookies_file)
 
     # ---------------------------------------------------------------------
     # Загрузка cookies/UA
     # ---------------------------------------------------------------------
+    @staticmethod
+    def _parse_cookies_and_user_agent(cookies_payload: dict, user_agent: str) -> SzwegoCredentials:
+        """
+        Парсит cookies и user-agent из готового payload (из БД).
+
+        Формат cookies_payload (как в szwego_auth.save_session):
+        {
+          "cookies": [ { "name": "...", "value": "...", ... }, ... ],
+          "user_agent": "...",
+          "saved_at": ...,
+          "url": ...
+        }
+        """
+        cookies_list = cookies_payload.get("cookies", [])
+        if not isinstance(cookies_list, list):
+            raise SzwegoApiError("cookies_payload должен содержать список cookies")
+
+        cookies: dict[str, str] = {}
+        token_expires_at: int | None = None
+        for c in cookies_list:
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name") or "").strip()
+            value = str(c.get("value") or "").strip()
+            if name and value:
+                cookies[name] = value
+            if name == "token":
+                try:
+                    raw_expires = c.get("expires")
+                    if raw_expires:
+                        token_expires_at = int(raw_expires)
+                except (ValueError, TypeError):
+                    pass
+
+        if not cookies:
+            raise SzwegoApiError("Не найдено ни одного валидного cookie в cookies_payload")
+
+        return SzwegoCredentials(
+            cookies=cookies,
+            user_agent=user_agent.strip(),
+            token_expires_at=token_expires_at,
+        )
+
     @staticmethod
     def _load_cookies_and_user_agent(path: Path) -> SzwegoCredentials:
         """

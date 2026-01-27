@@ -100,6 +100,10 @@ class Scraper:
         user_price_mode: str | None = None,
         is_admin: bool = False,
         cache_stats: CacheStats | None = None,
+        szwego_cookies_file: str | None = None,
+        szwego_user_id: int | None = None,
+        szwego_cookies_payload: dict | None = None,
+        szwego_user_agent: str | None = None,
     ) -> tuple[str, list[str]] | tuple[str, list[str], TokensUsage]:
         """
         Собирает информацию о товаре по URL, генерирует структурированный контент
@@ -112,6 +116,8 @@ class Scraper:
             exchange_rate (float, optional): Курс обмена для рубля
             user_price_mode (str, optional): Режим цен для пользователя (simple/advanced/None → использовать глобальный)
             is_admin (bool, optional): Является ли пользователь администратором (для детализированных ошибок)
+            szwego_cookies_file (str, optional): Путь к cookies-файлу пользователя для Szwego
+            szwego_user_id (int, optional): ID пользователя (для логов и диагностики Szwego)
 
         Returns:
             tuple: Кортеж, содержащий:
@@ -155,9 +161,20 @@ class Scraper:
         elif platform == Platform.SZWEGO:
             # Szwego: работаем через API (быстро, без браузера), используя заранее подготовленные cookies+UA.
             # Важно: cookies будут периодически протухать и их нужно обновлять вручную на сервере.
-            logger.info("Обработка Szwego через API")
+            if szwego_user_id:
+                logger.info("Обработка Szwego через API (user_id=%s)", szwego_user_id)
+            else:
+                logger.info("Обработка Szwego через API")
             from src.api.szwego_api import SzwegoApiClient
-            szwego_client = SzwegoApiClient()
+            # Приоритет: cookies_payload/UA из БД → cookies_file (legacy) → глобальный файл.
+            if szwego_cookies_payload and szwego_user_agent:
+                szwego_client = SzwegoApiClient(
+                    cookies_payload=szwego_cookies_payload,
+                    user_agent=szwego_user_agent,
+                )
+            else:
+                cookies_file = szwego_cookies_file or getattr(settings, "SZWEGO_COOKIES_FILE", "")
+                szwego_client = SzwegoApiClient(cookies_file=cookies_file)
             api_response = await szwego_client.fetch_product(url)
             logger.info(
                 "Ответ от Szwego API: code=%s, msg=%s",
@@ -320,6 +337,8 @@ class Scraper:
         if settings.CACHE_ENABLED and cache_stats:
             try:
                 # Формируем ключ кэша на основе API-ответа и настроек пользователя
+                # ВАЖНО: для SZWEGO api_response имеет структуру {"code": 200, "msg": "success", "data": {...}}
+                # build_cache_key должен правильно обработать эту структуру через normalize_api_response_for_cache
                 user_settings_for_cache = {
                     "signature": signature,
                     "currency": currency,
@@ -327,6 +346,16 @@ class Scraper:
                     "exchange_rate": exchange_rate,
                 }
                 cache_key = build_cache_key(api_response, user_settings_for_cache)
+                logger.info(f"Cache key generated for platform={platform}: {cache_key[:50]}...")
+                
+                # Отладочное логирование для SZWEGO: проверяем структуру api_response
+                if platform == Platform.SZWEGO and settings.DEBUG_MODE:
+                    import json as json_module
+                    api_response_keys = list(api_response.keys()) if isinstance(api_response, dict) else []
+                    data_keys = list(api_response.get("data", {}).keys()) if isinstance(api_response.get("data"), dict) else []
+                    logger.debug(f"[SZWEGO Cache Debug] api_response keys: {api_response_keys}")
+                    logger.debug(f"[SZWEGO Cache Debug] data keys: {data_keys}")
+                    logger.debug(f"[SZWEGO Cache Debug] user_settings: {user_settings_for_cache}")
                 
                 # Проверяем кэш
                 redis_client = get_redis_client()
@@ -956,10 +985,10 @@ class Scraper:
                     cache_data,
                     expire=settings.CACHE_TTL_SECONDS
                 )
-                logger.debug(f"Cache SAVED for key: {cache_key[:50]}...")
+                logger.info(f"Cache SAVED for platform={platform}, key: {cache_key[:50]}...")
             except Exception as cache_error:
                 # Ошибка сохранения кэша не должна влиять на результат
-                logger.warning(f"Ошибка при сохранении в кэш: {cache_error}", exc_info=True)
+                logger.warning(f"Ошибка при сохранении в кэш для platform={platform}: {cache_error}", exc_info=True)
 
         # Возвращаем результат с статистикой токенов, если она есть
         total_tokens_usage = self._current_tokens_usage or TokensUsage()

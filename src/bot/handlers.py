@@ -7,6 +7,7 @@ import uuid
 import json
 import contextlib
 from typing import Callable, Awaitable, Any
+from pathlib import Path
 from collections import deque
 from aiogram import Router, F
 from aiogram.types import (
@@ -33,6 +34,7 @@ import src.bot.error_handler as error_handler_module
 from src.services.user_settings import get_user_settings_service
 from src.services.rate_limit import RateLimitService
 from src.services.admin_settings import AdminSettingsService
+from src.services.szwego_auth import get_szwego_auth_service
 from src.services.access_control import (
     access_control_service,
     is_admin_user,
@@ -173,12 +175,18 @@ user_settings_service = get_user_settings_service()
 rate_limit_service = RateLimitService(user_settings_service)
 # Инициализация админских настроек (для управления глобальными лимитами)
 admin_settings_service = AdminSettingsService()
+# Инициализация сервиса авторизации Szwego
+szwego_auth_service = get_szwego_auth_service()
 
 
 class SettingsState(StatesGroup):
     """Состояния для меню настроек"""
     waiting_signature = State()
     waiting_exchange_rate = State()
+    waiting_szwego_login = State()
+    waiting_szwego_password = State()
+    waiting_szwego_action = State()
+    waiting_szwego_cancel_confirm = State()
 
 
 class AccessState(StatesGroup):
@@ -212,6 +220,10 @@ async def build_settings_menu_keyboard(user_id: int | None = None) -> ReplyKeybo
     mini_app_url = (getattr(settings, "MINI_APP_URL", "") or "").strip()
     if mini_app_url:
         rows.append([KeyboardButton(text="🧩 Mimi App", web_app=WebAppInfo(url=mini_app_url))])
+
+    # Кнопка SZWEGO — только если платформа включена (подменю внутри)
+    if getattr(settings, "ENABLE_SZWEGO", False):
+        rows.append([KeyboardButton(text="🔐 Авторизация в SZWEGO")])
 
     rows.append([KeyboardButton(text="✍️ Изменить подпись")])
     
@@ -315,13 +327,25 @@ def format_settings_summary(user_settings, limits_snapshot: dict | None = None) 
     return summary
 
 
-async def ensure_access(message: Message) -> bool:
+async def ensure_access(message_or_callback: Message | CallbackQuery) -> bool:
     """
     Проверяет, есть ли у пользователя доступ к боту.
     Администраторы всегда имеют доступ.
     При отказе отправляет пользователю понятное сообщение.
+    
+    Args:
+        message_or_callback: Message или CallbackQuery объект
     """
-    user = message.from_user
+    # Извлекаем Message из CallbackQuery, если нужно
+    if isinstance(message_or_callback, CallbackQuery):
+        if message_or_callback.message is None:
+            return False
+        message = message_or_callback.message
+        user = message_or_callback.from_user
+    else:
+        message = message_or_callback
+        user = message.from_user
+    
     user_id = user.id
     username = user.username or ""
 
@@ -344,8 +368,8 @@ async def ensure_access(message: Message) -> bool:
     support_suffix = f" @{support_nick}" if support_nick else ""
 
     text = (
-        "⛔ Доступ к этому боту ограничен.\n\n"
-        f"{reason or 'Вы сейчас не можете пользоваться ботом.'}\n\n"
+        "⛔️ Доступ к этому боту ограничен.\n\n"
+        f"{reason or 'Вашему аккаунту не предоставлен доступ.'}\n\n"
         f"Если вы считаете, что это ошибка, обратитесь к администратору{support_suffix}."
     )
     await message.answer(text)
@@ -1583,6 +1607,174 @@ async def open_settings_menu(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(F.text == "🔐 Авторизация в SZWEGO")
+async def show_szwego_auth_menu(message: Message, state: FSMContext) -> None:
+    """
+    Показывает подменю авторизации SZWEGO с опциями.
+    """
+    await _delete_user_message(message)
+    if not await ensure_access(message):
+        return
+    if not getattr(settings, "ENABLE_SZWEGO", False):
+        await message.answer("Платформа Szwego отключена администратором.")
+        return
+
+    # Создаём inline-клавиатуру с опциями
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 Ввести логин/пароль", callback_data="szwego_auth_start")],
+        [InlineKeyboardButton(text="📊 Статус авторизации", callback_data="szwego_auth_status")],
+        [InlineKeyboardButton(text="ℹ️ О авторизации SZWEGO", callback_data="szwego_auth_help")],
+        [InlineKeyboardButton(text="🗑️ Отмена авторизации", callback_data="szwego_auth_cancel")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="szwego_auth_back")],
+    ])
+
+    await message.answer(
+        "🔐 <b>Авторизация в SZWEGO</b>\n\n"
+        "Выберите действие:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "szwego_auth_start")
+async def start_szwego_auth(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Запускает сценарий авторизации в Szwego (логин/пароль).
+    """
+    await callback.answer()
+    if not await ensure_access(callback):
+        return
+    if not getattr(settings, "ENABLE_SZWEGO", False):
+        await callback.message.answer("Платформа Szwego отключена администратором.")
+        return
+
+    user_id = callback.from_user.id
+    auth = await szwego_auth_service.get_auth(user_id)
+
+    # Объясняем пользователю, как обрабатываются данные и даём возможность отмены.
+    text_parts = [
+        "🔐 <b>Авторизация в SZWEGO</b>",
+        "",
+        "Ваши логин и пароль будут сохранены <b>только в зашифрованном виде</b> "
+        "и используются исключительно для автоматического входа в SZWEGO.",
+        "Даже обслуживающий персонал бота не может прочитать эти данные.",
+        "",
+    ]
+    if auth and auth.login_enc:
+        text_parts.append(
+            "Сейчас у вас уже есть сохранённые данные авторизации. "
+            "Вы можете ввести новый логин/пароль, чтобы обновить авторизацию, "
+            "или отправить «Отмена», чтобы прервать процесс."
+        )
+    else:
+        text_parts.append(
+            "Сначала введите логин от SZWEGO.\n"
+            "Если передумали, просто отправьте сообщение «Отмена»."
+        )
+
+    await callback.message.answer("\n".join(text_parts), parse_mode="HTML")
+    await callback.message.answer("🔐 Введите логин от SZWEGO или отправьте «Отмена» для выхода.")
+    await state.set_state(SettingsState.waiting_szwego_login)
+
+
+@router.message(SettingsState.waiting_szwego_login)
+async def handle_szwego_login(message: Message, state: FSMContext) -> None:
+    """
+    Получает логин пользователя для Szwego.
+    """
+    if not await ensure_access(message):
+        return
+    text = (message.text or "").strip()
+    if text.lower() == "отмена":
+        await state.clear()
+        await message.answer("❌ Авторизация SZWEGO отменена по вашему запросу.")
+        return
+    if not text:
+        await message.answer("Логин не может быть пустым. Попробуйте ещё раз или отправьте «Отмена».")
+        return
+    await state.update_data(szwego_login=text)
+    await state.set_state(SettingsState.waiting_szwego_password)
+    await message.answer("🔐 Теперь введите пароль от SZWEGO или отправьте «Отмена» для отмены.")
+
+
+@router.message(SettingsState.waiting_szwego_password)
+async def handle_szwego_password(message: Message, state: FSMContext) -> None:
+    """
+    Получает пароль и запускает авторизацию через Playwright.
+    """
+    await _delete_user_message(message)
+    if not await ensure_access(message):
+        return
+    password_text = (message.text or "").strip()
+    if password_text.lower() == "отмена":
+        await state.clear()
+        await message.answer("❌ Авторизация SZWEGO отменена по вашему запросу.")
+        return
+    if not password_text:
+        await message.answer("Пароль не может быть пустым. Попробуйте ещё раз или отправьте «Отмена».")
+        return
+
+    data = await state.get_data()
+    login = (data or {}).get("szwego_login")
+    if not login:
+        await message.answer("Не удалось получить логин. Начните авторизацию заново.")
+        await state.clear()
+        return
+
+    user_id = message.from_user.id
+    username = message.from_user.username or None
+
+    # Сначала сохраняем логин/пароль в зашифрованном виде.
+    await szwego_auth_service.save_credentials(
+        user_id=user_id,
+        username=username,
+        login=login,
+        password=password_text,
+    )
+
+    await message.answer(
+        "⏳ Данные сохранены. Выполняю авторизацию в SZWEGO и попытку пройти капчу.\n"
+        "Это может занять до 1–2 минут.\n\n"
+        "Вы можете подождать результат здесь или позже посмотреть статус в настройках "
+        "через пункт «📊 Статус авторизации SZWEGO»."
+    )
+
+    result = await szwego_auth_service.authorize_user(
+        user_id=user_id,
+        username=username,
+        login=login,
+        password=password_text,
+    )
+
+    # Формируем понятное сообщение пользователю на основе статуса.
+    if result.success:
+        await message.answer(
+            "✅ Авторизация в SZWEGO успешна. Cookies и User-Agent сохранены.\n\n"
+            "Теперь можно пользоваться SZWEGO при запросе товаров."
+        )
+    else:
+        status_code = result.status_code or "unknown_error"
+        user_message = {
+            "service_unavailable": "SZWEGO временно недоступен. Попробуйте позже.",
+            "invalid_credentials": "Логин или пароль не подходят. Проверьте данные и попробуйте снова.",
+            "captcha_failed": (
+                "Авторизация закончилась ошибкой: не удалось пройти капчу. "
+                "Попробуйте позже или обратитесь к администратору."
+            ),
+            "unknown_error": (
+                "Авторизация закончилась ошибкой. "
+                "Попробуйте позже или обратитесь к администратору."
+            ),
+        }.get(status_code, "Авторизация завершилась ошибкой. Попробуйте позже.")
+
+        await message.answer(
+            f"❌ {user_message}\n\n"
+            "Вы можете повторить попытку позже через меню настроек."
+        )
+
+    await state.clear()
+
+
 @router.message(F.text == "🔙 В главное меню")
 async def back_to_main_menu(message: Message, state: FSMContext) -> None:
     """Обработчик возврата в главное меню"""
@@ -1593,6 +1785,176 @@ async def back_to_main_menu(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Вы вернулись в главное меню.",
         reply_markup=build_main_menu_keyboard()
+    )
+
+
+@router.callback_query(F.data == "szwego_auth_status")
+async def show_szwego_auth_status(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Показывает пользователю текущий статус авторизации в SZWEGO без техподробностей.
+    """
+    await callback.answer()
+    if not await ensure_access(callback):
+        return
+    if not getattr(settings, "ENABLE_SZWEGO", False):
+        await callback.message.answer("Платформа SZWEGO сейчас отключена администратором.")
+        return
+
+    auth = await szwego_auth_service.get_auth(callback.from_user.id)
+    if not auth:
+        await callback.message.answer(
+            "🔐 Для вас ещё не настроена авторизация в SZWEGO.\n\n"
+            "Откройте настройки и выберите пункт «Авторизация в SZWEGO», чтобы начать."
+        )
+        return
+
+    status = (auth.last_status or "").strip()
+    if not status:
+        await callback.message.answer(
+            "Статус авторизации в SZWEGO пока не известен.\n\n"
+            "Попробуйте пройти авторизацию через пункт «Авторизация в SZWEGO»."
+        )
+        return
+
+    # Преобразуем технический код статуса в человеко‑понятный текст.
+    human_status = {
+        "success": "успешна",
+        "invalid_credentials": "неуспешна: логин или пароль не подходят",
+        "captcha_failed": "неуспешна: не удалось пройти капчу, попробуйте позже",
+        "service_unavailable": "неуспешна: сервис SZWEGO временно недоступен",
+        "unknown_error": "неуспешна: произошла непредвиденная ошибка",
+    }.get(status, status)
+
+    when = ""
+    if getattr(auth, "last_status_at", None):
+        when = f"\nВремя последнего обновления: {auth.last_status_at} (UTC)."
+
+    await callback.message.answer(
+        "📊 <b>Статус авторизации</b>\n\n"
+        f"Текущий статус: <b>{human_status}</b>."
+        f"{when}",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "szwego_auth_help")
+async def szwego_auth_help(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Краткая справка: зачем нужна авторизация SZWEGO и как она работает в боте.
+    """
+    await callback.answer()
+    if not await ensure_access(callback):
+        return
+    if not getattr(settings, "ENABLE_SZWEGO", False):
+        await callback.message.answer("Платформа SZWEGO сейчас отключена администратором.")
+        return
+
+    await callback.message.answer(
+        "ℹ️ <b>О авторизации SZWEGO</b>\n\n"
+        "Авторизация нужна, чтобы бот мог выполнять запросы к сайту SZWEGO от вашего имени.\n"
+        "Процесс в боте выглядит так:\n"
+        "1) В меню «⚙️ Настройки» выберите пункт «🔐 Авторизация в SZWEGO».\n"
+        "2) Выберите «🔑 Ввести логин/пароль» и введите данные (вы можете отправить «Отмена» в любой момент).\n"
+        "3) Бот сохранит данные <b>только в зашифрованном виде</b> и попытается автоматически войти на сайт, "
+        "в том числе пройти слайдер‑капчу.\n"
+        "4) После успешной авторизации бот сохранит cookies и User‑Agent и будет использовать их "
+        "для последующих запросов SZWEGO.\n\n"
+        "Ваши данные используются только для автоматической авторизации и <b>не передаются третьим лицам</b>. "
+        "Каждый пользователь работает только со своей учётной записью SZWEGO.",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "szwego_auth_cancel")
+async def start_szwego_auth_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Запускает процесс отмены авторизации с подтверждением.
+    """
+    await callback.answer()
+    if not await ensure_access(callback):
+        return
+    if not getattr(settings, "ENABLE_SZWEGO", False):
+        await callback.message.answer("Платформа SZWEGO сейчас отключена администратором.")
+        return
+
+    user_id = callback.from_user.id
+    auth = await szwego_auth_service.get_auth(user_id)
+    
+    if not auth or not auth.login_enc:
+        await callback.message.answer(
+            "❌ У вас нет сохранённой авторизации SZWEGO для удаления."
+        )
+        return
+
+    # Предупреждаем пользователя и запрашиваем подтверждение
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить всё", callback_data="szwego_auth_cancel_confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="szwego_auth_back")],
+    ])
+
+    await callback.message.answer(
+        "⚠️ <b>Внимание!</b>\n\n"
+        "Вы собираетесь удалить все данные авторизации SZWEGO:\n"
+        "• Логин и пароль\n"
+        "• Cookies и User-Agent\n"
+        "• Статус авторизации\n\n"
+        "После удаления вам потребуется заново пройти авторизацию для использования SZWEGO.\n\n"
+        "<b>Вы уверены, что хотите продолжить?</b>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "szwego_auth_cancel_confirm")
+async def confirm_szwego_auth_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Подтверждает и выполняет удаление всех данных авторизации SZWEGO.
+    """
+    await callback.answer()
+    if not await ensure_access(callback):
+        return
+    if not getattr(settings, "ENABLE_SZWEGO", False):
+        await callback.message.answer("Платформа SZWEGO сейчас отключена администратором.")
+        return
+
+    user_id = callback.from_user.id
+    
+    try:
+        # Удаляем запись из БД
+        from sqlalchemy import select, delete
+        from src.db.models import SzwegoAuth
+        
+        async for session in get_session():
+            result = await session.execute(select(SzwegoAuth).where(SzwegoAuth.user_id == user_id))
+            auth = result.scalar_one_or_none()
+            if auth:
+                await session.delete(auth)
+                await session.commit()
+                break
+        
+        await callback.message.answer(
+            "✅ <b>Авторизация SZWEGO удалена</b>\n\n"
+            "Все ваши данные авторизации (логин, пароль, cookies, User-Agent) были удалены из системы.\n\n"
+            "Для использования SZWEGO вам потребуется заново пройти авторизацию через меню настроек.",
+            parse_mode="HTML"
+        )
+    except Exception as exc:
+        logger.error("Ошибка при удалении авторизации SZWEGO для user_id=%s: %s", user_id, exc)
+        await callback.message.answer(
+            "❌ Произошла ошибка при удалении данных авторизации. Попробуйте позже или обратитесь к администратору."
+        )
+
+
+@router.callback_query(F.data == "szwego_auth_back")
+async def szwego_auth_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Возвращает в меню настроек.
+    """
+    await callback.answer()
+    await callback.message.answer(
+        "⚙️ <b>Настройки</b>\n\nВыберите действие:",
+        reply_markup=await build_settings_menu_keyboard(callback.from_user.id),
+        parse_mode="HTML"
     )
 
 
@@ -2778,6 +3140,24 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
         )
         # Скрапинг информации о товаре и генерация текста поста с учётом настроек пользователя
         # Добавляем общий таймаут, чтобы не зависнуть навсегда при проблемах сети/TMAPI
+        # Для Szwego используем cookies и UA пользователя, если они есть
+        szwego_cookies_payload = None
+        szwego_user_agent = None
+        if platform == Platform.SZWEGO:
+            cookies_payload, ua = await szwego_auth_service.get_user_session(user_id)
+            if cookies_payload and ua:
+                szwego_cookies_payload = cookies_payload
+                szwego_user_agent = ua
+            else:
+                # Если нет индивидуальных cookies — пытаемся использовать глобальные (legacy)
+                global_cookies = (getattr(settings, "SZWEGO_COOKIES_FILE", "") or "").strip()
+                if not global_cookies or not Path(global_cookies).exists():
+                    await message.answer(
+                        "⚠️ Для работы с SZWEGO требуется авторизация.\n\n"
+                        "Откройте меню настроек и выберите «🔐 Авторизация в SZWEGO»."
+                    )
+                    return
+
         result = await scraper.scrape_product(
             product_url,
             user_signature=user_settings.signature,
@@ -2787,6 +3167,10 @@ async def handle_product_link(message: Message, state: FSMContext) -> None:
             user_price_mode=user_settings.price_mode,
             is_admin=is_admin,
             cache_stats=cache_stats,
+            szwego_cookies_file=None,  # Legacy параметр, оставляем для совместимости
+            szwego_user_id=user_id,
+            szwego_cookies_payload=szwego_cookies_payload,
+            szwego_user_agent=szwego_user_agent,
         )
         # Обрабатываем новую сигнатуру с статистикой токенов (для OpenAI/ProxyAPI)
         # Может быть 2 элемента (старый формат), 3 элемента (с токенами) или 4 элемента (с токенами + постобработка)

@@ -47,6 +47,7 @@ class User(Base):
     # Связи
     settings = relationship("UserSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
     rate_limits = relationship("RateLimitUser", back_populates="user", cascade="all, delete-orphan")
+    szwego_auth = relationship("SzwegoAuth", back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
 class UserSettings(Base):
@@ -116,6 +117,27 @@ class AdminSettings(Base):
     per_user_monthly_limit = Column(Integer, nullable=True, comment="Глобальный месячный лимит на пользователя")
     total_daily_limit = Column(Integer, nullable=True, comment="Общий дневной лимит")
     total_monthly_limit = Column(Integer, nullable=True, comment="Общий месячный лимит")
+
+
+class SzwegoAuth(Base):
+    """Данные авторизации Szwego пользователя"""
+    __tablename__ = "szwego_auth"
+
+    user_id = Column(BigInteger, ForeignKey("users.user_id", ondelete="CASCADE"), primary_key=True, comment="Telegram user ID")
+    login_enc = Column(Text, nullable=True, comment="Зашифрованный логин")
+    password_enc = Column(Text, nullable=True, comment="Зашифрованный пароль")
+    cookies_file = Column(Text, nullable=True, comment="Путь к cookies файлу пользователя (для обратной совместимости)")
+    user_agent = Column(Text, nullable=True, comment="User-Agent, использованный при авторизации (plaintext, legacy)")
+    # Новые поля: предпочтительно храним cookies и UA в БД в зашифрованном виде.
+    cookies_encrypted = Column(Text, nullable=True, comment="Зашифрованные cookies SZWEGO (JSON)")
+    user_agent_encrypted = Column(Text, nullable=True, comment="Зашифрованный User-Agent")
+    last_status = Column(String(50), nullable=True, comment="Последний статус авторизации (success/invalid_credentials/...)")
+    last_status_at = Column(DateTime, nullable=True, comment="Время последнего обновления статуса")
+    created_at = Column(DateTime, nullable=False, server_default=func.now(), comment="Время создания")
+    updated_at = Column(Integer, nullable=True, comment="Unix timestamp последнего обновления")
+
+    # Связь
+    user = relationship("User", back_populates="szwego_auth")
 
 
 class RateLimitGlobal(Base):

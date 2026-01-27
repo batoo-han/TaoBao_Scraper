@@ -16,6 +16,9 @@ openai>=1.55.0  # Клиент для OpenAI API (async)
 pydantic>=2.0.0  # Валидация данных (требуется для pydantic-settings)
 pydantic-settings>=2.0.0  # Управление настройками через .env файл
 
+# Crypto
+cryptography>=42.0.0  # Шифрование логина/пароля для SZWEGO
+
 # SSL Certificates
 certifi  # Надёжные SSL сертификаты
 
