@@ -217,3 +217,85 @@ class RequestStats(Base):
     
     # Связь (опционально)
     # user = relationship("User", back_populates="request_stats")
+
+
+# ==================== МОДЕЛИ АДМИН-ПАНЕЛИ ====================
+
+class AdminUser(Base):
+    """
+    Пользователи админ-панели.
+    
+    Поддерживает два способа аутентификации:
+    1. Логин/пароль (классический)
+    2. Telegram Login Widget (привязка к Telegram ID)
+    """
+    __tablename__ = "admin_users"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="ID пользователя админки")
+    telegram_id = Column(BigInteger, unique=True, nullable=True, comment="Telegram ID (опционально, для входа через Telegram)")
+    username = Column(String(255), unique=True, nullable=False, comment="Логин пользователя")
+    password_hash = Column(String(255), nullable=True, comment="Хэш пароля (bcrypt)")
+    email = Column(String(255), nullable=True, comment="Email пользователя")
+    display_name = Column(String(255), nullable=True, comment="Отображаемое имя")
+    # ВАЖНО:
+    # Используем String вместо SQLEnum, чтобы избежать проблем с маппингом
+    # между Python enum и PostgreSQL enum (разные регистры, кэширование и т.д.).
+    # Валидация роли происходит на уровне Pydantic-схем.
+    role = Column(
+        String(20),
+        nullable=False,
+        default="user",
+        comment="Роль пользователя (admin/user)",
+    )
+    is_active = Column(Boolean, nullable=False, default=True, comment="Активен ли аккаунт")
+    created_at = Column(DateTime, nullable=False, server_default=func.now(), comment="Время создания")
+    updated_at = Column(DateTime, nullable=True, onupdate=func.now(), comment="Время последнего обновления")
+    last_login = Column(DateTime, nullable=True, comment="Время последнего входа")
+    
+    # Связи
+    sessions = relationship("AdminSession", back_populates="user", cascade="all, delete-orphan")
+    action_logs = relationship("AdminActionLog", back_populates="user", cascade="all, delete-orphan")
+
+
+class AdminSession(Base):
+    """
+    Сессии пользователей админ-панели.
+    
+    Хранит refresh-токены для JWT аутентификации.
+    Позволяет отслеживать и инвалидировать сессии.
+    """
+    __tablename__ = "admin_sessions"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="ID сессии")
+    user_id = Column(Integer, ForeignKey("admin_users.id", ondelete="CASCADE"), nullable=False, comment="ID пользователя")
+    token_hash = Column(String(255), nullable=False, comment="Хэш refresh token (SHA-256)")
+    ip_address = Column(String(45), nullable=True, comment="IP адрес клиента (IPv4/IPv6)")
+    user_agent = Column(Text, nullable=True, comment="User-Agent браузера")
+    expires_at = Column(DateTime, nullable=False, comment="Время истечения токена")
+    created_at = Column(DateTime, nullable=False, server_default=func.now(), comment="Время создания сессии")
+    last_used_at = Column(DateTime, nullable=True, comment="Время последнего использования")
+    
+    # Связь
+    user = relationship("AdminUser", back_populates="sessions")
+
+
+class AdminActionLog(Base):
+    """
+    Журнал действий администраторов.
+    
+    Логирует все важные действия для аудита безопасности.
+    """
+    __tablename__ = "admin_action_logs"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="ID записи лога")
+    user_id = Column(Integer, ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True, comment="ID пользователя админки")
+    action = Column(String(100), nullable=False, comment="Тип действия (login, logout, update_settings, etc.)")
+    target_type = Column(String(50), nullable=True, comment="Тип объекта (user, settings, access_list, etc.)")
+    target_id = Column(String(255), nullable=True, comment="ID объекта (user_id, setting_name, etc.)")
+    details = Column(Text, nullable=True, comment="Детали действия (JSON)")
+    ip_address = Column(String(45), nullable=True, comment="IP адрес")
+    user_agent = Column(Text, nullable=True, comment="User-Agent")
+    created_at = Column(DateTime, nullable=False, server_default=func.now(), comment="Время действия")
+    
+    # Связь
+    user = relationship("AdminUser", back_populates="action_logs")
